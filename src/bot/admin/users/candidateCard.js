@@ -10,18 +10,15 @@ let deliverFn = null;
 function getCandidateHeader(status) {
   switch (status) {
     case "invited":
-      // ждет собеседования
       return "🔻 КАНДИДАТ — ОЖИДАНИЕ СОБЕСЕДОВАНИЯ (🕒)";
     case "interviewed":
-      // собеседование уже проведено, ждет решения
       return "🔻 КАНДИДАТ — СОБЕСЕДОВАНИЕ ПРОВЕДЕНО (✔️)";
     case "internship_invited":
-      // приглашен на стажировку
       return "🔻 КАНДИДАТ — ПРИГЛАШЁН НА СТАЖИРОВКУ (☑️)";
     case "cancelled":
       return "🔻 КАНДИДАТ — СОБЕСЕДОВАНИЕ ОТМЕНЕНО (❌)";
-    case "declined":
-      return "🔻 КАНДИДАТ — ОТКАЗАНО (❌)";
+    case "rejected":
+      return "🔻 КАНДИДАТ — КАНДИДАТ ОТКЛОНЁН (❌)"; // новый статус как ты описал
     default:
       return "🔻 КАНДИДАТ";
   }
@@ -194,6 +191,15 @@ FROM candidates c
   text += `• *Место собеседования:* ${placeTitle}\n`;
   text += `• *Ответственный:* ${adminName}\n\n`;
 
+  // --- Блок причины отказа для отклонённого кандидата ---
+  if (cand.status === "rejected") {
+    const reason = cand.decline_reason || "не указана";
+
+    text += "────────────────────────────────\n";
+    text += "ПРИЧИНА ОТКАЗА ❌\n";
+    text += `Причина: ${reason}\n\n`;
+  }
+
   // 🔹 Замечания — только если собес уже прошёл / стажировка
   if (cand.status === "interviewed" || cand.status === "internship_invited") {
     text += "🔹 *Замечания*\n";
@@ -261,7 +267,7 @@ FROM candidates c
     rows.push([
       Markup.button.callback(
         "❌ отказать кандидату",
-        `lk_cand_decline_${cand.id}`
+        `lk_cand_decline_reason_${candidateId}`
       ),
     ]);
   } else if (cand.status === "interviewed") {
@@ -290,6 +296,21 @@ FROM candidates c
       Markup.button.callback(
         "❌ отказать кандидату",
         `lk_cand_decline_${cand.id}`
+      ),
+    ]);
+  } else if (cand.status === "rejected") {
+    // Кандидат отклонён
+    rows.push([
+      Markup.button.callback(
+        "♻️ восстановить кандидата",
+        `lk_cand_restore_confirm_${cand.id}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        "🗑️ перенести в отложенные",
+        `lk_cand_postpone_${cand.id}`
       ),
     ]);
   }

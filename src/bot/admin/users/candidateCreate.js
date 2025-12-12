@@ -1300,13 +1300,6 @@ function registerCandidateCreate(bot, ensureUser, logError, deliver) {
         return;
       }
 
-      // уведомляем ответственного
-      try {
-        await notifyAdminAboutInterview(ctx.telegram, adminId, candidateId);
-      } catch (err) {
-        logError("notifyAdminAboutInterview", err);
-      }
-
       await ctx
         .answerCbQuery("✅ Кандидат создан.", { show_alert: false })
         .catch(() => {});

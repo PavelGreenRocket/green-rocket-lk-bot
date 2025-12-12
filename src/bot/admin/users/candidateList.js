@@ -3,6 +3,7 @@
 const { Markup } = require("telegraf");
 const pool = require("../../../db/pool");
 const { deliver } = require("../../../utils/renderHelpers");
+const { showCandidateCardLk } = require("./candidateCard");
 
 // Фильтры вынесены в отдельный модуль
 const {
@@ -10,6 +11,8 @@ const {
   setCandidateFilters,
   resetCandidateFilters,
 } = require("./candidateFilters");
+
+const declineReasonStates = new Map(); // key: tgId, value: { candidateId }
 
 // ----------------------------------------
 // СОСТОЯНИЕ РЕДАКТИРОВАНИЯ СОТРУДНИКОВ
@@ -970,6 +973,26 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
+  bot.on("text", async (ctx, next) => {
+    try {
+      // Если админ сейчас НЕ вводит причину отказа — отдаём управление дальше,
+      // чтобы не ломать добавление кандидата и прочие сценарии.
+      const st = declineReasonStates.get(ctx.from.id);
+      if (!st) return next();
+
+      const reason = (ctx.message.text || "").trim();
+      if (!reason) return;
+
+      // Сбрасываем режим ввода причины
+      declineReasonStates.delete(ctx.from.id);
+
+      await applyCandidateDecline(ctx, st.candidateId, reason);
+    } catch (err) {
+      logError("cand_decline_text_reason", err);
+      return next();
+    }
+  });
+
   // --- ФИЛЬТРЫ ---
 
   // Открыть/закрыть фильтр
@@ -1144,6 +1167,184 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         .catch(() => {});
     } catch (err) {
       logError("lk_cand_history", err);
+    }
+  });
+
+  // ================================
+  // ОТКАЗ КАНДИДАТУ — ВЫБОР ПРИЧИНЫ
+  // ================================
+  bot.action(/^lk_cand_decline_reason_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      // Ставим режим ожидания текстовой причины
+      declineReasonStates.set(ctx.from.id, { candidateId });
+
+      const text =
+        "❓ <b>Укажите причину отказа кандидату</b>\n\n" +
+        "Вы можете выбрать причину кнопкой ниже\n" +
+        "или написать её текстом сообщением.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🚫 не пришёл и не предупредил",
+            `lk_cand_decline_apply_${candidateId}_no_show`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "📩 предупредил, что не придёт",
+            `lk_cand_decline_apply_${candidateId}_warned`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "🤔 странное поведение",
+            `lk_cand_decline_apply_${candidateId}_weird`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Отмена",
+            `lk_cand_decline_cancel_${candidateId}`
+          ),
+        ],
+      ]);
+
+      await ctx.editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard.reply_markup,
+      });
+    } catch (err) {
+      logError("lk_cand_decline_reason", err);
+    }
+  });
+
+  bot.action(/^lk_cand_decline_cancel_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_decline_cancel", err);
+    }
+  });
+
+  async function applyCandidateDecline(ctx, candidateId, reason) {
+    await pool.query(
+      `
+      UPDATE candidates
+         SET status = 'rejected',
+             decline_reason = $2,
+             closed_from_status = status,
+             declined_at = NOW()
+       WHERE id = $1
+    `,
+      [candidateId, reason]
+    );
+
+    await showCandidateCardLk(ctx, candidateId, { edit: true });
+  }
+
+  bot.action(/^lk_cand_decline_apply_(\d+)_no_show$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    declineReasonStates.delete(ctx.from.id);
+
+    await applyCandidateDecline(
+      ctx,
+      Number(ctx.match[1]),
+      "Не пришёл и не предупредил"
+    );
+  });
+
+  bot.action(/^lk_cand_decline_apply_(\d+)_warned$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    declineReasonStates.delete(ctx.from.id);
+
+    await applyCandidateDecline(
+      ctx,
+      Number(ctx.match[1]),
+      "Предупредил, что не придёт"
+    );
+  });
+
+  bot.action(/^lk_cand_decline_apply_(\d+)_weird$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    declineReasonStates.delete(ctx.from.id);
+
+    await applyCandidateDecline(
+      ctx,
+      Number(ctx.match[1]),
+      "Странное поведение"
+    );
+  });
+  // ================================
+  // ВОССТАНОВЛЕНИЕ КАНДИДАТА
+  // ================================
+  bot.action(/^lk_cand_restore_confirm_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      const text =
+        "Вы уверены, что хотите восстановить кандидата?\n\n" +
+        "Кандидат вернётся в статус до отказа.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ Да, восстановить",
+            `lk_cand_restore_yes_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Отмена",
+            `lk_cand_restore_cancel_${candidateId}`
+          ),
+        ],
+      ]);
+
+      await ctx.editMessageText(text, keyboard);
+    } catch (err) {
+      logError("lk_cand_restore_confirm", err);
+    }
+  });
+
+  bot.action(/^lk_cand_restore_cancel_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_restore_cancel", err);
+    }
+  });
+
+  bot.action(/^lk_cand_restore_yes_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      // Возвращаем в статус до отказа (если он сохранён), иначе invited
+      await pool.query(
+        `
+      UPDATE candidates
+         SET status = COALESCE(closed_from_status, 'invited'),
+             decline_reason = NULL,
+             declined_at = NULL,
+             closed_from_status = NULL
+       WHERE id = $1
+      `,
+        [candidateId]
+      );
+
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_restore_yes", err);
     }
   });
 }
