@@ -177,16 +177,12 @@ async function sendInterviewInvitation(telegram, chatId, candidateId) {
     "📄 Детали собеседования:\n" +
     `• Дата: ${dateStr}\n` +
     `• Время: ${timeStr}\n` +
-    `• Кофейня: ${pointTitle}\n` +
     `• Адрес: ${pointAddress}\n` +
     `• ${responsibleLine}\n`;
 
   if (phoneDisplay) {
     text += `• Телефон для связи: ${phoneDisplay}\n`;
   }
-
-  text +=
-    "\nНажмите «🧭 Как пройти?», чтобы посмотреть адрес, ориентир и фото.\n";
 
   const buttons = [];
 

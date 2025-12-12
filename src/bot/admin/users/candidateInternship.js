@@ -431,21 +431,29 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
   if (linkedUserId && linkedTelegramId) {
     const cRes = await pool.query(
       `
-        SELECT
-          c.name,
-          c.internship_date,
-          c.internship_time_from,
-          c.internship_time_to,
-          COALESCE(tp.title, 'не указана') AS point_title,
-          COALESCE(u.full_name, 'не указан') AS mentor_name
-        FROM candidates c
-        LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
-        LEFT JOIN users u ON u.id = c.internship_admin_id
-        WHERE c.id = $1
-      `,
+    SELECT
+      c.id,
+      c.name,
+      c.age,
+      c.internship_date,
+      c.internship_time_from,
+      c.internship_time_to,
+      COALESCE(tp.title, 'не указана') AS point_title,
+      COALESCE(tp.address, '') AS point_address,
+      COALESCE(tp.landmark, '') AS point_landmark,
+      COALESCE(u.full_name, 'не указан') AS mentor_name,
+      u.position    AS mentor_position,
+      u.username    AS mentor_username,
+      u.telegram_id AS mentor_telegram_id,
+      u.work_phone  AS mentor_work_phone
+    FROM candidates c
+    LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
+    LEFT JOIN users u ON u.id = c.internship_admin_id
+    WHERE c.id = $1
+  `,
       [candidateId]
     );
-
+    if (!cRes.rows.length) return;
     const c = cRes.rows[0];
 
     let datePart = "не указана";
@@ -461,37 +469,152 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
 
     const timeFromText = c?.internship_time_from || "не указано";
     const timeToText = c?.internship_time_to || "не указано";
+
     const pointTitle = c?.point_title || "не указана";
     const mentorName = c?.mentor_name || "не указан";
 
-    const nameForText = linkedName || c?.name || "Вы";
+    const nameForText = c?.name || "Вы";
 
-    const text =
-      `${nameForText}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
-      `📄 *Детали стажировки*\n` +
-      `• *Дата:* ${datePart}\n` +
-      `• *Время:* с ${timeFromText} до ${timeToText}\n` +
-      `• *Кофейня:* ${pointTitle}\n` +
-      `• *Наставник:* ${mentorName}\n\n` +
-      "Подробнее можно посмотреть в Личном кабинете по кнопке ниже или командой /стажировка.";
+    function escapeHtml(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    // Нормализация телефона (как в приглашении на собеседование)
+    let phoneDisplay = null;
+    let phoneHref = null;
+    if (c?.mentor_work_phone) {
+      const raw = String(c.mentor_work_phone);
+      let digits = raw.replace(/\D+/g, "");
+
+      if (digits.length === 11 && digits.startsWith("8")) {
+        digits = "7" + digits.slice(1);
+      }
+
+      if (digits.length === 11 && digits.startsWith("7")) {
+        phoneHref = "+" + digits;
+        phoneDisplay = "+" + digits;
+      } else if (digits.length >= 10) {
+        phoneHref = "+" + digits;
+        phoneDisplay = "+" + digits;
+      } else {
+        phoneDisplay = raw.trim();
+      }
+    }
+
+    const pointAddress = c?.point_address || "будет добавлен позже";
+    const pointLandmark = c?.point_landmark || "будет добавлен позже";
+    const mentorPosition = c?.mentor_position || "";
+    const mentorUsername = c?.mentor_username ? `@${c.mentor_username}` : "";
+
+    let mentorLine = escapeHtml(mentorName);
+
+    let text =
+      `${escapeHtml(
+        nameForText
+      )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
+      `<b>📄 Детали стажировки</b>\n` +
+      `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
+      `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
+        timeToText
+      )}\n` +
+      `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
+      `• <b>Наставник:</b> ${mentorLine}\n`;
+
+    if (phoneDisplay) {
+      if (phoneHref) {
+        text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
+          phoneHref
+        )}">${escapeHtml(phoneDisplay)}</a>\n`;
+      } else {
+        text += `• <b>Телефон для связи:</b> ${escapeHtml(phoneDisplay)}\n`;
+      }
+    }
+
+    const keyboardRows = [];
+
+    // Telegram кнопка наставника (если есть telegram_id)
+    if (c?.mentor_telegram_id) {
+      const firstName = (mentorName || "Telegram").split(" ")[0] || "Telegram";
+      keyboardRows.push([
+        {
+          text: `✈️ Telegram ${firstName}`,
+          url: `tg://user?id=${c.mentor_telegram_id}`,
+        },
+      ]);
+    }
+
+    // Как пройти? + По оплате
+    keyboardRows.push([
+      { text: "🧭 Как пройти?", callback_data: "lk_internship_route" },
+      { text: "💰 По оплате", callback_data: "lk_internship_payment" },
+    ]);
+
+    // Отказаться
+    keyboardRows.push([
+      {
+        text: "❌ Отказаться от стажировки",
+        callback_data: "lk_internship_decline",
+      },
+    ]);
 
     await ctx.telegram
       .sendMessage(linkedTelegramId, text, {
-        parse_mode: "Markdown",
-        reply_markup: {
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: keyboardRows },
+      })
+      .catch(() => {});
+
+    // Короткое уведомление наставнику
+    if (c?.mentor_telegram_id) {
+      try {
+        const adminTextLines = [];
+        adminTextLines.push("🕒 *Новая запланированная стажировка*");
+        adminTextLines.push("");
+        adminTextLines.push(
+          `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+        );
+        adminTextLines.push(`• Дата: ${datePart}`);
+        adminTextLines.push(
+          `• Время: с ${timeFromText || "не указано"} до ${
+            timeToText || "не указано"
+          }`
+        );
+        adminTextLines.push(`• Точка: ${pointTitle}`);
+        if (pointAddress) adminTextLines.push(`• Адрес: ${pointAddress}`);
+
+        const adminKeyboard = {
           inline_keyboard: [
             [
               {
-                text: "📄 Детали стажировки",
-                callback_data: "lk_internship_details",
+                text: "👤 Открыть кандидата",
+                callback_data: `lk_cand_open_${candidateId}`,
+              },
+            ],
+            [
+              {
+                text: "📋 Мои стажировки",
+                callback_data: "lk_admin_my_internships",
               },
             ],
           ],
-        },
-      })
-      .catch(() => {});
-  }
+        };
 
+        await ctx.telegram.sendMessage(
+          c.mentor_telegram_id,
+          adminTextLines.join("\n"),
+          {
+            parse_mode: "Markdown",
+            reply_markup: adminKeyboard,
+          }
+        );
+      } catch (err) {
+        console.error("[finishInternshipInvite] notify mentor error", err);
+      }
+    }
+  }
   // 4. Возвращаемся к карточке кандидата админу
   await showCandidateCardLk(ctx, candidateId, { edit: true });
 }

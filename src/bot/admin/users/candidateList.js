@@ -345,6 +345,33 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
+  // Быстрый переход "Мои стажировки"
+  bot.action("lk_admin_my_internships", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
+        return;
+      }
+
+      const tgId = ctx.from.id;
+      const current = getCandidateFilters(tgId);
+      const next = {
+        ...current,
+        scope: "personal",
+        waiting: false,
+        arrived: false,
+        internshipInvited: true,
+        cancelled: false,
+      };
+      setCandidateFilters(tgId, next);
+
+      await showCandidatesListLk(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_admin_my_internships", err);
+    }
+  });
+
   // ----- СПИСОК СОТРУДНИКОВ -----
 
   async function showWorkersListLk(ctx, currentUser, options = {}) {

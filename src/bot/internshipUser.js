@@ -168,25 +168,87 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
     }
   });
 
-  // Кнопка "🧭 Ориентир" — пока заглушка
-  bot.action("lk_internship_orientir", async (ctx) => {
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  // Кнопка "🧭 Как пройти?"
+  bot.action("lk_internship_route", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      const text =
-        "🧭 *Ориентир*\n\n" +
-        "Позже здесь будет подробное описание, как пройти до кофейни " +
-        "и от какого ориентира удобнее заходить.";
+      const res = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.internship_point_id AS point_id,
+          COALESCE(tp.title, '')    AS point_title,
+          COALESCE(tp.address, '')  AS point_address,
+          COALESCE(tp.landmark, '') AS point_landmark
+        FROM users u
+        JOIN candidates c ON c.id = u.candidate_id
+        LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
+        WHERE u.id = $1
+          AND c.status = 'internship_invited'
+        LIMIT 1
+      `,
+        [user.id]
+      );
+
+      const row = res.rows[0];
+      if (!row) {
+        await ctx.reply("Не удалось найти данные по стажировке.");
+        return;
+      }
+
+      const pointTitle = row.point_title || "не указана";
+      const address = row.point_address || "будет добавлен позже";
+      const landmark = row.point_landmark || "будет добавлен позже";
+
+      let text = "🧭 <b>Как пройти?</b>\n\n";
+      text += `Кофейня: ${escapeHtml(pointTitle)}\n`;
+      text += `Адрес: ${escapeHtml(address)}\n`;
+      text += `Ориентир: ${escapeHtml(landmark)}\n`;
 
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback("⬅️ Назад", "lk_internship_details")],
       ]);
 
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      await deliver(
+        ctx,
+        { text, extra: { ...keyboard, parse_mode: "HTML" } },
+        { edit: true }
+      );
+
+      // Фото точки (если есть)
+      try {
+        if (row.point_id) {
+          const photosRes = await pool.query(
+            `
+            SELECT file_id
+            FROM trade_point_photos
+            WHERE trade_point_id = $1
+            ORDER BY id
+          `,
+            [row.point_id]
+          );
+
+          for (const p of photosRes.rows) {
+            if (p.file_id) {
+              await ctx.replyWithPhoto(p.file_id);
+            }
+          }
+        }
+      } catch (err) {
+        logError("lk_internship_route_photos", err);
+      }
     } catch (err) {
-      logError("lk_internship_orientir", err);
+      logError("lk_internship_route", err);
     }
   });
 
