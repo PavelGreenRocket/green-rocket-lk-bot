@@ -234,9 +234,8 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     rows.push([
       Markup.button.callback("🔼 скрыть 🔼", "lk_cand_toggle_history"),
     ]);
-    rows.push([
-      Markup.button.callback("📜 история кандидатов", "lk_cand_history"),
-    ]);
+    rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
+
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
   } else {
     rows.push([
@@ -345,6 +344,149 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await showCandidatesListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_admin_my_interviews", err);
+    }
+  });
+
+  // ================================
+  // ИСТОРИЯ (общий раздел)
+  // ================================
+
+  // Главный экран выбора: кандидаты / стажёры / сотрудники
+  bot.action("lk_history_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+
+      const text = "📜 <b>История</b>\n\n" + "Выберите раздел:";
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "👤 история кандидатов",
+            "lk_history_candidates"
+          ),
+        ],
+        [Markup.button.callback("🎓 история стажёров", "lk_history_interns")],
+        [Markup.button.callback("🧑‍💼 история сотрудников", "lk_history_staff")],
+        [Markup.button.callback("⬅️ Назад", "lk_history_back")],
+      ]);
+
+      // Если это вызвано из inline-сообщения — редактируем, иначе просто ответ
+      if (ctx.callbackQuery?.message?.message_id) {
+        await ctx.editMessageText(text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard.reply_markup,
+        });
+      } else {
+        await ctx.reply(text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard.reply_markup,
+        });
+      }
+    } catch (err) {
+      logError("lk_history_menu", err);
+    }
+  });
+
+  // Назад из истории → возвращаемся к списку кандидатов (тот же экран)
+  bot.action("lk_history_back", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      // Возвращаемся в список кандидатов (как было)
+      await showCandidatesListLk(ctx, await ensureUser(ctx), { edit: true });
+    } catch (err) {
+      logError("lk_history_back", err);
+    }
+  });
+
+  // Универсальная отрисовка экрана истории конкретной сущности
+  async function showHistoryEntityScreen(
+    ctx,
+    title,
+    deleteLabel,
+    postponeLabel
+  ) {
+    const text =
+      `📜 <b>${title}</b>\n\n` +
+      "Выбери раздел:\n" +
+      `1) ❌ ${deleteLabel} — будут удалены через 30 дней после отказа или отмены.\n` +
+      `2) 🗑️ ${postponeLabel} — остаются в базе без автоудаления.`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`❌ ${deleteLabel}`, "lk_history_stub_delete")],
+      [
+        Markup.button.callback(
+          `🗑️ ${postponeLabel}`,
+          "lk_history_stub_postpone"
+        ),
+      ],
+      [Markup.button.callback("⬅️ Назад", "lk_history_menu")],
+    ]);
+
+    await ctx.editMessageText(text, {
+      parse_mode: "HTML",
+      reply_markup: keyboard.reply_markup,
+    });
+  }
+
+  // История кандидатов (каркас как на твоём скрине 2)
+  bot.action("lk_history_candidates", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      await showHistoryEntityScreen(
+        ctx,
+        "История кандидатов",
+        "Кандидаты на удалении",
+        "Отложенные кандидаты"
+      );
+    } catch (err) {
+      logError("lk_history_candidates", err);
+    }
+  });
+
+  // История стажёров (каркас)
+  bot.action("lk_history_interns", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      await showHistoryEntityScreen(
+        ctx,
+        "История стажёров",
+        "Стажёры на удалении",
+        "Отложенные стажёры"
+      );
+    } catch (err) {
+      logError("lk_history_interns", err);
+    }
+  });
+
+  // История сотрудников (каркас)
+  bot.action("lk_history_staff", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      await showHistoryEntityScreen(
+        ctx,
+        "История сотрудников",
+        "Сотрудники на удалении",
+        "Отложенные сотрудники"
+      );
+    } catch (err) {
+      logError("lk_history_staff", err);
+    }
+  });
+
+  // Заглушки: функционал добавим позже
+  bot.action("lk_history_stub_delete", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
+    } catch (err) {
+      logError("lk_history_stub_delete", err);
+    }
+  });
+
+  bot.action("lk_history_stub_postpone", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
+    } catch (err) {
+      logError("lk_history_stub_postpone", err);
     }
   });
 
@@ -1156,17 +1298,6 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await showCandidatesListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_status_cancelled", err);
-    }
-  });
-
-  // Заглушка для истории
-  bot.action("lk_cand_history", async (ctx) => {
-    try {
-      await ctx
-        .answerCbQuery("История кандидатов пока в разработке.")
-        .catch(() => {});
-    } catch (err) {
-      logError("lk_cand_history", err);
     }
   });
 
