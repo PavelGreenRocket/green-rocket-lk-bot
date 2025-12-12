@@ -13,6 +13,8 @@ const {
 } = require("./candidateFilters");
 
 const declineReasonStates = new Map(); // key: tgId, value: { candidateId }
+const historyCandidatesFilter = new Map();
+// key: tgId -> value: 'invited' | 'interviewed' | 'internship_invited' | null
 
 // ----------------------------------------
 // СОСТОЯНИЕ РЕДАКТИРОВАНИЯ СОТРУДНИКОВ
@@ -398,12 +400,13 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
-  // Универсальная отрисовка экрана истории конкретной сущности
   async function showHistoryEntityScreen(
     ctx,
     title,
     deleteLabel,
-    postponeLabel
+    postponeLabel,
+    deleteAction,
+    postponeAction
   ) {
     const text =
       `📜 <b>${title}</b>\n\n` +
@@ -412,13 +415,8 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       `2) 🗑️ ${postponeLabel} — остаются в базе без автоудаления.`;
 
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(`❌ ${deleteLabel}`, "lk_history_stub_delete")],
-      [
-        Markup.button.callback(
-          `🗑️ ${postponeLabel}`,
-          "lk_history_stub_postpone"
-        ),
-      ],
+      [Markup.button.callback(`❌ ${deleteLabel}`, deleteAction)],
+      [Markup.button.callback(`🗑️ ${postponeLabel}`, postponeAction)],
       [Markup.button.callback("⬅️ Назад", "lk_history_menu")],
     ]);
 
@@ -436,7 +434,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         ctx,
         "История кандидатов",
         "Кандидаты на удалении",
-        "Отложенные кандидаты"
+        "Отложенные кандидаты",
+        "lk_hist_del_open",
+        "lk_hist_def_open"
       );
     } catch (err) {
       logError("lk_history_candidates", err);
@@ -449,9 +449,11 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       await showHistoryEntityScreen(
         ctx,
-        "История стажёров",
-        "Стажёры на удалении",
-        "Отложенные стажёры"
+        "История кандидатов",
+        "Кандидаты на удалении",
+        "Отложенные кандидаты",
+        "lk_hist_del_open",
+        "lk_hist_def_open"
       );
     } catch (err) {
       logError("lk_history_interns", err);
@@ -464,9 +466,11 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       await showHistoryEntityScreen(
         ctx,
-        "История сотрудников",
-        "Сотрудники на удалении",
-        "Отложенные сотрудники"
+        "История кандидатов",
+        "Кандидаты на удалении",
+        "Отложенные кандидаты",
+        "lk_hist_del_open",
+        "lk_hist_def_open"
       );
     } catch (err) {
       logError("lk_history_staff", err);
@@ -487,6 +491,27 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
     } catch (err) {
       logError("lk_history_stub_postpone", err);
+    }
+  });
+
+  bot.action(/^lk_cand_postpone_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      await pool.query(
+        `
+      UPDATE candidates
+         SET is_deferred = true,
+             declined_at = NULL
+       WHERE id = $1
+      `,
+        [candidateId]
+      );
+
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_postpone", err);
     }
   });
 
@@ -515,6 +540,203 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     } catch (err) {
       logError("lk_admin_my_internships", err);
     }
+  });
+
+  async function showCandidatesOnDeletion(ctx, { edit } = {}) {
+    const tgId = ctx.from.id;
+    const stage = historyCandidatesFilter.get(tgId) || null;
+
+    const params = [];
+    let where = `
+    c.status = 'rejected'
+    AND c.is_deferred = false
+    AND c.declined_at IS NOT NULL
+  `;
+
+    if (stage) {
+      params.push(stage);
+      where += ` AND c.closed_from_status = $${params.length}`;
+    }
+
+    const res = await pool.query(
+      `
+      SELECT c.id, c.name, c.age, c.declined_at, c.closed_from_status
+      FROM candidates c
+      WHERE ${where}
+      ORDER BY c.declined_at DESC, c.id DESC
+      LIMIT 20
+    `,
+      params
+    );
+
+    const total = res.rows.length;
+
+    let text =
+      "❌ <b>Кандидаты на удалении</b>\n\n" +
+      "Эти кандидаты находятся в списке на удаление и будут автоматически удалены через 30 дней после отказа или отмены.\n\n" +
+      "Фильтры по этапу, на котором кандидат выбыл:\n" +
+      "✔️ — после собеседования\n" +
+      "✅ — после приглашения на стажировку\n" +
+      "🕒 — до собеседования\n" +
+      "🔄 — снять фильтр\n\n" +
+      `Найдено: ${total}\n\n` +
+      (total ? "Выбери кандидата:" : "Пока нет кандидатов на удалении.");
+
+    const rows = [];
+
+    // Кнопки-кандидаты
+    for (const c of res.rows) {
+      const title = `${c.name}${c.age ? ` (${c.age})` : ""} - ${
+        c.declined_at ? String(c.declined_at).slice(0, 10) : ""
+      }`;
+      rows.push([Markup.button.callback(title, `lk_cand_open_${c.id}`)]);
+    }
+
+    // Фильтры (как на твоём скрине — 4 кнопки внизу)
+    rows.push([
+      Markup.button.callback("✔️", "lk_hist_del_filter_interviewed"),
+      Markup.button.callback("✅", "lk_hist_del_filter_internship"),
+      Markup.button.callback("🕒", "lk_hist_del_filter_invited"),
+      Markup.button.callback("🔄", "lk_hist_del_filter_clear"),
+    ]);
+
+    // Назад
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_history_candidates")]);
+
+    const keyboard = Markup.inlineKeyboard(rows);
+
+    if (edit) {
+      await ctx.editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard.reply_markup,
+      });
+    } else {
+      await ctx.reply(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard.reply_markup,
+      });
+    }
+  }
+
+  async function showDeferredCandidates(ctx, { edit } = {}) {
+    const tgId = ctx.from.id;
+    const stage = historyCandidatesFilter.get(tgId) || null;
+
+    const params = [];
+    let where = `
+    c.status = 'rejected'
+    AND c.is_deferred = true
+  `;
+
+    if (stage) {
+      params.push(stage);
+      where += ` AND c.closed_from_status = $${params.length}`;
+    }
+
+    const res = await pool.query(
+      `
+      SELECT c.id, c.name, c.age, c.closed_from_status
+      FROM candidates c
+      WHERE ${where}
+      ORDER BY c.id DESC
+      LIMIT 20
+    `,
+      params
+    );
+
+    const total = res.rows.length;
+
+    let text =
+      "🗑️ <b>Отложенные кандидаты</b>\n\n" +
+      "Такие кандидаты сохранены, чтобы к ним можно было вернуться позже. Они не удаляются автоматически.\n\n" +
+      "Фильтры по этапу, на котором кандидат выбыл:\n" +
+      "✔️ — после собеседования\n" +
+      "✅ — после приглашения на стажировку\n" +
+      "🕒 — до собеседования\n" +
+      "🔄 — снять фильтр\n\n" +
+      (total ? "Выбери кандидата:" : "ℹ️ Пока нет отложенных кандидатов.");
+
+    const rows = [];
+
+    for (const c of res.rows) {
+      const title = `${c.name}${c.age ? ` (${c.age})` : ""}`;
+      rows.push([Markup.button.callback(title, `lk_cand_open_${c.id}`)]);
+    }
+
+    rows.push([
+      Markup.button.callback("✔️", "lk_hist_def_filter_interviewed"),
+      Markup.button.callback("✅", "lk_hist_def_filter_internship"),
+      Markup.button.callback("🕒", "lk_hist_def_filter_invited"),
+      Markup.button.callback("🔄", "lk_hist_def_filter_clear"),
+    ]);
+
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_history_candidates")]);
+
+    const keyboard = Markup.inlineKeyboard(rows);
+
+    if (edit) {
+      await ctx.editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard.reply_markup,
+      });
+    } else {
+      await ctx.reply(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard.reply_markup,
+      });
+    }
+  }
+
+  bot.action("lk_hist_del_open", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    await showCandidatesOnDeletion(ctx, { edit: true });
+  });
+
+  bot.action("lk_hist_def_open", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    await showDeferredCandidates(ctx, { edit: true });
+  });
+
+  bot.action("lk_hist_del_filter_interviewed", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "interviewed");
+    await showCandidatesOnDeletion(ctx, { edit: true });
+  });
+  bot.action("lk_hist_del_filter_internship", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "internship_invited");
+    await showCandidatesOnDeletion(ctx, { edit: true });
+  });
+  bot.action("lk_hist_del_filter_invited", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "invited");
+    await showCandidatesOnDeletion(ctx, { edit: true });
+  });
+  bot.action("lk_hist_del_filter_clear", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.delete(ctx.from.id);
+    await showCandidatesOnDeletion(ctx, { edit: true });
+  });
+
+  bot.action("lk_hist_def_filter_interviewed", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "interviewed");
+    await showDeferredCandidates(ctx, { edit: true });
+  });
+  bot.action("lk_hist_def_filter_internship", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "internship_invited");
+    await showDeferredCandidates(ctx, { edit: true });
+  });
+  bot.action("lk_hist_def_filter_invited", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.set(ctx.from.id, "invited");
+    await showDeferredCandidates(ctx, { edit: true });
+  });
+  bot.action("lk_hist_def_filter_clear", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    historyCandidatesFilter.delete(ctx.from.id);
+    await showDeferredCandidates(ctx, { edit: true });
   });
 
   // ----- СПИСОК СОТРУДНИКОВ -----
@@ -1128,7 +1350,12 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       // Сбрасываем режим ввода причины
       declineReasonStates.delete(ctx.from.id);
 
-      await applyCandidateDecline(ctx, st.candidateId, reason);
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        return next();
+      }
+
+      await applyCandidateDecline(ctx, st.candidateId, reason, admin.id);
     } catch (err) {
       logError("cand_decline_text_reason", err);
       return next();
@@ -1356,25 +1583,28 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   bot.action(/^lk_cand_decline_cancel_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
-      const candidateId = Number(ctx.match[1]);
+      declineReasonStates.delete(ctx.from.id);
 
+      const candidateId = Number(ctx.match[1]);
       await showCandidateCardLk(ctx, candidateId, { edit: true });
     } catch (err) {
       logError("lk_cand_decline_cancel", err);
     }
   });
 
-  async function applyCandidateDecline(ctx, candidateId, reason) {
+  async function applyCandidateDecline(ctx, candidateId, reason, adminDbId) {
     await pool.query(
       `
       UPDATE candidates
          SET status = 'rejected',
              decline_reason = $2,
+             declined_at = NOW(),
+             is_deferred = false,
              closed_from_status = status,
-             declined_at = NOW()
+             closed_by_admin_id = $3
        WHERE id = $1
     `,
-      [candidateId, reason]
+      [candidateId, reason, adminDbId || null]
     );
 
     await showCandidateCardLk(ctx, candidateId, { edit: true });
@@ -1383,33 +1613,45 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   bot.action(/^lk_cand_decline_apply_(\d+)_no_show$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     declineReasonStates.delete(ctx.from.id);
+    const admin = await ensureUser(ctx);
+    if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+      return;
 
     await applyCandidateDecline(
       ctx,
       Number(ctx.match[1]),
-      "Не пришёл и не предупредил"
+      "Не пришёл и не предупредил",
+      admin.id
     );
   });
 
   bot.action(/^lk_cand_decline_apply_(\d+)_warned$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     declineReasonStates.delete(ctx.from.id);
+    const admin = await ensureUser(ctx);
+    if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+      return;
 
     await applyCandidateDecline(
       ctx,
       Number(ctx.match[1]),
-      "Предупредил, что не придёт"
+      "Предупредил, что не придёт",
+      admin.id
     );
   });
 
   bot.action(/^lk_cand_decline_apply_(\d+)_weird$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     declineReasonStates.delete(ctx.from.id);
+    const admin = await ensureUser(ctx);
+    if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+      return;
 
     await applyCandidateDecline(
       ctx,
       Number(ctx.match[1]),
-      "Странное поведение"
+      "Странное поведение",
+      admin.id
     );
   });
   // ================================
@@ -1463,13 +1705,15 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       // Возвращаем в статус до отказа (если он сохранён), иначе invited
       await pool.query(
         `
-      UPDATE candidates
-         SET status = COALESCE(closed_from_status, 'invited'),
-             decline_reason = NULL,
-             declined_at = NULL,
-             closed_from_status = NULL
-       WHERE id = $1
-      `,
+  UPDATE candidates
+     SET status = COALESCE(closed_from_status, 'invited'),
+         decline_reason = NULL,
+         declined_at = NULL,
+         closed_from_status = NULL,
+         closed_by_admin_id = NULL,
+         is_deferred = false
+   WHERE id = $1
+  `,
         [candidateId]
       );
 

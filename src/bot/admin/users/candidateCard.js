@@ -267,7 +267,7 @@ FROM candidates c
     rows.push([
       Markup.button.callback(
         "❌ отказать кандидату",
-        `lk_cand_decline_reason_${candidateId}`
+        `lk_cand_decline_reason_${cand.id}`
       ),
     ]);
   } else if (cand.status === "interviewed") {
@@ -281,7 +281,7 @@ FROM candidates c
     rows.push([
       Markup.button.callback(
         "❌ отказать кандидату",
-        `lk_cand_decline_${cand.id}`
+        `lk_cand_decline_reason_${cand.id}`
       ),
     ]);
   } else if (cand.status === "internship_invited") {
@@ -295,7 +295,7 @@ FROM candidates c
     rows.push([
       Markup.button.callback(
         "❌ отказать кандидату",
-        `lk_cand_decline_${cand.id}`
+        `lk_cand_decline_reason_${cand.id}`
       ),
     ]);
   } else if (cand.status === "rejected") {
