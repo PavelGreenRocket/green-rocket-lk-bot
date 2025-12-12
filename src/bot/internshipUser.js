@@ -16,8 +16,14 @@ async function getActiveInternshipCandidate(userId) {
     `
       SELECT
         c.*,
-        tp.title       AS internship_point_name,
-        mentor.full_name AS internship_admin_name
+        tp.title        AS internship_point_name,
+        tp.address      AS internship_point_address,
+        tp.landmark     AS internship_point_landmark,
+        mentor.full_name  AS internship_admin_name,
+        mentor.position   AS internship_admin_position,
+        mentor.username   AS internship_admin_username,
+        mentor.telegram_id AS internship_admin_telegram_id,
+        mentor.work_phone  AS internship_admin_work_phone
       FROM users u
       JOIN candidates c
         ON c.id = u.candidate_id
@@ -27,7 +33,7 @@ async function getActiveInternshipCandidate(userId) {
         ON mentor.id = c.internship_admin_id
       WHERE u.id = $1
         AND c.status = 'internship_invited'
-      ORDER BY c.interview_date DESC, c.id DESC
+      ORDER BY c.internship_date DESC, c.id DESC
       LIMIT 1
     `,
     [userId]
@@ -50,28 +56,79 @@ function formatDateRu(date) {
   return `${dd}.${mm} (${weekday})`;
 }
 
-function buildInternshipDetailsText(candidate) {
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// Нормализация телефона (для tel:)
+function normalizePhone(raw) {
+  if (!raw) return { display: null, href: null };
+
+  const src = String(raw);
+  let digits = src.replace(/\D+/g, "");
+
+  if (digits.length === 11 && digits.startsWith("8")) {
+    digits = "7" + digits.slice(1);
+  }
+
+  if (digits.length === 11 && digits.startsWith("7")) {
+    const v = "+" + digits;
+    return { display: v, href: v };
+  }
+
+  if (digits.length >= 10) {
+    const v = "+" + digits;
+    return { display: v, href: v };
+  }
+
+  return { display: src.trim(), href: null };
+}
+
+function buildInternshipDetailsText(candidate, userNameFallback = "Вы") {
   if (!candidate) {
     return (
-      "📄 *Детали стажировки*\n\n" +
-      "Стажировка ещё не назначена.\n" +
-      "Если вы уверены, что вас уже пригласили, свяжитесь с руководителем."
+      `<b>📄 Детали стажировки</b>\n\n` +
+      `Стажировка ещё не назначена.\n` +
+      `Если вы уверены, что вас уже пригласили — свяжитесь с руководителем.`
     );
   }
+
+  const name = candidate.name || userNameFallback;
 
   const datePart = formatDateRu(candidate.internship_date);
   const timeFrom = candidate.internship_time_from || "не указано";
   const timeTo = candidate.internship_time_to || "не указано";
-  const pointName = candidate.internship_point_name || "не указана";
-  const mentorName = candidate.internship_admin_name || "не указан";
 
-  return (
-    "📄 *Детали стажировки*\n\n" +
-    `• *Дата:* ${datePart}\n` +
-    `• *Время:* с ${timeFrom} до ${timeTo}\n` +
-    `• *Кофейня:* ${pointName}\n` +
-    `• *Наставник:* ${mentorName}\n`
-  );
+  const pointAddress =
+    candidate.internship_point_address || "будет добавлен позже";
+  const mentorName = candidate.internship_admin_name || "не указан";
+  const phone = normalizePhone(candidate.internship_admin_work_phone);
+
+  let text = `${escapeHtml(
+    name
+  )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n`;
+  text += `<b>📄 Детали стажировки</b>\n`;
+  text += `• <b>Дата:</b> ${escapeHtml(datePart)}\n`;
+  text += `• <b>Время:</b> с ${escapeHtml(timeFrom)} до ${escapeHtml(
+    timeTo
+  )}\n`;
+  text += `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n`;
+  text += `• <b>Наставник:</b> ${escapeHtml(mentorName)}\n`;
+
+  if (phone.display) {
+    if (phone.href) {
+      text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
+        phone.href
+      )}">${escapeHtml(phone.display)}</a>\n`;
+    } else {
+      text += `• <b>Телефон для связи:</b> ${escapeHtml(phone.display)}\n`;
+    }
+  }
+
+  return text;
 }
 
 /**
@@ -81,32 +138,51 @@ function buildInternshipDetailsText(candidate) {
 async function showInternshipDetails(ctx, user, { withReadButton, edit } = {}) {
   const candidate = await getActiveInternshipCandidate(user.id);
 
-  const text = buildInternshipDetailsText(candidate);
+  const text = buildInternshipDetailsText(candidate, user.full_name || "Вы");
 
-  const buttons = [];
+  const rows = [];
 
+  // (опционально) "Прочитал" — оставим как было, если нужно
   if (withReadButton) {
-    buttons.push([Markup.button.callback("✅ Прочитал", "lk_internship_read")]);
+    rows.push([Markup.button.callback("✅ Прочитал", "lk_internship_read")]);
   }
 
-  // Кнопки действий по стажировке
-  buttons.push([
-    Markup.button.callback("🧭 Ориентир", "lk_internship_orientir"),
+  // Telegram наставника (если есть)
+  if (candidate?.internship_admin_telegram_id) {
+    const mentorName = candidate.internship_admin_name || "Наставник";
+    const firstName = mentorName.split(" ")[0] || "Наставник";
+    rows.push([
+      Markup.button.url(
+        `✈️ Telegram ${firstName}`,
+        `tg://user?id=${candidate.internship_admin_telegram_id}`
+      ),
+    ]);
+  }
+
+  // Как пройти? + По оплате
+  rows.push([
+    Markup.button.callback("🧭 Как пройти?", "lk_internship_route"),
     Markup.button.callback("💰 По оплате", "lk_internship_payment"),
   ]);
 
-  buttons.push([
+  // Отказаться
+  rows.push([
     Markup.button.callback(
       "❌ Отказаться от стажировки",
       "lk_internship_decline"
     ),
   ]);
 
-  buttons.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+  // В меню
+  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
-  const keyboard = Markup.inlineKeyboard(buttons);
+  const keyboard = Markup.inlineKeyboard(rows);
 
-  await deliver(ctx, { text, extra: keyboard }, { edit: !!edit });
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "HTML" } },
+    { edit: !!edit }
+  );
 }
 
 // ---------- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ----------
@@ -216,7 +292,7 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
       text += `Ориентир: ${escapeHtml(landmark)}\n`;
 
       const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback("⬅️ Назад", "lk_internship_details")],
+        [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
       ]);
 
       await deliver(

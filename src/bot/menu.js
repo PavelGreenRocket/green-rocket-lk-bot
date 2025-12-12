@@ -6,7 +6,7 @@ async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
   const role = user.role || "user";
 
-  // Особая клавиатура для кандидата, ожидающего СОБЕСЕДОВАНИЯ
+  // Особая клавиатура для кандидата (приглашён на собеседование / стажировку)
   if (staffStatus === "candidate" && user.candidate_id) {
     const res = await pool.query(
       "SELECT status FROM candidates WHERE id = $1",
@@ -14,6 +14,7 @@ async function buildMainKeyboard(user) {
     );
     const cand = res.rows[0];
 
+    // 1) Собеседование
     if (cand && cand.status === "invited") {
       return Markup.inlineKeyboard([
         [
@@ -26,6 +27,24 @@ async function buildMainKeyboard(user) {
           Markup.button.callback(
             "❌ Отказаться от собеседования",
             "lk_interview_decline"
+          ),
+        ],
+      ]);
+    }
+
+    // 2) Стажировка (до старта ЛК закрыт, но детали должны открываться)
+    if (cand && cand.status === "internship_invited") {
+      return Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "📄 Детали стажировки",
+            "lk_internship_details"
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "❌ Отказаться от стажировки",
+            "lk_internship_decline"
           ),
         ],
       ]);
@@ -78,7 +97,7 @@ async function buildMainKeyboard(user) {
       buttons.push([
         Markup.button.callback(
           `❗ Собеседования (${interviewsCount})`,
-          "admin_users_candidates"
+          "lk_admin_my_interviews" // было "admin_users_candidates"
         ),
       ]);
     }
