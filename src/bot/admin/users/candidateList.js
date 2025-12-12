@@ -1593,6 +1593,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   });
 
   async function applyCandidateDecline(ctx, candidateId, reason, adminDbId) {
+    // 1) Обновляем кандидата (фиксируем отказ)
     await pool.query(
       `
       UPDATE candidates
@@ -1607,6 +1608,37 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       [candidateId, reason, adminDbId || null]
     );
 
+    // 2) Пытаемся уведомить кандидата (ТОЛЬКО если есть привязанный user с telegram_id)
+    try {
+      const uRes = await pool.query(
+        `
+        SELECT telegram_id
+        FROM users
+        WHERE candidate_id = $1
+          AND telegram_id IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+      `,
+        [candidateId]
+      );
+
+      const candidateTelegramId = uRes.rows[0]?.telegram_id;
+
+      if (candidateTelegramId) {
+        const text =
+          "❌ К сожалению, мы не готовы продолжить с вами сотрудничество.\n\n" +
+          "Спасибо, что нашли время!";
+
+        await ctx.telegram
+          .sendMessage(candidateTelegramId, text)
+          .catch(() => {});
+      }
+    } catch (err) {
+      // не валим бота, просто логируем
+      console.error("[applyCandidateDecline] notify candidate error", err);
+    }
+
+    // 3) Возвращаем карточку админу
     await showCandidateCardLk(ctx, candidateId, { edit: true });
   }
 

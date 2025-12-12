@@ -22,7 +22,15 @@ async function deliver(ctx, payload, options = {}) {
     try {
       return await ctx.editMessageText(text, extra);
     } catch (err) {
-      // Частые ошибки: "message is not modified", "message can't be edited"
+      const desc =
+        err?.response?.description || err?.description || String(err || "");
+
+      // ✅ Нормальная ситуация: пытаемся "перерисовать" то же самое
+      if (desc.includes("message is not modified")) {
+        return; // ничего не делаем и НЕ шлём новое сообщение
+      }
+
+      // Частые ошибки: "message can't be edited"
       console.error("deliver: edit failed, fallback to reply", err);
       try {
         return await ctx.reply(text, extra);
