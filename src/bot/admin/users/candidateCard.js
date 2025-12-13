@@ -191,7 +191,9 @@ FROM candidates c
   const cand = res.rows[0];
 
   // 🔻 Статус в шапке
-  const header = getCandidateHeader(cand.status);
+  const header = isRestoreMode
+    ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
+    : getCandidateHeader(cand.status);
 
   // Возраст без "лет"
   const agePart = cand.age ? ` (${cand.age})` : "";
@@ -379,8 +381,41 @@ FROM candidates c
     keyboard = Markup.inlineKeyboard(rows);
   }
 
+  // ✅ если пришла "внешняя" клавиатура (меню редактирования/выбор точки) —
+  // оставляем ТЕКСТ карточки, меняем только кнопки
+  if (options.keyboardOverride) {
+    keyboard = options.keyboardOverride;
+  }
+
+  // ✅ если нужно отредактировать КОНКРЕТНОЕ сообщение (для bot.on("text"))
+  if (
+    options.forceMessage &&
+    options.forceMessage.chatId &&
+    options.forceMessage.messageId
+  ) {
+    const { chatId, messageId } = options.forceMessage;
+
+    try {
+      await ctx.telegram.editMessageText(chatId, messageId, undefined, text, {
+        ...keyboard,
+        parse_mode: "Markdown",
+      });
+    } catch (e) {
+      // не падаем на "message is not modified" и т.п.
+      await ctx.telegram
+        .editMessageReplyMarkup(
+          chatId,
+          messageId,
+          undefined,
+          keyboard.reply_markup
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  // обычный путь (callback_query) — как было
   if (!deliverFn) {
-    // fallback, если по какой-то причине deliver ещё не прокинут
     if (edit && ctx.updateType === "callback_query") {
       await ctx
         .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
@@ -393,10 +428,7 @@ FROM candidates c
 
   await deliverFn(
     ctx,
-    {
-      text,
-      extra: { ...keyboard, parse_mode: "Markdown" },
-    },
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
     { edit }
   );
 }

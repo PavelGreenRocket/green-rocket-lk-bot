@@ -15,6 +15,11 @@ const { registerCandidateEditHandlers } = require("./candidateEdit");
 const declineReasonStates = new Map(); // key: tgId, value: { candidateId }
 const restoreModeStates = new Map();
 const historyCandidatesFilter = new Map();
+
+// ✅ Геттер restore-mode для candidateEdit.js
+function isRestoreModeFor(tgId, candidateId) {
+  return restoreModeStates.get(tgId) === candidateId;
+}
 // key: tgId -> value: 'invited' | 'interviewed' | 'internship_invited' | null
 
 // ----------------------------------------
@@ -272,7 +277,13 @@ async function showCandidatesListLk(ctx, user, options = {}) {
 // ----------------------------------------
 
 function registerCandidateListHandlers(bot, ensureUser, logError) {
-  registerCandidateEditHandlers(bot, ensureUser, logError, showCandidateCardLk);
+  registerCandidateEditHandlers(
+    bot,
+    ensureUser,
+    logError,
+    showCandidateCardLk,
+    isRestoreModeFor
+  );
 
   const POSITIONS = [
     { code: "barista", label: "Бариста" },
@@ -1776,7 +1787,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         const tgId = uRes.rows[0]?.telegram_id;
         if (tgId) {
           await notifyCandidateAfterRestore(
-            { id: candidateId, restoredStatus },
+            { candidateId, restoredStatus, candidateTelegramId: tgId },
             ctx
           );
         }
@@ -1787,8 +1798,335 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   });
 
   async function notifyCandidateAfterRestore(payload, ctx) {
-    // payload.restoredStatus: invited | internship_invited | ...
-    // позже сюда добавим и наставника
+    const { candidateId, restoredStatus, candidateTelegramId } = payload;
+
+    // 1) Для interviewed — НЕ отправляем ничего
+    if (restoredStatus === "interviewed") return;
+
+    // -------------------------
+    // helpers
+    // -------------------------
+    function formatDateRu(date) {
+      if (!date) return "не указана";
+      const d = new Date(date);
+      if (Number.isNaN(d.getTime())) return "не указана";
+      const dd = String(d.getDate()).padStart(2, "0");
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const weekday = d.toLocaleDateString("ru-RU", { weekday: "short" });
+      return `${dd}.${mm} (${weekday})`;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function normalizePhone(raw) {
+      if (!raw) return { display: null, href: null };
+      const src = String(raw);
+      let digits = src.replace(/\D+/g, "");
+      if (digits.length === 11 && digits.startsWith("8")) {
+        digits = "7" + digits.slice(1);
+      }
+      if (digits.length === 11 && digits.startsWith("7")) {
+        const v = "+" + digits;
+        return { display: v, href: v };
+      }
+      if (digits.length >= 10) {
+        const v = "+" + digits;
+        return { display: v, href: v };
+      }
+      return { display: src.trim(), href: null };
+    }
+
+    // -------------------------
+    // 2) invited -> полное приглашение на собеседование
+    // -------------------------
+    if (restoredStatus === "invited") {
+      const res = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.name,
+          c.age,
+          c.interview_date,
+          c.interview_time,
+          tp.title      AS point_title,
+          tp.address    AS point_address,
+          tp.landmark   AS point_landmark,
+          a.full_name   AS admin_name,
+          a.position    AS admin_position,
+          a.telegram_id AS admin_telegram_id,
+          a.work_phone  AS admin_work_phone
+        FROM candidates c
+        LEFT JOIN trade_points tp ON tp.id = c.point_id
+        LEFT JOIN users a         ON a.id = c.admin_id
+        WHERE c.id = $1
+      `,
+        [candidateId]
+      );
+
+      const c = res.rows[0];
+      if (!c) return;
+
+      const greetingName = c.name || "Вы";
+      const dateStr = formatDateRu(c.interview_date);
+      const timeStr = c.interview_time || "не указано";
+      const pointAddress = c.point_address || "будет добавлен позже";
+
+      const adminName = c.admin_name || "не указан";
+      const adminPosition = c.admin_position || "не указана должность";
+      const responsibleLine = `Ответственный: ${adminName}, ${adminPosition}`;
+
+      const phone = normalizePhone(c.admin_work_phone);
+
+      let text =
+        `${greetingName}, вы приглашены на собеседование в Green Rocket! 🚀\n\n` +
+        "📄 Детали собеседования:\n" +
+        `• Дата: ${dateStr}\n` +
+        `• Время: ${timeStr}\n` +
+        `• Адрес: ${pointAddress}\n` +
+        `• ${responsibleLine}\n`;
+
+      if (phone.display) {
+        text += `• Телефон для связи: ${phone.display}\n`;
+      }
+
+      const keyboardRows = [];
+
+      // Telegram ответственного
+      if (c.admin_telegram_id) {
+        const firstName = (adminName || "Telegram").split(" ")[0] || "Telegram";
+        keyboardRows.push([
+          {
+            text: `✈️ Telegram ${firstName}`,
+            url: `tg://user?id=${c.admin_telegram_id}`,
+          },
+        ]);
+      }
+
+      // Как пройти?
+      keyboardRows.push([
+        { text: "🧭 Как пройти?", callback_data: "lk_interview_route" },
+      ]);
+
+      // Отказаться
+      keyboardRows.push([
+        {
+          text: "❌ Отказаться от собеседования",
+          callback_data: "lk_interview_decline",
+        },
+      ]);
+
+      // 2.1) сообщение кандидату
+      await ctx.telegram
+        .sendMessage(candidateTelegramId, text, {
+          reply_markup: { inline_keyboard: keyboardRows },
+        })
+        .catch(() => {});
+
+      // 2.2) короткое уведомление ответственному (оставляем как “как в приглашениях”)
+      if (c.admin_telegram_id) {
+        try {
+          const adminTextLines = [];
+          adminTextLines.push("♻️ *Восстановление кандидата (собеседование)*");
+          adminTextLines.push("");
+          adminTextLines.push(
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+          );
+          adminTextLines.push(`• Дата: ${dateStr}`);
+          adminTextLines.push(`• Время: ${timeStr}`);
+
+          const adminKeyboard = {
+            inline_keyboard: [
+              [
+                {
+                  text: "👤 Открыть кандидата",
+                  callback_data: `lk_cand_open_${candidateId}`,
+                },
+              ],
+              [
+                {
+                  text: "📋 Мои собеседования",
+                  callback_data: "lk_admin_my_interviews",
+                },
+              ],
+            ],
+          };
+
+          await ctx.telegram.sendMessage(
+            c.admin_telegram_id,
+            adminTextLines.join("\n"),
+            {
+              parse_mode: "Markdown",
+              reply_markup: adminKeyboard,
+            }
+          );
+        } catch (err) {
+          console.error(
+            "[notifyCandidateAfterRestore] notify admin error",
+            err
+          );
+        }
+      }
+
+      return;
+    }
+
+    // -------------------------
+    // 3) internship_invited -> полное приглашение на стажировку + уведомление наставнику
+    // -------------------------
+    if (restoredStatus === "internship_invited") {
+      const cRes = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.name,
+          c.age,
+          c.internship_date,
+          c.internship_time_from,
+          c.internship_time_to,
+          COALESCE(tp.title, 'не указана') AS point_title,
+          COALESCE(tp.address, '') AS point_address,
+          COALESCE(tp.landmark, '') AS point_landmark,
+          COALESCE(u.full_name, 'не указан') AS mentor_name,
+          u.position    AS mentor_position,
+          u.telegram_id AS mentor_telegram_id,
+          u.work_phone  AS mentor_work_phone
+        FROM candidates c
+        LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
+        LEFT JOIN users u ON u.id = c.internship_admin_id
+        WHERE c.id = $1
+      `,
+        [candidateId]
+      );
+
+      const c = cRes.rows[0];
+      if (!c) return;
+
+      const datePart = formatDateRu(c.internship_date);
+      const timeFromText = c.internship_time_from || "не указано";
+      const timeToText = c.internship_time_to || "не указано";
+
+      const pointTitle = c.point_title || "не указана";
+      const pointAddress = c.point_address || "будет добавлен позже";
+      const mentorName = c.mentor_name || "не указан";
+
+      const phone = normalizePhone(c.mentor_work_phone);
+
+      const nameForText = c.name || "Вы";
+
+      let text =
+        `${escapeHtml(
+          nameForText
+        )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
+        `<b>📄 Детали стажировки</b>\n` +
+        `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
+        `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
+          timeToText
+        )}\n` +
+        `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
+        `• <b>Наставник:</b> ${escapeHtml(mentorName)}\n`;
+
+      if (phone.display) {
+        if (phone.href) {
+          text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
+            phone.href
+          )}">${escapeHtml(phone.display)}</a>\n`;
+        } else {
+          text += `• <b>Телефон для связи:</b> ${escapeHtml(phone.display)}\n`;
+        }
+      }
+
+      const keyboardRows = [];
+
+      // Telegram наставника
+      if (c.mentor_telegram_id) {
+        const firstName =
+          (mentorName || "Telegram").split(" ")[0] || "Telegram";
+        keyboardRows.push([
+          {
+            text: `✈️ Telegram ${firstName}`,
+            url: `tg://user?id=${c.mentor_telegram_id}`,
+          },
+        ]);
+      }
+
+      // Как пройти? + По оплате
+      keyboardRows.push([
+        { text: "🧭 Как пройти?", callback_data: "lk_internship_route" },
+        { text: "💰 По оплате", callback_data: "lk_internship_payment" },
+      ]);
+
+      // Отказаться
+      keyboardRows.push([
+        {
+          text: "❌ Отказаться от стажировки",
+          callback_data: "lk_internship_decline",
+        },
+      ]);
+
+      // 3.1) сообщение кандидату (HTML)
+      await ctx.telegram
+        .sendMessage(candidateTelegramId, text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: keyboardRows },
+        })
+        .catch(() => {});
+
+      // 3.2) уведомление наставнику
+      if (c.mentor_telegram_id) {
+        try {
+          const mentorTextLines = [];
+          mentorTextLines.push("♻️ *Восстановление кандидата (стажировка)*");
+          mentorTextLines.push("");
+          mentorTextLines.push(
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+          );
+          mentorTextLines.push(`• Дата: ${datePart}`);
+          mentorTextLines.push(`• Время: с ${timeFromText} до ${timeToText}`);
+          mentorTextLines.push(`• Точка: ${pointTitle}`);
+          if (pointAddress) mentorTextLines.push(`• Адрес: ${pointAddress}`);
+
+          const mentorKeyboard = {
+            inline_keyboard: [
+              [
+                {
+                  text: "👤 Открыть кандидата",
+                  callback_data: `lk_cand_open_${candidateId}`,
+                },
+              ],
+              [
+                {
+                  text: "📋 Мои стажировки",
+                  callback_data: "lk_admin_my_internships",
+                },
+              ],
+            ],
+          };
+
+          await ctx.telegram.sendMessage(
+            c.mentor_telegram_id,
+            mentorTextLines.join("\n"),
+            {
+              parse_mode: "Markdown",
+              reply_markup: mentorKeyboard,
+            }
+          );
+        } catch (err) {
+          console.error(
+            "[notifyCandidateAfterRestore] notify mentor error",
+            err
+          );
+        }
+      }
+
+      return;
+    }
+
+    // остальные статусы пока игнорируем
   }
 }
 
