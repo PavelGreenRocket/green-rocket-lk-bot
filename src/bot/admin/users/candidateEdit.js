@@ -1,0 +1,773 @@
+// src/bot/admin/users/candidateEdit.js
+
+const { Markup } = require("telegraf");
+const pool = require("../../../db/pool");
+
+/**
+ * Локальный state для ввода текста:
+ * key = tgId, value = { candidateId, field, back }
+ */
+const editState = new Map();
+
+function isAdmin(user) {
+  return user && (user.role === "admin" || user.role === "super_admin");
+}
+
+async function getTradePoints() {
+  // Минимальный набор: id + title (+ address если есть)
+  // Если у вас другое имя колонок — скажи, поправлю под схему trade_points
+  const res = await pool.query(
+    `
+    SELECT id,
+           COALESCE(title, name, 'Точка #' || id::text) AS title,
+           COALESCE(address, '') AS address
+      FROM trade_points
+     ORDER BY id ASC
+    `
+  );
+  return res.rows;
+}
+
+function backToCandidateCard(ctx, candidateId, showCandidateCardLk) {
+  const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
+  return showCandidateCardLk(ctx, candidateId, { edit: true, restoreMode });
+}
+
+async function showEditCommonMenu(ctx, candidateId, showCandidateCardLk) {
+  const text =
+    "⚙️ <b>Изменить общую информацию</b>\n\n" + "Выберите, что изменить:";
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "✏️ Имя",
+        `lk_cand_edit_common_name_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🔢 Возраст",
+        `lk_cand_edit_common_age_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "📞 Телефон",
+        `lk_cand_edit_common_phone_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🏪 Желаемая точка",
+        `lk_cand_edit_common_point_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "💰 Желаемая ЗП",
+        `lk_cand_edit_common_salary_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🗓 Желаемый график",
+        `lk_cand_edit_common_schedule_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🧾 Опыт/анкета",
+        `lk_cand_edit_common_questionnaire_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "💬 Комментарий",
+        `lk_cand_edit_common_comment_${candidateId}`
+      ),
+    ],
+    [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
+  ]);
+
+  await ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    reply_markup: kb.reply_markup,
+  });
+}
+
+async function showEditInterviewMenu(ctx, candidateId, showCandidateCardLk) {
+  const text =
+    "🗓 <b>Изменить «О собеседовании»</b>\n\n" + "Выберите, что изменить:";
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "📅 Дата",
+        `lk_cand_edit_interview_date_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "⏰ Время",
+        `lk_cand_edit_interview_time_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🏪 Место (точка)",
+        `lk_cand_edit_interview_point_${candidateId}`
+      ),
+    ],
+    [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
+  ]);
+
+  await ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    reply_markup: kb.reply_markup,
+  });
+}
+
+async function showEditInternshipMenu(ctx, candidateId, showCandidateCardLk) {
+  const text =
+    "🚀 <b>Изменить «О стажировке»</b>\n\n" + "Выберите, что изменить:";
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "📅 Дата",
+        `lk_cand_edit_internship_date_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "⏰ Время (с)",
+        `lk_cand_edit_internship_from_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "⏰ Время (до)",
+        `lk_cand_edit_internship_to_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🏪 Место (точка)",
+        `lk_cand_edit_internship_point_${candidateId}`
+      ),
+    ],
+    [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
+  ]);
+
+  await ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    reply_markup: kb.reply_markup,
+  });
+}
+
+function askText(
+  ctx,
+  candidateId,
+  title,
+  backCallback,
+  field,
+  placeholder = ""
+) {
+  editState.set(ctx.from.id, { candidateId, field, backCallback });
+
+  const text =
+    `✍️ <b>${title}</b>\n\n` +
+    (placeholder ? `Пример: <code>${placeholder}</code>\n\n` : "") +
+    "Отправьте значение текстом одним сообщением.\n" +
+    "Чтобы отменить — нажмите кнопку ниже.";
+
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback("❌ Отмена", backCallback)],
+  ]);
+
+  return ctx.editMessageText(text, {
+    parse_mode: "HTML",
+    reply_markup: kb.reply_markup,
+  });
+}
+
+async function setCandidateField(candidateId, field, value) {
+  // Белый список полей (чтобы никто не обновил что угодно)
+  const allowed = new Set([
+    "name",
+    "age",
+    "phone",
+    "desired_point_id",
+    "salary",
+    "schedule",
+    "questionnaire",
+    "comment",
+    "interview_date",
+    "interview_time",
+    "point_id",
+    "internship_date",
+    "internship_time_from",
+    "internship_time_to",
+    "internship_point_id",
+  ]);
+
+  if (!allowed.has(field)) {
+    throw new Error(`Field not allowed: ${field}`);
+  }
+
+  await pool.query(`UPDATE candidates SET ${field} = $2 WHERE id = $1`, [
+    candidateId,
+    value,
+  ]);
+}
+
+function parseMaybeInt(s) {
+  const n = Number(String(s).trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseDateISOorRu(input) {
+  // Принимаем YYYY-MM-DD или DD.MM.YYYY
+  const s = String(input).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) {
+    const [dd, mm, yyyy] = s.split(".");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+function parseTimeHHMM(input) {
+  const s = String(input).trim();
+  if (/^\d{1,2}:\d{2}$/.test(s)) return s;
+  return null;
+}
+
+function registerCandidateEditHandlers(
+  bot,
+  ensureUser,
+  logError,
+  showCandidateCardLk
+) {
+  // ==== Назад в карточку (с учётом restoreMode) ====
+  bot.action(/^lk_cand_edit_back_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      editState.delete(ctx.from.id);
+      await backToCandidateCard(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_back", err);
+    }
+  });
+
+  // ==== Входы в меню редактирования ====
+  bot.action(/^lk_cand_edit_common_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      await showEditCommonMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_common", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_interview_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      await showEditInterviewMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_interview", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_internship_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_internship", err);
+    }
+  });
+
+  // ==== Общая инфа: запрос текстом ====
+  bot.action(/^lk_cand_edit_common_name_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить имя",
+        `lk_cand_edit_common_${id}`,
+        "name",
+        "Иван"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_name", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_age_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить возраст",
+        `lk_cand_edit_common_${id}`,
+        "age",
+        "22"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_age", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_phone_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить телефон",
+        `lk_cand_edit_common_${id}`,
+        "phone",
+        "+7XXXXXXXXXX"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_phone", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_salary_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить желаемую ЗП",
+        `lk_cand_edit_common_${id}`,
+        "salary",
+        "40000"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_salary", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_schedule_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить желаемый график",
+        `lk_cand_edit_common_${id}`,
+        "schedule",
+        "3/3"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_schedule", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_questionnaire_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить опыт/анкету",
+        `lk_cand_edit_common_${id}`,
+        "questionnaire"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_questionnaire", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_common_comment_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить комментарий",
+        `lk_cand_edit_common_${id}`,
+        "comment"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_common_comment", err);
+    }
+  });
+
+  // ==== Выбор точки (общая: desired_point_id) ====
+  bot.action(/^lk_cand_edit_common_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const points = await getTradePoints();
+      const rows = points
+        .slice(0, 20)
+        .map((p) => [
+          Markup.button.callback(
+            p.address ? `${p.title} — ${p.address}` : p.title,
+            `lk_cand_edit_set_desired_point_${candidateId}_${p.id}`
+          ),
+        ]);
+
+      rows.push([
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_cand_edit_common_${candidateId}`
+        ),
+      ]);
+
+      await ctx.editMessageText("🏪 <b>Выберите желаемую точку</b>", {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(rows).reply_markup,
+      });
+    } catch (err) {
+      logError("lk_cand_edit_common_point", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_set_desired_point_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("✅ Сохранено").catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      const pointId = Number(ctx.match[2]);
+
+      await setCandidateField(candidateId, "desired_point_id", pointId);
+
+      // Возвращаемся в меню редактирования общей инфы
+      await showEditCommonMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_set_desired_point", err);
+    }
+  });
+
+  // ==== Интервью ====
+  bot.action(/^lk_cand_edit_interview_date_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить дату собеседования",
+        `lk_cand_edit_interview_${id}`,
+        "interview_date",
+        "13.12.2025"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_interview_date", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_interview_time_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить время собеседования",
+        `lk_cand_edit_interview_${id}`,
+        "interview_time",
+        "14:00"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_interview_time", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_interview_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const points = await getTradePoints();
+      const rows = points
+        .slice(0, 20)
+        .map((p) => [
+          Markup.button.callback(
+            p.address ? `${p.title} — ${p.address}` : p.title,
+            `lk_cand_edit_set_point_${candidateId}_${p.id}`
+          ),
+        ]);
+
+      rows.push([
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_cand_edit_interview_${candidateId}`
+        ),
+      ]);
+
+      await ctx.editMessageText(
+        "🏪 <b>Выберите место собеседования (точку)</b>",
+        {
+          parse_mode: "HTML",
+          reply_markup: Markup.inlineKeyboard(rows).reply_markup,
+        }
+      );
+    } catch (err) {
+      logError("lk_cand_edit_interview_point", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_set_point_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("✅ Сохранено").catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      const pointId = Number(ctx.match[2]);
+
+      await setCandidateField(candidateId, "point_id", pointId);
+      await showEditInterviewMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_set_point", err);
+    }
+  });
+
+  // ==== Стажировка ====
+  bot.action(/^lk_cand_edit_internship_date_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить дату стажировки",
+        `lk_cand_edit_internship_${id}`,
+        "internship_date",
+        "15.12.2025"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_internship_date", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_internship_from_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить время стажировки (с)",
+        `lk_cand_edit_internship_${id}`,
+        "internship_time_from",
+        "10:00"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_internship_from", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_internship_to_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+      await askText(
+        ctx,
+        id,
+        "Изменить время стажировки (до)",
+        `lk_cand_edit_internship_${id}`,
+        "internship_time_to",
+        "14:00"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_internship_to", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_internship_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const points = await getTradePoints();
+      const rows = points
+        .slice(0, 20)
+        .map((p) => [
+          Markup.button.callback(
+            p.address ? `${p.title} — ${p.address}` : p.title,
+            `lk_cand_edit_set_internship_point_${candidateId}_${p.id}`
+          ),
+        ]);
+
+      rows.push([
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_cand_edit_internship_${candidateId}`
+        ),
+      ]);
+
+      await ctx.editMessageText("🏪 <b>Выберите место стажировки (точку)</b>", {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(rows).reply_markup,
+      });
+    } catch (err) {
+      logError("lk_cand_edit_internship_point", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_set_internship_point_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("✅ Сохранено").catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      const pointId = Number(ctx.match[2]);
+
+      await setCandidateField(candidateId, "internship_point_id", pointId);
+      await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
+    } catch (err) {
+      logError("lk_cand_edit_set_internship_point", err);
+    }
+  });
+
+  // ==== Перехват текста (ввод значения) ====
+  bot.on("text", async (ctx, next) => {
+    try {
+      const st = editState.get(ctx.from.id);
+      if (!st) return next();
+
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) {
+        editState.delete(ctx.from.id);
+        return next();
+      }
+
+      const raw = (ctx.message?.text || "").trim();
+      if (!raw) return;
+
+      const { candidateId, field, backCallback } = st;
+
+      // Парсинг по полям
+      let value = raw;
+
+      if (field === "age") {
+        value = parseMaybeInt(raw);
+        if (value === null || value < 14 || value > 99) {
+          return ctx.reply("Введите корректный возраст (число).");
+        }
+      }
+
+      if (field === "interview_date" || field === "internship_date") {
+        const d = parseDateISOorRu(raw);
+        if (!d)
+          return ctx.reply("Введите дату в формате DD.MM.YYYY или YYYY-MM-DD.");
+        value = d;
+      }
+
+      if (
+        field === "interview_time" ||
+        field === "internship_time_from" ||
+        field === "internship_time_to"
+      ) {
+        const t = parseTimeHHMM(raw);
+        if (!t)
+          return ctx.reply("Введите время в формате HH:MM (например 14:00).");
+        value = t;
+      }
+
+      // Сохраняем
+      await setCandidateField(candidateId, field, value);
+
+      editState.delete(ctx.from.id);
+
+      // Возвращаемся назад в меню, откуда пришли
+      if (backCallback.startsWith("lk_cand_edit_common_")) {
+        await showEditCommonMenu(ctx, candidateId, showCandidateCardLk);
+      } else if (backCallback.startsWith("lk_cand_edit_interview_")) {
+        await showEditInterviewMenu(ctx, candidateId, showCandidateCardLk);
+      } else if (backCallback.startsWith("lk_cand_edit_internship_")) {
+        await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
+      } else {
+        await backToCandidateCard(ctx, candidateId, showCandidateCardLk);
+      }
+    } catch (err) {
+      logError("candidate_edit_text", err);
+      return next();
+    }
+  });
+}
+
+module.exports = {
+  registerCandidateEditHandlers,
+};

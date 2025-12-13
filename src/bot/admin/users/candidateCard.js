@@ -87,8 +87,57 @@ function formatDateWithWeekday(isoDate) {
   return `${dd}.${mm} (${weekday})`;
 }
 
+function buildRestoreKeyboard(candidate) {
+  const buttons = [];
+
+  buttons.push([
+    Markup.button.callback(
+      "✏️ Изменить общую информацию",
+      `lk_cand_edit_common_${candidate.id}`
+    ),
+  ]);
+
+  if (candidate.status === "rejected") {
+    if (candidate.closed_from_status === "invited") {
+      buttons.push([
+        Markup.button.callback(
+          "🗓 Изменить собеседование",
+          `lk_cand_edit_interview_${candidate.id}`
+        ),
+      ]);
+    }
+
+    if (candidate.closed_from_status === "internship_invited") {
+      buttons.push([
+        Markup.button.callback(
+          "🚀 Изменить стажировку",
+          `lk_cand_edit_internship_${candidate.id}`
+        ),
+      ]);
+    }
+  }
+
+  buttons.push([
+    Markup.button.callback(
+      "♻️ Восстановить и оповестить",
+      `lk_cand_restore_apply_${candidate.id}`
+    ),
+  ]);
+
+  buttons.push([
+    Markup.button.callback(
+      "❌ Отмена",
+      `lk_cand_restore_cancel_${candidate.id}`
+    ),
+  ]);
+
+  return Markup.inlineKeyboard(buttons);
+}
+
 // ----- Основной рендер карточки -----
-async function showCandidateCardLk(ctx, candidateId, { edit = true } = {}) {
+async function showCandidateCardLk(ctx, candidateId, options = {}) {
+  const { edit = true } = options;
+  const isRestoreMode = options.restoreMode === true;
   const res = await pool.query(
     `
      SELECT
@@ -107,6 +156,7 @@ async function showCandidateCardLk(ctx, candidateId, { edit = true } = {}) {
         c.late_minutes,
         c.interview_comment,
         c.decline_reason,
+        c.closed_from_status,
         c.internship_date,
         c.internship_time_from,
         c.internship_time_to,
@@ -303,7 +353,7 @@ FROM candidates c
     rows.push([
       Markup.button.callback(
         "♻️ восстановить кандидата",
-        `lk_cand_restore_confirm_${cand.id}`
+        `lk_cand_restore_${cand.id}`
       ),
     ]);
 
@@ -321,7 +371,13 @@ FROM candidates c
   ]);
   rows.push([Markup.button.callback("◀️ К кандидатам", "lk_cand_list")]);
 
-  const keyboard = Markup.inlineKeyboard(rows);
+  let keyboard;
+
+  if (isRestoreMode) {
+    keyboard = buildRestoreKeyboard(cand);
+  } else {
+    keyboard = Markup.inlineKeyboard(rows);
+  }
 
   if (!deliverFn) {
     // fallback, если по какой-то причине deliver ещё не прокинут

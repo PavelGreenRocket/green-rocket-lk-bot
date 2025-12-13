@@ -11,8 +11,9 @@ const {
   setCandidateFilters,
   resetCandidateFilters,
 } = require("./candidateFilters");
-
+const { registerCandidateEditHandlers } = require("./candidateEdit");
 const declineReasonStates = new Map(); // key: tgId, value: { candidateId }
+const restoreModeStates = new Map();
 const historyCandidatesFilter = new Map();
 // key: tgId -> value: 'invited' | 'interviewed' | 'internship_invited' | null
 
@@ -271,6 +272,8 @@ async function showCandidatesListLk(ctx, user, options = {}) {
 // ----------------------------------------
 
 function registerCandidateListHandlers(bot, ensureUser, logError) {
+  registerCandidateEditHandlers(bot, ensureUser, logError, showCandidateCardLk);
+
   const POSITIONS = [
     { code: "barista", label: "Бариста" },
     { code: "point_admin", label: "Администратор точки" },
@@ -1689,39 +1692,30 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   // ================================
   // ВОССТАНОВЛЕНИЕ КАНДИДАТА
   // ================================
-  bot.action(/^lk_cand_restore_confirm_(\d+)$/, async (ctx) => {
+  bot.action(/^lk_cand_restore_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
       const candidateId = Number(ctx.match[1]);
+      restoreModeStates.set(ctx.from.id, candidateId);
 
-      const text =
-        "Вы уверены, что хотите восстановить кандидата?\n\n" +
-        "Кандидат вернётся в статус до отказа.";
-
-      const keyboard = Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "✅ Да, восстановить",
-            `lk_cand_restore_yes_${candidateId}`
-          ),
-        ],
-        [
-          Markup.button.callback(
-            "⬅️ Отмена",
-            `lk_cand_restore_cancel_${candidateId}`
-          ),
-        ],
-      ]);
-
-      await ctx.editMessageText(text, keyboard);
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        restoreMode: true,
+      });
     } catch (err) {
-      logError("lk_cand_restore_confirm", err);
+      logError("lk_cand_restore", err);
     }
   });
 
   bot.action(/^lk_cand_restore_cancel_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
+      restoreModeStates.delete(ctx.from.id);
+
       const candidateId = Number(ctx.match[1]);
       await showCandidateCardLk(ctx, candidateId, { edit: true });
     } catch (err) {
@@ -1729,31 +1723,73 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(/^lk_cand_restore_yes_(\d+)$/, async (ctx) => {
+  bot.action(/^lk_cand_restore_apply_(\d+)$/, async (ctx) => {
+    const admin = await ensureUser(ctx);
+    if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+      return;
     try {
       await ctx.answerCbQuery().catch(() => {});
       const candidateId = Number(ctx.match[1]);
 
-      // Возвращаем в статус до отказа (если он сохранён), иначе invited
+      // берём состояние ДО апдейта
+      const { rows } = await pool.query(
+        "SELECT id, closed_from_status FROM candidates WHERE id = $1",
+        [candidateId]
+      );
+      const cand = rows[0];
+      if (!cand) return;
+
+      const restoredStatus = cand.closed_from_status || "invited";
+
       await pool.query(
         `
-  UPDATE candidates
-     SET status = COALESCE(closed_from_status, 'invited'),
-         decline_reason = NULL,
-         declined_at = NULL,
-         closed_from_status = NULL,
-         closed_by_admin_id = NULL,
-         is_deferred = false
-   WHERE id = $1
-  `,
+      UPDATE candidates
+         SET status = COALESCE(closed_from_status, 'invited'),
+             closed_from_status = NULL,
+             decline_reason = NULL,
+             declined_at = NULL,
+             is_deferred = false,
+             closed_by_admin_id = NULL
+       WHERE id = $1
+      `,
         [candidateId]
       );
 
+      restoreModeStates.delete(ctx.from.id);
+
       await showCandidateCardLk(ctx, candidateId, { edit: true });
+
+      // ✅ Уведомление кандидату — только если НЕ interviewed
+      if (restoredStatus !== "interviewed") {
+        const uRes = await pool.query(
+          `
+  SELECT telegram_id
+  FROM users
+  WHERE candidate_id = $1
+    AND telegram_id IS NOT NULL
+  ORDER BY id DESC
+  LIMIT 1
+  `,
+          [candidateId]
+        );
+
+        const tgId = uRes.rows[0]?.telegram_id;
+        if (tgId) {
+          await notifyCandidateAfterRestore(
+            { id: candidateId, restoredStatus },
+            ctx
+          );
+        }
+      }
     } catch (err) {
-      logError("lk_cand_restore_yes", err);
+      logError("lk_cand_restore_apply", err);
     }
   });
+
+  async function notifyCandidateAfterRestore(payload, ctx) {
+    // payload.restoredStatus: invited | internship_invited | ...
+    // позже сюда добавим и наставника
+  }
 }
 
 module.exports = {
