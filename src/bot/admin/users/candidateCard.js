@@ -6,6 +6,18 @@ const pool = require("../../../db/pool");
 // Функция доставки сообщений (прокидывается из index.js)
 let deliverFn = null;
 
+// состояние "📋 Открыть карточку" по tg_id
+const traineeCardsExpandedByTgId = new Map();
+
+function isTraineeCardsExpanded(tgId) {
+  return traineeCardsExpandedByTgId.get(tgId) === true;
+}
+function toggleTraineeCardsExpanded(tgId) {
+  const cur = isTraineeCardsExpanded(tgId);
+  traineeCardsExpandedByTgId.set(tgId, !cur);
+  return !cur;
+}
+
 // Шапка карточки кандидата по статусу
 function getCandidateHeader(status) {
   switch (status) {
@@ -166,8 +178,9 @@ async function showCandidateCardLk(ctx, candidateId, options = {}) {
         COALESCE(tp_desired.title, 'не указано') AS desired_point_title,
         COALESCE(tp_intern.title, 'не указано')  AS internship_point_title,
                 COALESCE(u_admin.full_name, 'не назначен')   AS admin_name,
-        COALESCE(u_intern.full_name, 'не назначен')  AS internship_admin_name,
-        u_link.id           AS lk_user_id,
+       COALESCE(u_intern.full_name, 'не назначен')  AS internship_admin_name,
+u_intern.telegram_id AS internship_admin_tg_id,
+u_link.id           AS lk_user_id,
         u_link.full_name    AS lk_user_name,
         u_link.telegram_id  AS lk_user_telegram_id
 
@@ -190,9 +203,44 @@ FROM candidates c
 
   const cand = res.rows[0];
 
+  // --- стажировка: активная сессия / кол-во завершённых ---
+  let activeInternshipSession = null;
+  let finishedInternshipCount = 0;
+
+  if (cand.lk_user_id) {
+    const sRes = await pool.query(
+      `
+      SELECT id, day_number, finished_at, is_canceled
+      FROM internship_sessions
+      WHERE user_id = $1
+      ORDER BY id DESC
+    `,
+      [cand.lk_user_id]
+    );
+
+    const sessions = sRes.rows || [];
+    finishedInternshipCount = sessions.filter(
+      (s) => s.finished_at && !s.is_canceled
+    ).length;
+
+    activeInternshipSession =
+      sessions.find((s) => !s.finished_at && !s.is_canceled) || null;
+  }
+
+  // режим "СТАЖЁР" включаем, если стажировка уже реально стартовала
+  const isTraineeMode =
+    cand.status === "internship_invited" &&
+    (activeInternshipSession !== null || finishedInternshipCount > 0);
+
+  const traineeHeader = activeInternshipSession
+    ? `🔻 СТАЖЁР — ДЕНЬ ${activeInternshipSession.day_number} (В ПРОЦЕССЕ)`
+    : `🔻 СТАЖЁР — ВСЕГО СТАЖИРОВОК (${finishedInternshipCount})`;
+
   // 🔻 Статус в шапке
   const header = isRestoreMode
     ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
+    : isTraineeMode
+    ? traineeHeader
     : getCandidateHeader(cand.status);
 
   // Возраст без "лет"
@@ -337,19 +385,104 @@ FROM candidates c
       ),
     ]);
   } else if (cand.status === "internship_invited") {
-    // Уже приглашён на стажировку
-    rows.push([
-      Markup.button.callback(
-        "🚀 начать стажировку",
-        `lk_cand_start_intern_${cand.id}`
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        "❌ отказать кандидату",
-        `lk_cand_decline_reason_${cand.id}`
-      ),
-    ]);
+    // приглашён / стажировка в процессе
+    if (isTraineeMode) {
+      const mentorTgId = cand.internship_admin_tg_id || null;
+      const isMentor = mentorTgId && ctx.from.id === mentorTgId;
+
+      // 1) Перейти к обучению / идёт обучение
+      if (activeInternshipSession) {
+        if (isMentor) {
+          rows.push([
+            Markup.button.url(
+              "🚀 Перейти к обучению",
+              "https://t.me/barista_academy_GR_bot"
+            ),
+          ]);
+        } else {
+          rows.push([
+            Markup.button.callback(
+              "🚀 идёт обучение",
+              `lk_internship_training_locked_${cand.id}`
+            ),
+          ]);
+        }
+      } else {
+        // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
+        if (isMentor) {
+          rows.push([
+            Markup.button.callback(
+              "🚀 начать стажировку",
+              `lk_cand_start_intern_${cand.id}`
+            ),
+          ]);
+        }
+        // для остальных — ничего
+      }
+
+      // 2) данные стажировок (заглушка)
+      rows.push([
+        Markup.button.callback(
+          "данные стажировок",
+          `lk_internship_data_stub_${cand.id}`
+        ),
+      ]);
+
+      // 3) 📋 Открыть карточку ⤵️/⤴️ (toggle)
+      const expanded = isTraineeCardsExpanded(ctx.from.id);
+      rows.push([
+        Markup.button.callback(
+          expanded ? "📋 Открыть карточку ⤴️" : "📋 Открыть карточку ⤵️",
+          `lk_internship_toggle_cards_${cand.id}`
+        ),
+      ]);
+
+      // раскрытые кнопки (заглушки)
+      if (expanded) {
+        rows.push([
+          Markup.button.callback(
+            "Карточка кандидата",
+            `lk_internship_card_candidate_stub_${cand.id}`
+          ),
+        ]);
+        rows.push([
+          Markup.button.callback(
+            "Карточка стажёра",
+            `lk_internship_card_trainee_stub_${cand.id}`
+          ),
+        ]);
+        rows.push([
+          Markup.button.callback(
+            "Карточка сотрудника",
+            `lk_internship_card_worker_stub_${cand.id}`
+          ),
+        ]);
+      }
+
+      // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
+      if (!activeInternshipSession) {
+        rows.push([
+          Markup.button.callback(
+            "❌ отказать стажёру",
+            `lk_internship_decline_stub_${cand.id}`
+          ),
+        ]);
+      }
+    } else {
+      // старый режим: просто приглашён, ещё не начинали
+      rows.push([
+        Markup.button.callback(
+          "🚀 начать стажировку",
+          `lk_cand_start_intern_${cand.id}`
+        ),
+      ]);
+      rows.push([
+        Markup.button.callback(
+          "❌ отказать кандидату",
+          `lk_cand_decline_reason_${cand.id}`
+        ),
+      ]);
+    }
   } else if (cand.status === "rejected") {
     // Кандидат отклонён
     rows.push([
@@ -462,6 +595,57 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     } catch (err) {
       logError("lk_cand_settings", err);
     }
+  });
+
+  // "идёт обучение" — тост
+  bot.action(/^lk_internship_training_locked_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Обучение идёт, доступно наставнику", {
+          show_alert: false,
+        })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_internship_training_locked", err);
+    }
+  });
+
+  // данные стажировок — заглушка
+  bot.action(/^lk_internship_data_stub_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Данные стажировок — в разработке.")
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_internship_data_stub", err);
+    }
+  });
+
+  // toggle "📋 Открыть карточку"
+  bot.action(/^lk_internship_toggle_cards_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      toggleTraineeCardsExpanded(ctx.from.id);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_toggle_cards", err);
+    }
+  });
+
+  // заглушки карточек
+  bot.action(/^lk_internship_card_candidate_stub_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery("Карточка кандидата — позже.").catch(() => {});
+  });
+  bot.action(/^lk_internship_card_trainee_stub_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery("Карточка стажёра — позже.").catch(() => {});
+  });
+  bot.action(/^lk_internship_card_worker_stub_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery("Карточка сотрудника — позже.").catch(() => {});
+  });
+
+  bot.action(/^lk_internship_decline_stub_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery("Отказ стажёру — пока заглушка.").catch(() => {});
   });
 }
 

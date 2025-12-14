@@ -9,18 +9,29 @@ function registerAdminMailings(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin"))
         return;
 
-      const text =
-        "📢 *Рассылки*\n\n" +
-        "Здесь позже появятся:\n" +
-        "• массовые уведомления\n" +
-        "• шаблоны уведомлений\n" +
-        "• события автопроверок\n";
-
+      const text = "📢 *Рассылки*\n\nВыберите действие:";
       const keyboard = Markup.inlineKeyboard([
+        [{ text: "🆕 Новое уведомление", callback_data: "lk_notif_admin_new" }],
+        [
+          {
+            text: "📊 Статус последнего",
+            callback_data: "lk_notif_admin_last_status",
+          },
+        ],
+        [
+          {
+            text: "📜 История уведомлений",
+            callback_data: "lk_notif_admin_history",
+          },
+        ],
         [{ text: "⬅️ Назад", callback_data: "lk_admin_menu" }],
       ]);
 
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      await deliver(
+        ctx,
+        { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+        { edit: true }
+      );
     } catch (err) {
       logError("admin_mailings", err);
     }

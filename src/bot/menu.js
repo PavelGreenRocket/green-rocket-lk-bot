@@ -1,6 +1,8 @@
+// src/bot/menu.js
 const { Markup } = require("telegraf");
 const { deliver } = require("../utils/renderHelpers");
 const pool = require("../db/pool");
+const { countUnreadNotifications } = require("./notifications");
 
 async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
@@ -71,8 +73,11 @@ async function buildMainKeyboard(user) {
   // 3) Склад
   buttons.push([Markup.button.callback("📦 Склад", "lk_warehouse_locked")]);
 
-  // 4) Уведомления
-  buttons.push([Markup.button.callback("🔔 Уведомления", "lk_notifications")]);
+  // 4) Уведомления (+ бейдж)
+  const unread = await countUnreadNotifications(user.id);
+  const notifLabel =
+    unread > 0 ? `🔔 Уведомления (${unread})` : "🔔 Уведомления";
+  buttons.push([Markup.button.callback(notifLabel, "lk_notifications")]);
 
   // 5) ИИ
   buttons.push([
