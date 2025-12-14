@@ -195,74 +195,108 @@ async function showCandidatesListLk(ctx, user, options = {}) {
 
   // 2) ТРИ РЕЖИМА — как в старом users.js
 
-  if (filters.filtersExpanded) {
-    rows.push([
-      Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
-      Markup.button.callback("⬆️ Скрыть фильтр", "lk_cand_filter_toggle"),
-    ]);
+  // 2) НИЗ ЭКРАНА (3 состояния): обычный / раскрыть / фильтр
 
-    rows.push([
-      Markup.button.callback(
-        (filters.cancelled ? "✅ " : "⚪ ") + "Отменённые",
-        "lk_cand_filter_status_cancelled"
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        (filters.internshipInvited ? "✅ " : "⚪ ") +
-          "Приглашены на стажировку",
-        "lk_cand_filter_status_internship"
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        (filters.arrived ? "✅ " : "⚪ ") + "Собеседование проведено",
-        "lk_cand_filter_status_arrived"
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        (filters.waiting ? "✅ " : "⚪ ") + "Ожидают собеседование",
-        "lk_cand_filter_status_waiting"
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        filters.scope === "personal" ? "✅ Личные" : "Личные",
-        "lk_cand_filter_scope_personal"
-      ),
-      Markup.button.callback(
-        filters.scope === "all" ? "✅ Все" : "Все",
-        "lk_cand_filter_scope_all"
-      ),
-    ]);
+  // вкладки всегда показываем
+  rows.push([
+    Markup.button.callback("✅ Кандидаты", "admin_users_candidates"),
+    Markup.button.callback("Стажёры", "admin_users_interns"),
+    Markup.button.callback("Сотрудники", "admin_users_workers"),
+  ]);
 
-    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-  } else if (filters.historyExpanded) {
-    rows.push([
-      Markup.button.callback("🔼 скрыть 🔼", "lk_cand_toggle_history"),
-    ]);
-    rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
-
-    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-  } else {
-    rows.push([
-      Markup.button.callback("✅ Кандидаты", "admin_users_candidates"),
-      Markup.button.callback("Стажёры", "admin_users_interns"),
-      Markup.button.callback("Сотрудники", "admin_users_workers"),
-    ]);
-
+  // --- СОСТОЯНИЕ: РАСКРЫТО ("раскрыть") ---
+  if (filters.historyExpanded) {
+    // + добавить (только внутри раскрыть)
     rows.push([
       Markup.button.callback("+ добавить", "lk_cand_create_start"),
       Markup.button.callback("+ добавить", "lk_add_intern"),
       Markup.button.callback("+ добавить", "lk_add_worker"),
     ]);
 
+    // скрыть
+    rows.push([
+      Markup.button.callback("🔼 скрыть 🔼", "lk_cand_toggle_history"),
+    ]);
+
+    // общение с ИИ (заглушка)
+    rows.push([Markup.button.callback("🔮 Общение с ИИ", "lk_ai_chat_stub")]);
+
+    // история
+    rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
+
+    // фильтр (в свернутом виде)
     rows.push([
       Markup.button.callback("🔽 Фильтр 🔽", "lk_cand_filter_toggle"),
+    ]);
+
+    // назад
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+
+    // --- СОСТОЯНИЕ: ФИЛЬТР РАСКРЫТ ---
+  } else if (filters.filtersExpanded) {
+    // раскрыть (свернутое) — отдельной кнопкой
+    rows.push([
       Markup.button.callback("🔽 раскрыть 🔽", "lk_cand_toggle_history"),
     ]);
 
+    // фильтр (раскрытый) — отдельной кнопкой
+    rows.push([
+      Markup.button.callback("🔼 Фильтр 🔼", "lk_cand_filter_toggle"),
+    ]);
+
+    // статусы в 1 строку: 🕒 | ✔️ | ☑️ | ❌
+    rows.push([
+      Markup.button.callback(
+        filters.waiting ? "🕒" : "➖🕒",
+        "lk_cand_filter_status_waiting"
+      ),
+      Markup.button.callback(
+        filters.arrived ? "✔️" : "➖✔️",
+        "lk_cand_filter_status_arrived"
+      ),
+      Markup.button.callback(
+        filters.internshipInvited ? "☑️" : "➖☑️",
+        "lk_cand_filter_status_internship"
+      ),
+      Markup.button.callback(
+        filters.cancelled ? "❌" : "➖❌",
+        "lk_cand_filter_status_cancelled"
+      ),
+    ]);
+
+    // 👤 личные | 👥 все
+    rows.push([
+      Markup.button.callback(
+        filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
+        "lk_cand_filter_scope_personal"
+      ),
+      Markup.button.callback(
+        filters.scope === "all" ? "✅ 👥 все" : "👥 все",
+        "lk_cand_filter_scope_all"
+      ),
+    ]);
+
+    // сбросить фильтры
+    rows.push([
+      Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
+    ]);
+
+    // назад
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+
+    // --- СОСТОЯНИЕ: ОБЫЧНОЕ (ничего не раскрыто) ---
+  } else {
+    // раскрыть (отдельно)
+    rows.push([
+      Markup.button.callback("🔽 раскрыть 🔽", "lk_cand_toggle_history"),
+    ]);
+
+    // фильтр (отдельно)
+    rows.push([
+      Markup.button.callback("🔽 Фильтр 🔽", "lk_cand_filter_toggle"),
+    ]);
+
+    // назад
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
   }
 
@@ -1389,6 +1423,8 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       const tgId = ctx.from.id;
       const filters = getCandidateFilters(tgId);
+
+      // при открытии фильтра — закрываем "раскрыть"
       setCandidateFilters(tgId, {
         filtersExpanded: !filters.filtersExpanded,
         historyExpanded: false,
@@ -1411,6 +1447,8 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       const tgId = ctx.from.id;
       const filters = getCandidateFilters(tgId);
+
+      // при открытии "раскрыть" — закрываем фильтр
       setCandidateFilters(tgId, {
         historyExpanded: !filters.historyExpanded,
         filtersExpanded: false,
@@ -1419,6 +1457,15 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await showCandidatesListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_toggle_history", err);
+    }
+  });
+
+  // Заглушка: "Общение с ИИ"
+  bot.action("lk_ai_chat_stub", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Скоро добавим 🙂").catch(() => {});
+    } catch (err) {
+      logError("lk_ai_chat_stub", err);
     }
   });
 
