@@ -35,10 +35,15 @@ function safeTrim(text, max = 3500) {
   return t.slice(0, max - 1) + "…";
 }
 
+// kind:
+// - "user": n.created_by IS NOT NULL
+// - "system": n.created_by IS NULL (на будущее)
+function isSystemKind(kind) {
+  return kind === "system";
+}
+
 // --------------------
-// DB queries (assumptions based on current project)
-// notifications: id, text, created_at, created_by (nullable for system later)
-// user_notifications: user_id, notification_id, is_read, read_at
+// DB queries
 // --------------------
 
 async function getUnreadCount(userId) {
@@ -56,8 +61,7 @@ async function getUnreadCount(userId) {
 }
 
 async function getUnreadCountByKind(userId, kind) {
-  // kind: "user" | "system"
-  const isSystem = kind === "system";
+  const sys = isSystemKind(kind);
   const r = await pool.query(
     `
     SELECT COUNT(*)::int AS cnt
@@ -67,13 +71,12 @@ async function getUnreadCountByKind(userId, kind) {
       AND COALESCE(un.is_read, false) = false
       AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
     `,
-    [userId, isSystem]
+    [userId, sys]
   );
   return Number(r.rows[0]?.cnt || 0);
 }
 
-async function getLatestUnread(userId, kind) {
-  const isSystem = kind === "system";
+async function getLatestUnreadAny(userId) {
   const r = await pool.query(
     `
     SELECT
@@ -88,92 +91,286 @@ async function getLatestUnread(userId, kind) {
     LEFT JOIN users u ON u.id = n.created_by
     WHERE un.user_id = $1
       AND COALESCE(un.is_read, false) = false
-      AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
     ORDER BY n.created_at DESC, n.id DESC
     LIMIT 1
     `,
-    [userId, isSystem]
+    [userId]
   );
   return r.rows[0] || null;
 }
 
-async function markAllAsRead(userId, kind) {
-  const isSystem = kind === "system";
+async function markAllAsReadAny(userId) {
   await pool.query(
     `
-    UPDATE user_notifications un
+    UPDATE user_notifications
     SET is_read = true,
         read_at = NOW()
-    FROM notifications n
-    WHERE n.id = un.notification_id
-      AND un.user_id = $1
-      AND COALESCE(un.is_read, false) = false
-      AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
+    WHERE user_id = $1
+      AND COALESCE(is_read, false) = false
     `,
-    [userId, isSystem]
+    [userId]
   );
 }
 
-async function insertNotificationAndFanout({
-  createdBy,
-  text,
-  recipientUserIds,
+async function getUserHistoryPage({
+  userId,
+  kind,
+  page,
+  pageSize = 10,
+  sender,
 }) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  const sys = isSystemKind(kind);
+  const offset = page * pageSize;
 
-    const ins = await client.query(
-      `
-      INSERT INTO notifications (text, created_by, created_at)
-      VALUES ($1, $2, NOW())
-      RETURNING id
-      `,
-      [text, createdBy ?? null]
-    );
+  const params = [userId, sys];
+  let senderWhere = "";
 
-    const notificationId = ins.rows[0]?.id;
-    if (!notificationId)
-      throw new Error("Не удалось создать notifications row");
-
-    // fan-out
-    if (recipientUserIds.length) {
-      await client.query(
-        `
-        INSERT INTO user_notifications (user_id, notification_id, is_read, read_at)
-        SELECT x.user_id, $1, false, NULL
-        FROM UNNEST($2::int[]) AS x(user_id)
-        `,
-        [notificationId, recipientUserIds]
-      );
-    }
-
-    await client.query("COMMIT");
-    return notificationId;
-  } catch (e) {
-    await client.query("ROLLBACK");
-    throw e;
-  } finally {
-    client.release();
+  // sender filter имеет смысл в "user" истории (админы), но мы позволим и в system (на будущее)
+  if (sender !== "all") {
+    params.push(Number(sender));
+    senderWhere = `AND n.created_by = $${params.length}`;
   }
+
+  params.push(pageSize, offset);
+
+  const r = await pool.query(
+    `
+    SELECT
+      n.id,
+      n.text,
+      n.created_at,
+      n.created_by,
+      COALESCE(un.is_read, false) AS is_read,
+      u.full_name AS sender_name,
+      u.position  AS sender_position
+    FROM user_notifications un
+    JOIN notifications n ON n.id = un.notification_id
+    LEFT JOIN users u ON u.id = n.created_by
+    WHERE un.user_id = $1
+      AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
+      ${senderWhere}
+    ORDER BY n.created_at DESC, n.id DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length}
+    `,
+    params
+  );
+
+  return r.rows.map((x) => ({
+    id: Number(x.id),
+    text: x.text || "",
+    created_at: x.created_at,
+    created_by: x.created_by,
+    is_read: !!x.is_read,
+    sender_name: x.sender_name || null,
+    sender_position: x.sender_position || null,
+  }));
+}
+
+async function getAdminsList(limit = 30) {
+  const r = await pool.query(
+    `
+    SELECT id, full_name, position, role
+    FROM users
+    WHERE role IN ('admin','super_admin')
+      AND telegram_id IS NOT NULL
+    ORDER BY role, full_name
+    LIMIT $1
+    `,
+    [limit]
+  );
+  return r.rows.map((u) => ({
+    id: Number(u.id),
+    full_name: u.full_name || "Без имени",
+    position: u.position || null,
+    role: u.role || "admin",
+  }));
 }
 
 // --------------------
-// USER SCREEN state
+// USER history state (filter toggle / sender / page / kind)
 // --------------------
 
-const userViewState = new Map(); // tgId -> { tab: "user" | "system" }
+const userHistoryState = new Map(); // tgId -> { kind, page, sender, filterExpanded }
 
-function getUserViewState(tgId) {
-  return userViewState.get(tgId) || { tab: "user" };
+function getHistState(tgId) {
+  return (
+    userHistoryState.get(tgId) || {
+      kind: "user",
+      page: 0,
+      sender: "all",
+      filterExpanded: false,
+    }
+  );
 }
-function setUserViewState(tgId, patch) {
-  const prev = getUserViewState(tgId);
-  userViewState.set(tgId, { ...prev, ...patch });
+function setHistState(tgId, patch) {
+  userHistoryState.set(tgId, { ...getHistState(tgId), ...patch });
 }
 
 // --------------------
-// ADMIN COMPOSER state (new mailing)
+// USER screens
+// --------------------
+
+async function showUserHub(ctx, user, { edit = true } = {}) {
+  const unreadTotal = await getUnreadCount(user.id);
+  const unreadUser = await getUnreadCountByKind(user.id, "user");
+  const unreadSystem = await getUnreadCountByKind(user.id, "system");
+  const latest = await getLatestUnreadAny(user.id);
+
+  let text = "🔔 *Уведомления*\n\n";
+
+  if (!latest) {
+    text += "Сейчас нет новых уведомлений.";
+  } else {
+    // заголовок содержит тип и “от кого” для пользовательского
+    if (latest.created_by == null) {
+      text += `*Системное уведомление*\n`;
+    } else {
+      const fromName = latest.sender_name || "Неизвестно";
+      const fromPos = posLabel(latest.sender_position);
+      text += `*Пользовательское уведомление*\n`;
+      text += `От: ${fromName}, ${fromPos}\n`;
+    }
+    text += `Дата: ${formatDtRu(latest.created_at)}\n\n`;
+    text += safeTrim(latest.text, 3500);
+  }
+
+  const rows = [
+    [
+      Markup.button.callback(
+        `📜 Пользовательские (${unreadUser})`,
+        "lk_notif_hist_user_1"
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `📜 Системные (${unreadSystem})`,
+        "lk_notif_hist_system_1"
+      ),
+    ],
+  ];
+
+  if (unreadTotal > 0) {
+    rows.push([Markup.button.callback("✅ Прочитал", "lk_notif_read_all")]);
+  }
+
+  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+
+  const keyboard = Markup.inlineKeyboard(rows);
+
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit }
+  );
+}
+
+function kindTitle(kind) {
+  return kind === "system" ? "Системные" : "Пользовательские";
+}
+
+function senderLabel(kind, sender, adminsMap) {
+  if (sender === "all") return "Все отправители";
+  const a = adminsMap.get(Number(sender));
+  if (!a) return `id=${sender}`;
+  return `${a.full_name}${a.position ? `, ${posLabel(a.position)}` : ""}`;
+}
+
+async function showUserHistory(ctx, user, { edit = true } = {}) {
+  const tgId = ctx.from.id;
+  const st = getHistState(tgId);
+
+  const kind = st.kind;
+  const page = Math.max(0, Number(st.page || 0));
+  const sender = st.sender ?? "all";
+  const expanded = !!st.filterExpanded;
+
+  const admins = await getAdminsList(20);
+  const adminsMap = new Map(admins.map((a) => [a.id, a]));
+
+  const items = await getUserHistoryPage({
+    userId: user.id,
+    kind,
+    page,
+    pageSize: 10,
+    sender,
+  });
+
+  let text =
+    `📜 *История — ${kindTitle(kind)}*\n\n` +
+    `Фильтр: *${senderLabel(kind, sender, adminsMap)}*\n` +
+    `Страница: ${page + 1}\n\n`;
+
+  if (!items.length) {
+    text += "_Нет сообщений на этой странице._";
+  } else {
+    for (const n of items) {
+      const newMark = n.is_read ? "" : "🟢 ";
+      if (kind === "system") {
+        text += `${newMark}*#${n.id}* · ${formatDtRu(n.created_at)}\n`;
+        text += `Тип: Системное\n`;
+      } else {
+        const who = `${n.sender_name || "Неизвестно"}, ${posLabel(
+          n.sender_position
+        )}`;
+        text += `${newMark}*#${n.id}* · ${formatDtRu(n.created_at)}\n`;
+        text += `От: ${who}\n`;
+      }
+      text += `${safeTrim(n.text, 350)}\n\n`;
+    }
+  }
+
+  // --- keyboard (beautiful/structured)
+  const kb = [];
+
+  // nav row
+  kb.push([
+    Markup.button.callback("⬅️", `lk_notif_hist_${kind}_prev`),
+    Markup.button.callback("➡️", `lk_notif_hist_${kind}_next`),
+  ]);
+
+  // filter toggle row
+  kb.push([
+    Markup.button.callback(
+      expanded ? "🔎 Фильтр (скрыть)" : "🔎 Фильтр",
+      `lk_notif_hist_${kind}_filter_toggle`
+    ),
+  ]);
+
+  // filter panel (expanded)
+  if (expanded) {
+    kb.push([
+      Markup.button.callback(
+        sender === "all" ? "✅ Все отправители" : "Все отправители",
+        `lk_notif_hist_${kind}_sender_all`
+      ),
+    ]);
+
+    // показываем админов кнопками 2 в ряд (до 10, чтобы красиво)
+    const btns = admins
+      .slice(0, 10)
+      .map((a) =>
+        Markup.button.callback(
+          `${sender === a.id ? "✅ " : ""}${a.full_name}`,
+          `lk_notif_hist_${kind}_sender_${a.id}`
+        )
+      );
+    for (let i = 0; i < btns.length; i += 2) kb.push(btns.slice(i, i + 2));
+  }
+
+  // back row
+  kb.push([Markup.button.callback("⬅️ Назад", "lk_notifications")]);
+
+  const keyboard = Markup.inlineKeyboard(kb);
+
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit }
+  );
+}
+
+// --------------------
+// ADMIN COMPOSER (из прошлой версии) — оставляем как было
 // --------------------
 
 const adminComposer = new Map();
@@ -182,7 +379,7 @@ const adminComposer = new Map();
  *   step: "idle" | "await_text",
  *   filter: "workers" | "workers_interns" | "interns",
  *   excludeIds: number[],
- *   pickIds: number[], // if not empty => send to these конкретным
+ *   pickIds: number[],
  * }
  */
 function getComposer(tgId) {
@@ -259,14 +456,11 @@ function buildAdminComposerKeyboard(st) {
 }
 
 async function resolveRecipientsByFilter(filter) {
-  // важно: пользователь сказал, что считаем статусы как в меню (worker/intern/candidate) — верно
-  // тут используются worker/intern
+  // как ты подтвердил: worker / intern / candidate — верно
   let where = "u.staff_status = 'worker'";
-  if (filter === "workers_interns") {
+  if (filter === "workers_interns")
     where = "u.staff_status IN ('worker','intern')";
-  } else if (filter === "interns") {
-    where = "u.staff_status = 'intern'";
-  }
+  else if (filter === "interns") where = "u.staff_status = 'intern'";
 
   const r = await pool.query(
     `
@@ -285,12 +479,51 @@ async function resolveRecipientsByFilter(filter) {
   }));
 }
 
-// --------------------
-// ADMIN lists for pick/exclude
-// --------------------
+async function insertNotificationAndFanout({
+  createdBy,
+  text,
+  recipientUserIds,
+}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-const adminPickState = new Map(); // tgId -> { mode: "pick"|"exclude", page, ids: number[] }
+    const ins = await client.query(
+      `
+      INSERT INTO notifications (text, created_by, created_at)
+      VALUES ($1, $2, NOW())
+      RETURNING id
+      `,
+      [text, createdBy ?? null]
+    );
 
+    const notificationId = ins.rows[0]?.id;
+    if (!notificationId)
+      throw new Error("Не удалось создать notifications row");
+
+    if (recipientUserIds.length) {
+      await client.query(
+        `
+        INSERT INTO user_notifications (user_id, notification_id, is_read, read_at)
+        SELECT x.user_id, $1, false, NULL
+        FROM UNNEST($2::int[]) AS x(user_id)
+        `,
+        [notificationId, recipientUserIds]
+      );
+    }
+
+    await client.query("COMMIT");
+    return notificationId;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// ADMIN pick/exclude list state
+const adminPickState = new Map(); // tgId -> { mode, page }
 function getPickState(tgId) {
   return adminPickState.get(tgId) || { mode: "pick", page: 0 };
 }
@@ -323,10 +556,7 @@ async function loadUsersPage({ page, pageSize = 20 }) {
 
 function buildUsersPageText(title, st, users, selectedIds) {
   let text = `👥 *${title}*\n\n`;
-  if (!users.length) {
-    text += "_Пользователей не найдено._\n";
-    return text;
-  }
+  if (!users.length) return text + "_Пользователей не найдено._\n";
   text += `Страница: ${st.page + 1}\n\n`;
   for (const u of users) {
     const mark = selectedIds.includes(u.id) ? "✅" : "▫️";
@@ -339,7 +569,6 @@ function buildUsersPageText(title, st, users, selectedIds) {
 
 function buildUsersPageKeyboard(prefix, users, selectedIds, page) {
   const rows = [];
-
   for (const u of users) {
     const mark = selectedIds.includes(u.id) ? "✅" : "▫️";
     rows.push([
@@ -349,32 +578,18 @@ function buildUsersPageKeyboard(prefix, users, selectedIds, page) {
       ),
     ]);
   }
-
   const nav = [];
   if (page > 0) nav.push(Markup.button.callback("⬅️", `${prefix}_prev`));
   nav.push(Markup.button.callback("➡️", `${prefix}_next`));
   rows.push(nav);
-
   rows.push([
     Markup.button.callback("✅ Готово", `${prefix}_done`),
     Markup.button.callback("⬅️ Назад", "lk_notif_admin_new"),
   ]);
-
   return Markup.inlineKeyboard(rows);
 }
 
-// --------------------
-// ADMIN: status last + history
-// --------------------
-
-const adminHistoryState = new Map(); // tgId -> { page:0, sender:"all"|number }
-function getAdminHistoryState(tgId) {
-  return adminHistoryState.get(tgId) || { page: 0, sender: "all" };
-}
-function setAdminHistoryState(tgId, patch) {
-  adminHistoryState.set(tgId, { ...getAdminHistoryState(tgId), ...patch });
-}
-
+// ADMIN: last status + history (как было)
 async function getLastNotification() {
   const r = await pool.query(
     `
@@ -387,6 +602,19 @@ async function getLastNotification() {
     `
   );
   return r.rows[0] || null;
+}
+
+async function countUnreadUsersForNotification(notificationId) {
+  const r = await pool.query(
+    `
+    SELECT COUNT(*)::int AS cnt
+    FROM user_notifications
+    WHERE notification_id = $1
+      AND COALESCE(is_read, false) = false
+    `,
+    [notificationId]
+  );
+  return Number(r.rows[0]?.cnt || 0);
 }
 
 async function getUnreadUsersForNotification(notificationId, limit = 60) {
@@ -410,17 +638,12 @@ async function getUnreadUsersForNotification(notificationId, limit = 60) {
   }));
 }
 
-async function countUnreadUsersForNotification(notificationId) {
-  const r = await pool.query(
-    `
-    SELECT COUNT(*)::int AS cnt
-    FROM user_notifications
-    WHERE notification_id = $1
-      AND COALESCE(is_read, false) = false
-    `,
-    [notificationId]
-  );
-  return Number(r.rows[0]?.cnt || 0);
+const adminHistoryState = new Map(); // tgId -> { page, sender }
+function getAdminHistoryState(tgId) {
+  return adminHistoryState.get(tgId) || { page: 0, sender: "all" };
+}
+function setAdminHistoryState(tgId, patch) {
+  adminHistoryState.set(tgId, { ...getAdminHistoryState(tgId), ...patch });
 }
 
 async function getHistoryPage({ page, pageSize = 10, sender }) {
@@ -449,7 +672,7 @@ async function getHistoryPage({ page, pageSize = 10, sender }) {
   );
 
   return r.rows.map((x) => ({
-    id: x.id,
+    id: Number(x.id),
     text: x.text || "",
     created_at: x.created_at,
     created_by: x.created_by,
@@ -458,96 +681,8 @@ async function getHistoryPage({ page, pageSize = 10, sender }) {
   }));
 }
 
-async function getAdminsList(limit = 30) {
-  const r = await pool.query(
-    `
-    SELECT id, full_name, position, role
-    FROM users
-    WHERE role IN ('admin','super_admin')
-      AND telegram_id IS NOT NULL
-    ORDER BY role, full_name
-    LIMIT $1
-    `,
-    [limit]
-  );
-  return r.rows.map((u) => ({
-    id: Number(u.id),
-    full_name: u.full_name || "Без имени",
-    position: u.position || null,
-    role: u.role || "admin",
-  }));
-}
-
-// --------------------
-// screens (user)
-// --------------------
-
-async function showUserNotificationsScreen(ctx, user, { edit = true } = {}) {
-  const tgId = ctx.from.id;
-  const view = getUserViewState(tgId);
-  const tab = view.tab || "user";
-
-  const unreadCntUser = await getUnreadCountByKind(user.id, "user");
-  const unreadCntSys = await getUnreadCountByKind(user.id, "system");
-
-  const latest = await getLatestUnread(user.id, tab);
-
-  let text = "🔔 *Уведомления*\n\n";
-
-  if (!latest) {
-    text += "Сейчас нет новых уведомлений.";
-  } else {
-    if (tab === "system") {
-      text += `*Системное уведомление*\n`;
-    } else {
-      const fromName = latest.sender_name || "Неизвестно";
-      const fromPos = posLabel(latest.sender_position);
-      text += `*Пользовательское уведомление*\n`;
-      text += `От: ${fromName}, ${fromPos}\n`;
-    }
-    text += latest.created_at
-      ? `Дата: ${formatDtRu(latest.created_at)}\n\n`
-      : "\n";
-    text += safeTrim(latest.text, 3500);
-  }
-
-  const rows = [];
-
-  rows.push([
-    Markup.button.callback(
-      `${tab === "user" ? "✅ " : ""}Пользовательские (${unreadCntUser})`,
-      "lk_notif_tab_user"
-    ),
-  ]);
-  rows.push([
-    Markup.button.callback(
-      `${tab === "system" ? "✅ " : ""}Системные (${unreadCntSys})`,
-      "lk_notif_tab_system"
-    ),
-  ]);
-
-  if (latest) {
-    rows.push([Markup.button.callback("✅ Прочитал", "lk_notif_mark_read")]);
-  }
-
-  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
-
-  const keyboard = Markup.inlineKeyboard(rows);
-
-  await deliver(
-    ctx,
-    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
-    { edit }
-  );
-}
-
-// --------------------
-// screens (admin)
-// --------------------
-
 async function showAdminNotificationsRoot(ctx, { edit = true } = {}) {
-  const text = "📢 *Уведомления (рассылки)*\n\n" + "Выберите действие:";
-
+  const text = "📢 *Уведомления (рассылки)*\n\nВыберите действие:";
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("🆕 Новое уведомление", "lk_notif_admin_new")],
     [
@@ -564,7 +699,6 @@ async function showAdminNotificationsRoot(ctx, { edit = true } = {}) {
     ],
     [Markup.button.callback("⬅️ Назад", "lk_admin_menu")],
   ]);
-
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -583,16 +717,11 @@ async function showAdminNewComposer(ctx, admin, { edit = true } = {}) {
     "🆕 *Новое уведомление*\n\n" +
     "Отправь *текст уведомления* следующим сообщением.\n\n";
 
-  if (pickMode) {
+  if (pickMode)
     text += `Режим получателей: *конкретные пользователи* (${st.pickIds.length})\n`;
-  } else {
-    text += `Фильтр получателей: *${filterLabel(st.filter)}*\n`;
-  }
+  else text += `Фильтр получателей: *${filterLabel(st.filter)}*\n`;
 
-  if (exclCount) {
-    text += `Исключено: ${exclCount}\n`;
-  }
-
+  if (exclCount) text += `Исключено: ${exclCount}\n`;
   text +=
     "\nПодсказка: можно сначала настроить фильтры/выбор, потом отправить текст.";
 
@@ -650,15 +779,13 @@ async function showAdminLastStatus(ctx, { edit = true } = {}) {
         u.position ? `, ${posLabel(u.position)}` : ""
       }\n`;
     }
-    if (unreadTotal > unreadUsers.length) {
+    if (unreadTotal > unreadUsers.length)
       text += `…и ещё ${unreadTotal - unreadUsers.length}\n`;
-    }
   }
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback("⬅️ Назад", "lk_admin_notifications")],
   ]);
-
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -673,18 +800,15 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
   const sender = st.sender ?? "all";
 
   const items = await getHistoryPage({ page, pageSize: 10, sender });
+  const admins = await getAdminsList(20);
 
-  let header = "📜 *История уведомлений*\n\n";
-  header += `Фильтр отправителя: *${
-    sender === "all" ? "все" : `id=${sender}`
-  }*\n`;
-  header += `Страница: ${page + 1}\n\n`;
+  let text =
+    "📜 *История уведомлений*\n\n" +
+    `Фильтр отправителя: *${sender === "all" ? "все" : `id=${sender}`}*\n` +
+    `Страница: ${page + 1}\n\n`;
 
-  let text = header;
-
-  if (!items.length) {
-    text += "_Сообщений нет на этой странице._";
-  } else {
+  if (!items.length) text += "_Сообщений нет на этой странице._";
+  else {
     for (const n of items) {
       const who =
         n.created_by == null
@@ -696,14 +820,11 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
     }
   }
 
-  const admins = await getAdminsList(20);
-
   const kb = [];
   kb.push([
     Markup.button.callback("⬅️", "lk_notif_admin_hist_prev"),
     Markup.button.callback("➡️", "lk_notif_admin_hist_next"),
   ]);
-
   kb.push([
     Markup.button.callback(
       sender === "all" ? "✅ Все отправители" : "Все отправители",
@@ -711,7 +832,6 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
     ),
   ]);
 
-  // быстрый выбор отправителя (до 10-12 кнопок, чтобы не раздувать)
   const adminBtns = admins
     .slice(0, 10)
     .map((a) =>
@@ -720,14 +840,12 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
         `lk_notif_admin_hist_sender_${a.id}`
       )
     );
-  for (let i = 0; i < adminBtns.length; i += 2) {
+  for (let i = 0; i < adminBtns.length; i += 2)
     kb.push(adminBtns.slice(i, i + 2));
-  }
 
   kb.push([Markup.button.callback("⬅️ Назад", "lk_admin_notifications")]);
 
   const keyboard = Markup.inlineKeyboard(kb);
-
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -740,80 +858,164 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
 // --------------------
 
 function registerNotifications(bot, ensureUser, logError) {
-  // USER: open screen
+  // USER hub
   bot.action("lk_notifications", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-
-      // default tab
-      setUserViewState(ctx.from.id, { tab: "user" });
-
-      await showUserNotificationsScreen(ctx, user, { edit: true });
+      await showUserHub(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_notifications", err);
     }
   });
 
-  bot.action("lk_notif_tab_user", async (ctx) => {
+  // hub -> history
+  bot.action("lk_notif_hist_user_1", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setHistState(ctx.from.id, {
+        kind: "user",
+        page: 0,
+        sender: "all",
+        filterExpanded: false,
+      });
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_notif_hist_user_1", err);
+    }
+  });
+
+  bot.action("lk_notif_hist_system_1", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setHistState(ctx.from.id, {
+        kind: "system",
+        page: 0,
+        sender: "all",
+        filterExpanded: false,
+      });
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_notif_hist_system_1", err);
+    }
+  });
+
+  // mark read all (без вкладок — читаем всё)
+  bot.action("lk_notif_read_all", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await markAllAsReadAny(user.id);
+      await showUserHub(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_notif_read_all", err);
+    }
+  });
+
+  // history nav
+  bot.action(/^lk_notif_hist_(user|system)_prev$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      setUserViewState(ctx.from.id, { tab: "user" });
-      await showUserNotificationsScreen(ctx, user, { edit: true });
+      const kind = ctx.match[1];
+      const st = getHistState(ctx.from.id);
+      const page = Math.max(0, (st.page || 0) - 1);
+
+      setHistState(ctx.from.id, { kind, page });
+      await showUserHistory(ctx, user, { edit: true });
     } catch (err) {
-      logError("lk_notif_tab_user", err);
+      logError("lk_notif_hist_prev", err);
     }
   });
 
-  bot.action("lk_notif_tab_system", async (ctx) => {
+  bot.action(/^lk_notif_hist_(user|system)_next$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      setUserViewState(ctx.from.id, { tab: "system" });
-      await showUserNotificationsScreen(ctx, user, { edit: true });
+      const kind = ctx.match[1];
+      const st = getHistState(ctx.from.id);
+      const page = Math.max(0, (st.page || 0) + 1);
+
+      setHistState(ctx.from.id, { kind, page });
+      await showUserHistory(ctx, user, { edit: true });
     } catch (err) {
-      logError("lk_notif_tab_system", err);
+      logError("lk_notif_hist_next", err);
     }
   });
 
-  bot.action("lk_notif_mark_read", async (ctx) => {
+  // filter toggle
+  bot.action(/^lk_notif_hist_(user|system)_filter_toggle$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      const view = getUserViewState(ctx.from.id);
-      const tab = view.tab || "user";
+      const kind = ctx.match[1];
+      const st = getHistState(ctx.from.id);
 
-      await markAllAsRead(user.id, tab);
-
-      await showUserNotificationsScreen(ctx, user, { edit: true });
+      setHistState(ctx.from.id, { kind, filterExpanded: !st.filterExpanded });
+      await showUserHistory(ctx, user, { edit: true });
     } catch (err) {
-      logError("lk_notif_mark_read", err);
+      logError("lk_notif_hist_filter_toggle", err);
     }
   });
 
-  // ADMIN ROOT (entry from admin->mailings)
+  // sender all
+  bot.action(/^lk_notif_hist_(user|system)_sender_all$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const kind = ctx.match[1];
+      setHistState(ctx.from.id, { kind, sender: "all", page: 0 });
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_notif_hist_sender_all", err);
+    }
+  });
+
+  // sender конкретный
+  bot.action(/^lk_notif_hist_(user|system)_sender_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const kind = ctx.match[1];
+      const senderId = Number(ctx.match[2]);
+
+      setHistState(ctx.from.id, { kind, sender: senderId, page: 0 });
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_notif_hist_sender_id", err);
+    }
+  });
+
+  // ADMIN ROOT (entry)
   bot.action("lk_admin_notifications", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const admin = await ensureUser(ctx);
       if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
         return;
-
       await showAdminNotificationsRoot(ctx, { edit: true });
     } catch (err) {
       logError("lk_admin_notifications", err);
     }
   });
 
-  // ADMIN: root actions
+  // ADMIN: new / cancel / last / history
   bot.action("lk_notif_admin_new", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -821,14 +1023,12 @@ function registerNotifications(bot, ensureUser, logError) {
       if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
         return;
 
-      // reset state for new compose
       setComposer(ctx.from.id, {
         step: "await_text",
-        filter: "workers", // default = only workers
+        filter: "workers",
         excludeIds: [],
         pickIds: [],
       });
-
       await showAdminNewComposer(ctx, admin, { edit: true });
     } catch (err) {
       logError("lk_notif_admin_new", err);
@@ -844,7 +1044,6 @@ function registerNotifications(bot, ensureUser, logError) {
 
       clearComposer(ctx.from.id);
       clearPickState(ctx.from.id);
-
       await showAdminNotificationsRoot(ctx, { edit: true });
     } catch (err) {
       logError("lk_notif_admin_cancel", err);
@@ -857,7 +1056,6 @@ function registerNotifications(bot, ensureUser, logError) {
       const admin = await ensureUser(ctx);
       if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
         return;
-
       await showAdminLastStatus(ctx, { edit: true });
     } catch (err) {
       logError("lk_notif_admin_last_status", err);
@@ -921,7 +1119,7 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  // ADMIN: pick users
+  // ADMIN: pick users / exclude users
   bot.action("lk_notif_admin_pick_users", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -958,7 +1156,6 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  // ADMIN: exclude users
   bot.action("lk_notif_admin_exclude_users", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -995,7 +1192,7 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  // --- pick pagination + toggle
+  // pick pagination + toggle
   bot.action("lk_notif_pick_prev", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1023,6 +1220,7 @@ function registerNotifications(bot, ensureUser, logError) {
         selected,
         page
       );
+
       await deliver(
         ctx,
         { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -1060,6 +1258,7 @@ function registerNotifications(bot, ensureUser, logError) {
         selected,
         page
       );
+
       await deliver(
         ctx,
         { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -1126,7 +1325,7 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  // --- exclude pagination + toggle
+  // exclude pagination + toggle
   bot.action("lk_notif_excl_prev", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1154,6 +1353,7 @@ function registerNotifications(bot, ensureUser, logError) {
         selected,
         page
       );
+
       await deliver(
         ctx,
         { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -1191,6 +1391,7 @@ function registerNotifications(bot, ensureUser, logError) {
         selected,
         page
       );
+
       await deliver(
         ctx,
         { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -1257,7 +1458,7 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  // ADMIN: history nav + sender filter
+  // ADMIN: history nav + sender filter (как было)
   bot.action("lk_notif_admin_hist_prev", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1325,13 +1526,11 @@ function registerNotifications(bot, ensureUser, logError) {
   bot.on("text", async (ctx, next) => {
     try {
       const admin = await ensureUser(ctx);
-      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
         return next();
-      }
 
       const tgId = ctx.from.id;
       const st = getComposer(tgId);
-
       if (st.step !== "await_text") return next();
 
       const raw = (ctx.message?.text || "").trim();
@@ -1339,10 +1538,8 @@ function registerNotifications(bot, ensureUser, logError) {
 
       const text = safeTrim(raw, 3500);
 
-      // resolve recipients
       let recipients = [];
       if ((st.pickIds || []).length > 0) {
-        // конкретным пользователям
         const r = await pool.query(
           `
           SELECT id, telegram_id
@@ -1360,19 +1557,18 @@ function registerNotifications(bot, ensureUser, logError) {
         recipients = await resolveRecipientsByFilter(st.filter);
       }
 
-      // exclude
       const excl = new Set((st.excludeIds || []).map(Number));
       recipients = recipients.filter((r) => !excl.has(r.id));
 
       const recipientUserIds = recipients.map((r) => r.id);
 
+      // из админки = пользовательское (created_by = admin.id)
       const notificationId = await insertNotificationAndFanout({
-        createdBy: admin.id, // админка => пользовательское (как ты уточнил)
+        createdBy: admin.id,
         text,
         recipientUserIds,
       });
 
-      // send tg pings (best-effort)
       const pingText =
         "🔔 *Новое уведомление*\n\n" +
         "Откройте раздел: *🔔 Уведомления* в ЛК.";
@@ -1383,7 +1579,6 @@ function registerNotifications(bot, ensureUser, logError) {
           .catch(() => {});
       }
 
-      // reset composer
       clearComposer(tgId);
       clearPickState(tgId);
 
@@ -1405,7 +1600,7 @@ function registerNotifications(bot, ensureUser, logError) {
 
       await ctx.reply(
         `✅ Уведомление отправлено.\nID: ${notificationId}\nПолучателей: ${recipientUserIds.length}`,
-        { ...keyboard }
+        keyboard
       );
     } catch (err) {
       logError("lk_notif_admin_send_text", err);
