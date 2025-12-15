@@ -638,10 +638,17 @@ async function getUnreadUsersForNotification(notificationId, limit = 60) {
   }));
 }
 
-const adminHistoryState = new Map(); // tgId -> { page, sender }
+const adminHistoryState = new Map(); // tgId -> { page, sender, filterExpanded }
 function getAdminHistoryState(tgId) {
-  return adminHistoryState.get(tgId) || { page: 0, sender: "all" };
+  return (
+    adminHistoryState.get(tgId) || {
+      page: 0,
+      sender: "all",
+      filterExpanded: false,
+    }
+  );
 }
+
 function setAdminHistoryState(tgId, patch) {
   adminHistoryState.set(tgId, { ...getAdminHistoryState(tgId), ...patch });
 }
@@ -679,6 +686,134 @@ async function getHistoryPage({ page, pageSize = 10, sender }) {
     sender_name: x.sender_name || null,
     sender_position: x.sender_position || null,
   }));
+}
+
+async function getAdminHistoryTotalCount(sender) {
+  const params = [];
+  let where = "";
+  if (sender !== "all") {
+    params.push(Number(sender));
+    where = `WHERE n.created_by = $1`;
+  }
+
+  const r = await pool.query(
+    `
+    SELECT COUNT(*)::int AS cnt
+    FROM notifications n
+    ${where}
+    `,
+    params
+  );
+
+  return Number(r.rows[0]?.cnt || 0);
+}
+
+async function getAdminHistorySummaryPage({ page, pageSize = 10, sender }) {
+  const offset = page * pageSize;
+  const params = [];
+  let where = "";
+
+  if (sender !== "all") {
+    params.push(Number(sender));
+    where = `WHERE n.created_by = $${params.length}`;
+  }
+
+  // pageSize/offset
+  params.push(pageSize, offset);
+
+  const r = await pool.query(
+    `
+    SELECT
+      n.id,
+      n.created_at,
+      n.created_by,
+      u.full_name AS sender_name,
+      u.position  AS sender_position,
+      COUNT(un.user_id)::int AS total_recipients,
+      SUM(CASE WHEN COALESCE(un.is_read,false)=false THEN 1 ELSE 0 END)::int AS unread_count
+    FROM notifications n
+    LEFT JOIN users u ON u.id = n.created_by
+    LEFT JOIN user_notifications un ON un.notification_id = n.id
+    ${where}
+    GROUP BY n.id, n.created_at, n.created_by, u.full_name, u.position
+    ORDER BY n.created_at DESC, n.id DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length}
+    `,
+    params
+  );
+
+  return r.rows.map((x) => ({
+    id: Number(x.id),
+    created_at: x.created_at,
+    created_by: x.created_by,
+    sender_name: x.sender_name || null,
+    sender_position: x.sender_position || null,
+    total_recipients: Number(x.total_recipients || 0),
+    unread_count: Number(x.unread_count || 0),
+  }));
+}
+
+async function getAdminNotificationDetail(notificationId) {
+  const r = await pool.query(
+    `
+    SELECT
+      n.id, n.text, n.created_at, n.created_by,
+      u.full_name AS sender_name,
+      u.position  AS sender_position
+    FROM notifications n
+    LEFT JOIN users u ON u.id = n.created_by
+    WHERE n.id = $1
+    `,
+    [notificationId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getAdminUnreadUsers(notificationId, limit = 120) {
+  const r = await pool.query(
+    `
+    SELECT
+      u.id,
+      u.full_name,
+      u.staff_status,
+      u.position,
+      u.work_phone,
+      u.username
+    FROM user_notifications un
+    JOIN users u ON u.id = un.user_id
+    WHERE un.notification_id = $1
+      AND COALESCE(un.is_read,false) = false
+    ORDER BY u.full_name
+    LIMIT $2
+    `,
+    [notificationId, limit]
+  );
+
+  return r.rows.map((u) => ({
+    id: Number(u.id),
+    full_name: u.full_name || "Без имени",
+    staff_status: u.staff_status || "",
+    position: u.position || null,
+    work_phone: u.work_phone || null,
+    username: u.username || null,
+  }));
+}
+
+async function getAdminRecipientsCounts(notificationId) {
+  const r = await pool.query(
+    `
+    SELECT
+      COUNT(*)::int AS total,
+      SUM(CASE WHEN COALESCE(is_read,false)=false THEN 1 ELSE 0 END)::int AS unread
+    FROM user_notifications
+    WHERE notification_id = $1
+    `,
+    [notificationId]
+  );
+  return {
+    total: Number(r.rows[0]?.total || 0),
+    unread: Number(r.rows[0]?.unread || 0),
+  };
 }
 
 async function showAdminNotificationsRoot(ctx, { edit = true } = {}) {
@@ -799,53 +934,143 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
   const page = Math.max(0, Number(st.page || 0));
   const sender = st.sender ?? "all";
 
-  const items = await getHistoryPage({ page, pageSize: 10, sender });
+  const items = await getAdminHistorySummaryPage({
+    page,
+    pageSize: 10,
+    sender,
+  });
   const admins = await getAdminsList(20);
 
+  const total = await getAdminHistoryTotalCount(sender);
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // ТЕКСТ
   let text =
     "📜 *История уведомлений*\n\n" +
     `Фильтр отправителя: *${sender === "all" ? "все" : `id=${sender}`}*\n` +
-    `Страница: ${page + 1}\n\n`;
+    `Страница: ${page + 1} / ${totalPages}\n\n` +
+    "Выберите уведомление:";
 
-  if (!items.length) text += "_Сообщений нет на этой странице._";
-  else {
+  const kb = [];
+
+  // 1) список уведомлений КНОПКАМИ (10 на страницу)
+  if (!items.length) {
+    kb.push([Markup.button.callback("— нет уведомлений —", "noop")]);
+  } else {
     for (const n of items) {
       const who =
-        n.created_by == null
-          ? "Системное"
-          : `${n.sender_name || "Неизвестно"}, ${posLabel(n.sender_position)}`;
-      text += `*#${n.id}* · ${formatDtRu(n.created_at)}\n`;
-      text += `От: ${who}\n`;
-      text += `${safeTrim(n.text, 350)}\n\n`;
+        n.created_by == null ? "Системное" : n.sender_name || "Неизвестно";
+
+      const label =
+        `${formatDtRu(n.created_at)} · ${who} ` +
+        `(непроч: ${n.unread_count} / всего: ${n.total_recipients})`;
+
+      // Важно: callback открывает детальный экран (он у тебя уже зарегистрирован) :contentReference[oaicite:4]{index=4}
+      kb.push([
+        Markup.button.callback(
+          label.slice(0, 64),
+          `lk_notif_admin_hist_open_${n.id}`
+        ),
+      ]);
     }
   }
 
-  const kb = [];
-  kb.push([
-    Markup.button.callback("⬅️", "lk_notif_admin_hist_prev"),
-    Markup.button.callback("➡️", "lk_notif_admin_hist_next"),
-  ]);
+  // 2) стрелки (показываем только если есть куда идти)
+  const navRow = [];
+  if (page > 0)
+    navRow.push(Markup.button.callback("⬅️", "lk_notif_admin_hist_prev"));
+  if (page < totalPages - 1)
+    navRow.push(Markup.button.callback("➡️", "lk_notif_admin_hist_next"));
+  if (navRow.length) kb.push(navRow);
+
+  // 3) кнопка фильтра строго под стрелками (как на скрине 1)
   kb.push([
     Markup.button.callback(
-      sender === "all" ? "✅ Все отправители" : "Все отправители",
-      "lk_notif_admin_hist_sender_all"
+      st.filterExpanded ? "🔎 Фильтр (скрыть)" : "🔎 Фильтр",
+      "lk_notif_admin_hist_filter_toggle"
     ),
   ]);
 
-  const adminBtns = admins
-    .slice(0, 10)
-    .map((a) =>
+  // 4) панель фильтра — ТОЛЬКО если раскрыт
+  if (st.filterExpanded) {
+    kb.push([
       Markup.button.callback(
-        `${sender === a.id ? "✅ " : ""}${a.full_name}`,
-        `lk_notif_admin_hist_sender_${a.id}`
-      )
-    );
-  for (let i = 0; i < adminBtns.length; i += 2)
-    kb.push(adminBtns.slice(i, i + 2));
+        sender === "all" ? "✅ Все отправители" : "Все отправители",
+        "lk_notif_admin_hist_sender_all"
+      ),
+    ]);
 
+    const adminBtns = admins
+      .slice(0, 10)
+      .map((a) =>
+        Markup.button.callback(
+          `${sender === a.id ? "✅ " : ""}${a.full_name}`,
+          `lk_notif_admin_hist_sender_${a.id}`
+        )
+      );
+
+    for (let i = 0; i < adminBtns.length; i += 2) {
+      kb.push(adminBtns.slice(i, i + 2));
+    }
+  }
+
+  // 5) назад
   kb.push([Markup.button.callback("⬅️ Назад", "lk_admin_notifications")]);
 
   const keyboard = Markup.inlineKeyboard(kb);
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit }
+  );
+}
+
+async function showAdminHistoryOpen(ctx, notificationId, { edit = true } = {}) {
+  const notif = await getAdminNotificationDetail(notificationId);
+  if (!notif) {
+    await ctx.answerCbQuery("Не найдено").catch(() => {});
+    return;
+  }
+
+  const counts = await getAdminRecipientsCounts(notificationId);
+  const unreadUsers = await getAdminUnreadUsers(notificationId, 120);
+
+  const sender =
+    notif.created_by == null
+      ? "Системное"
+      : `${notif.sender_name || "Неизвестно"}, ${posLabel(
+          notif.sender_position
+        )}`;
+
+  let text =
+    `📄 *Уведомление #${notif.id}*\n\n` +
+    `От: *${sender}*\n` +
+    `Дата: *${formatDtRu(notif.created_at)}*\n` +
+    `Получателей: *${counts.total}*\n` +
+    `Не прочитали: *${counts.unread}*\n\n` +
+    `📝 Текст:\n${safeTrim(notif.text, 2500)}\n`;
+
+  if (counts.unread > 0) {
+    text += "\n👀 *Не прочитали (первые 120):*\n";
+    for (const u of unreadUsers) {
+      const phone = u.work_phone ? `📞 ${u.work_phone}` : "📞 —";
+      const uname = u.username ? `@${u.username}` : "—";
+      const pos = u.position ? posLabel(u.position) : "";
+      text += `• ${u.full_name}${
+        pos ? `, ${pos}` : ""
+      } — ${phone} — ${uname}\n`;
+    }
+    if (counts.unread > unreadUsers.length) {
+      text += `…и ещё ${counts.unread - unreadUsers.length}\n`;
+    }
+  }
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("⬅️ Назад к истории", "lk_notif_admin_history")],
+    [Markup.button.callback("⬅️ В рассылки", "lk_admin_notifications")],
+  ]);
+
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
@@ -858,6 +1083,36 @@ async function showAdminHistory(ctx, { edit = true } = {}) {
 // --------------------
 
 function registerNotifications(bot, ensureUser, logError) {
+  bot.action("lk_notif_admin_hist_filter_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const st = getAdminHistoryState(ctx.from.id);
+      setAdminHistoryState(ctx.from.id, { filterExpanded: !st.filterExpanded });
+
+      await showAdminHistory(ctx, { edit: true });
+    } catch (err) {
+      logError("lk_notif_admin_hist_filter_toggle", err);
+    }
+  });
+
+  bot.action(/^lk_notif_admin_hist_open_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const id = Number(ctx.match[1]);
+      await showAdminHistoryOpen(ctx, id, { edit: true });
+    } catch (err) {
+      logError("lk_notif_admin_hist_open", err);
+    }
+  });
+
   // USER hub
   bot.action("lk_notifications", async (ctx) => {
     try {
@@ -1118,6 +1373,8 @@ function registerNotifications(bot, ensureUser, logError) {
       logError("lk_notif_admin_filter_interns", err);
     }
   });
+
+  bot.action("noop", (ctx) => ctx.answerCbQuery().catch(() => {}));
 
   // ADMIN: pick users / exclude users
   bot.action("lk_notif_admin_pick_users", async (ctx) => {

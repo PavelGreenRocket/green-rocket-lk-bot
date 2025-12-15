@@ -1,17 +1,20 @@
+//src\bot\index.js
 const { registerMenu } = require("./menu");
 const { registerShifts } = require("./shifts");
 const { registerNotifications } = require("./notifications");
 const { registerQuestions } = require("./questions");
 const { registerMore } = require("./more");
 const { registerInterviewUser } = require("./interviewUser");
+const { registerAiLogs } = require("./admin/aiLogs");
 
 // админ-панель
-const { registerAdminPanel } = require("./admin"); // можно и "./admin/index"
+const { registerAdminPanel } = require("./admin");
 
 function registerLkBot(bot, ensureUser, logError) {
   registerMenu(bot, ensureUser, logError);
   registerShifts(bot, ensureUser, logError);
   registerNotifications(bot, ensureUser, logError);
+  registerAiLogs(bot, ensureUser, logError);
   registerQuestions(bot, ensureUser, logError);
   registerInterviewUser(bot, ensureUser, logError);
 

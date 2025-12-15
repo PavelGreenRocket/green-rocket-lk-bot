@@ -1,6 +1,7 @@
 const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
+const { registerAiSettings } = require("./aiSettings");
 
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
@@ -18,6 +19,7 @@ function clearTpState(tgId) {
 }
 
 function registerAdminSettings(bot, ensureUser, logError) {
+  registerAiSettings(bot, ensureUser, logError);
   // -----------------------------
   // ВХОД В НАСТРОЙКИ
   // -----------------------------
@@ -725,7 +727,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
   // -----------------------------
   // ЗАГЛУШКИ ДЛЯ ПРОЧИХ РАЗДЕЛОВ
   // -----------------------------
-  bot.action(/admin_settings_(academy|ai|users|stock)/, async (ctx) => {
+  bot.action(/admin_settings_(academy|users|stock)/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
 

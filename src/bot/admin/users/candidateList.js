@@ -219,7 +219,7 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     ]);
 
     // общение с ИИ (заглушка)
-    rows.push([Markup.button.callback("🔮 Общение с ИИ", "lk_ai_chat_stub")]);
+    rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs")]);
 
     // история
     rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
