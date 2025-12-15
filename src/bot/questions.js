@@ -55,6 +55,144 @@ function initGiga() {
     scope: GIGA_SCOPE,
   });
 }
+// =======================
+// DB: Theory / Bans
+// =======================
+async function loadActiveTheoryTopics(limit = 30) {
+  const r = await pool.query(
+    `
+    SELECT id, title, content
+    FROM ai_theory_topics
+    WHERE is_active = true
+    ORDER BY updated_at DESC, id DESC
+    LIMIT $1
+    `,
+    [limit]
+  );
+  return r.rows || [];
+}
+
+async function loadActiveBanTopics(limit = 50) {
+  const r = await pool.query(
+    `
+    SELECT id, title, description
+    FROM ai_ban_topics
+    WHERE is_active = true
+    ORDER BY updated_at DESC, id DESC
+    LIMIT $1
+    `,
+    [limit]
+  );
+  return r.rows || [];
+}
+
+async function pickTheoryTopicId(giga, question, topics) {
+  if (!topics || topics.length === 0) return null;
+
+  const list = topics
+    .map((t) => `${t.id}: ${t.title}`)
+    .join("\n")
+    .slice(0, 6000);
+
+  const sys =
+    "Ты классификатор. Выбери наиболее подходящую тему по вопросу.\n" +
+    "Отвечай строго числом — id темы из списка. Если ни одна не подходит, ответь 0.";
+
+  const resp = await giga.chat({
+    model: GIGA_MODEL,
+    messages: [
+      { role: "system", content: sys },
+      {
+        role: "user",
+        content: `ВОПРОС:\n${question}\n\nТЕМЫ:\n${list}\n\nID:`,
+      },
+    ],
+    temperature: 0,
+  });
+
+  const raw = (resp?.choices?.[0]?.message?.content || "").trim();
+  const id = Number(raw.replace(/[^\d]/g, "")); // на случай "ID: 12"
+  if (!Number.isFinite(id) || id <= 0) return null;
+
+  const exists = topics.some((t) => Number(t.id) === id);
+  return exists ? id : null;
+}
+
+function buildSystemPromptWithTheory(theoryTitle, theoryContent) {
+  const base =
+    "Ты — помощник сотрудника Green Rocket.\n" +
+    "Отвечай по-деловому, структурно, коротко и понятно.\n" +
+    "Используй ТОЛЬКО информацию из блока ТЕОРИЯ, если она релевантна.\n" +
+    "Если информации недостаточно — честно скажи и задай 1 уточняющий вопрос.\n" +
+    "Не выдумывай фактов.\n";
+
+  if (!theoryContent) return base;
+
+  return (
+    base +
+    "\n=== ТЕОРИЯ ===\n" +
+    `Тема: ${theoryTitle || "без названия"}\n` +
+    `${theoryContent}\n` +
+    "=== КОНЕЦ ТЕОРИИ ==="
+  );
+}
+
+async function detectOfftopicFromBans(giga, question, bans) {
+  // Возвращаем { suspected:boolean, confidence:number|null, matchedBanId:number|null }
+  if (!bans || bans.length === 0) {
+    // fallback на старый “общий” классификатор
+    const suspected = await detectOfftopic(giga, question);
+    return { suspected, confidence: null, matchedBanId: null };
+  }
+
+  const list = bans
+    .map((b) => `${b.id}: ${b.title} — ${b.description}`)
+    .join("\n")
+    .slice(0, 9000);
+
+  const sys =
+    "Ты классификатор. Определи, относится ли вопрос к НЕрабочим темам из списка запретов.\n" +
+    "Ответь строго JSON без текста вокруг:\n" +
+    '{"suspected":true|false,"ban_id":number|null,"confidence":number}\n' +
+    "confidence от 0 до 1.";
+
+  const resp = await giga.chat({
+    model: GIGA_MODEL,
+    messages: [
+      { role: "system", content: sys },
+      {
+        role: "user",
+        content: `ВОПРОС:\n${question}\n\nЗАПРЕТЫ:\n${list}\n\nJSON:`,
+      },
+    ],
+    temperature: 0,
+  });
+
+  const raw = (resp?.choices?.[0]?.message?.content || "").trim();
+
+  try {
+    const obj = JSON.parse(raw);
+    const suspected = !!obj.suspected;
+    const confidence =
+      typeof obj.confidence === "number"
+        ? Math.max(0, Math.min(1, obj.confidence))
+        : null;
+
+    const banId = Number(obj.ban_id);
+    const matchedBanId =
+      Number.isFinite(banId) &&
+      banId > 0 &&
+      bans.some((b) => Number(b.id) === banId)
+        ? banId
+        : null;
+
+    return { suspected, confidence, matchedBanId };
+  } catch {
+    // fallback если модель вернула невалидный JSON
+    const suspected = await detectOfftopic(giga, question);
+    return { suspected, confidence: null, matchedBanId: null };
+  }
+}
 
 // --- 1) Основной промпт ответа (временно общий; дальше подключим “теорию/темы/запреты/контакты”) ---
 function buildSystemPrompt() {
@@ -92,11 +230,11 @@ async function detectOfftopic(giga, question) {
 }
 
 // --- 3) Генерация ответа ---
-async function generateAnswer(giga, question) {
+async function generateAnswer(giga, question, systemPrompt) {
   const resp = await giga.chat({
     model: GIGA_MODEL,
     messages: [
-      { role: "system", content: buildSystemPrompt() },
+      { role: "system", content: systemPrompt },
       { role: "user", content: question },
     ],
     temperature: 0.2,
@@ -195,26 +333,70 @@ function registerQuestions(bot, ensureUser, logError) {
 
       const giga = initGiga();
 
-      // 1) подозрение “не по работе”
+      // 1) грузим активные запреты и определяем “подозрение не по работе”
+      const bans = await loadActiveBanTopics(50);
+
       let isOfftopicSuspected = false;
+      let confidenceScore = null;
+
       try {
-        isOfftopicSuspected = await detectOfftopic(giga, question);
-      } catch (e) {
-        // если классификатор упал — просто не ставим флаг
+        const off = await detectOfftopicFromBans(giga, question, bans);
+        isOfftopicSuspected = off.suspected;
+        confidenceScore = off.confidence; // может быть null
+      } catch {
         isOfftopicSuspected = false;
+        confidenceScore = null;
       }
 
-      // 2) основной ответ
-      const answer = await generateAnswer(giga, question);
+      // 2) грузим активную теорию, выбираем релевантную тему, строим prompt
+      const theoryTopics = await loadActiveTheoryTopics(30);
 
-      // 3) логируем
+      let matchedTheoryTopicId = null;
+      let systemPrompt = buildSystemPromptWithTheory(null, null);
+
+      try {
+        matchedTheoryTopicId = await pickTheoryTopicId(
+          giga,
+          question,
+          theoryTopics
+        );
+        if (matchedTheoryTopicId) {
+          const t = theoryTopics.find(
+            (x) => Number(x.id) === Number(matchedTheoryTopicId)
+          );
+          systemPrompt = buildSystemPromptWithTheory(t?.title, t?.content);
+        }
+      } catch {
+        matchedTheoryTopicId = null;
+        systemPrompt = buildSystemPromptWithTheory(null, null);
+      }
+
+      // 3) основной ответ с учётом выбранной теории
+      const answer = await generateAnswer(giga, question, systemPrompt);
+
+      // 4) логируем (добавили confidence_score + matched_theory_topic_id)
       const ins = await pool.query(
         `
-          INSERT INTO ai_chat_logs (user_id, question, answer, is_new_for_admin, is_offtopic_suspected)
-          VALUES ($1, $2, $3, TRUE, $4)
+          INSERT INTO ai_chat_logs (
+            user_id,
+            question,
+            answer,
+            is_new_for_admin,
+            is_offtopic_suspected,
+            confidence_score,
+            matched_theory_topic_id
+          )
+          VALUES ($1, $2, $3, TRUE, $4, $5, $6)
           RETURNING id
         `,
-        [user.id, question, answer, isOfftopicSuspected]
+        [
+          user.id,
+          question,
+          answer,
+          isOfftopicSuspected,
+          confidenceScore,
+          matchedTheoryTopicId,
+        ]
       );
 
       const logId = ins.rows?.[0]?.id;
