@@ -873,10 +873,237 @@ function registerCandidateInternship(bot, ensureUser, logError) {
     }
   });
 
-  // ПЛЮС можно добавить сюда:
-  // - обработчик lk_cand_start_intern_<id> (начать стажировку)
-  // - обработчик lk_cand_decline_<id> (отказать кандидату)
-  // Пока оставляем это на следующий этап.
+  // ---------------- НАЧАТЬ СТАЖИРОВКУ ----------------
+
+  // 1) Нажатие "🚀 начать стажировку" на карточке кандидата
+  bot.action(/^lk_cand_start_intern_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      // подтягиваем кандидата + привязанного lk пользователя + ответственного
+      const cRes = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.name,
+          c.age,
+          c.internship_admin_id,
+          c.internship_point_id,
+          u_link.id AS intern_user_id,
+          u_link.telegram_id AS intern_telegram_id,
+          u_link.full_name AS intern_name
+        FROM candidates c
+        LEFT JOIN users u_link ON u_link.candidate_id = c.id
+        WHERE c.id = $1
+        LIMIT 1
+        `,
+        [candidateId]
+      );
+
+      if (!cRes.rows.length) {
+        await ctx.answerCbQuery("Кандидат не найден").catch(() => {});
+        return;
+      }
+
+      const c = cRes.rows[0];
+
+      // доступ только у наставника (ответственного по стажировке)
+      if (
+        !c.internship_admin_id ||
+        Number(c.internship_admin_id) !== Number(admin.id)
+      ) {
+        await ctx
+          .answerCbQuery("Только ответственный может начать стажировку")
+          .catch(() => {});
+        return;
+      }
+
+      // должен быть привязанный lk пользователь (users.candidate_id = c.id)
+      if (!c.intern_user_id || !c.intern_telegram_id) {
+        await ctx
+          .answerCbQuery(
+            "Нет привязанного пользователя ЛК (некому начать обучение)"
+          )
+          .catch(() => {});
+        return;
+      }
+
+      // должна быть выбрана точка (trade_point_id)
+      if (!c.internship_point_id) {
+        await ctx.answerCbQuery("Не указана точка стажировки").catch(() => {});
+        return;
+      }
+
+      // сохраняем состояние вопроса "опоздал/вовремя"
+      startInternshipStates.set(ctx.from.id, {
+        candidateId: c.id,
+        internUserId: Number(c.intern_user_id),
+        internTelegramId: Number(c.intern_telegram_id),
+        internName: c.intern_name || c.name || "стажёр",
+        tradePointId: Number(c.internship_point_id),
+        mentorUserId: Number(admin.id),
+        mentorTelegramId: Number(ctx.from.id),
+      });
+
+      const text = "Стажёр пришёл вовремя?";
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ Пришёл вовремя",
+            `lk_intern_start_late_no_${c.id}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⚠️ Опоздал",
+            `lk_intern_start_late_yes_${c.id}`
+          ),
+        ],
+        [Markup.button.callback("❌ Отмена", `lk_intern_start_cancel_${c.id}`)],
+      ]);
+
+      await ctx.answerCbQuery().catch(() => {});
+      await ctx
+        .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+        .catch(async () => {
+          await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+        });
+    } catch (err) {
+      logError("lk_cand_start_intern", err);
+    }
+  });
+
+  // 2) Отмена (на экране "пришёл вовремя?")
+  bot.action(/^lk_intern_start_cancel_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      startInternshipStates.delete(ctx.from.id);
+      await ctx.answerCbQuery("Отменено").catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_intern_start_cancel", err);
+    }
+  });
+
+  // helper: фактический старт сессии (создание internship_sessions + нотификации)
+  async function doStartInternship(ctx, wasLate) {
+    const st = startInternshipStates.get(ctx.from.id);
+    if (!st) {
+      await ctx.answerCbQuery("Состояние старта потеряно").catch(() => {});
+      return;
+    }
+
+    const {
+      candidateId,
+      internUserId,
+      internTelegramId,
+      internName,
+      tradePointId,
+      mentorUserId,
+      mentorTelegramId,
+    } = st;
+
+    // 0) если уже есть активная сессия — просто перерисуем карточку
+    const activeRes = await pool.query(
+      `
+      SELECT 1
+      FROM internship_sessions
+      WHERE user_id = $1 AND finished_at IS NULL AND is_canceled = FALSE
+      LIMIT 1
+      `,
+      [internUserId]
+    );
+    if (activeRes.rows.length) {
+      startInternshipStates.delete(ctx.from.id);
+      await ctx.answerCbQuery("Стажировка уже запущена").catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+      return;
+    }
+
+    // 1) следующий день = кол-во завершённых (не cancelled) + 1
+    const cntRes = await pool.query(
+      `
+      SELECT COUNT(*)::int AS finished_cnt
+      FROM internship_sessions
+      WHERE user_id = $1 AND finished_at IS NOT NULL AND is_canceled = FALSE
+      `,
+      [internUserId]
+    );
+    const nextDay = (cntRes.rows[0]?.finished_cnt || 0) + 1;
+
+    // 2) создаём сессию
+    await pool.query(
+      `
+      INSERT INTO internship_sessions (user_id, day_number, started_by, trade_point_id, was_late)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [internUserId, nextDay, mentorUserId, tradePointId, wasLate]
+    );
+
+    // 3) фиксируем, что человек теперь intern (если вдруг ещё candidate)
+    await pool.query(
+      `
+      UPDATE users
+      SET staff_status = 'intern'
+      WHERE id = $1
+      `,
+      [internUserId]
+    );
+
+    // 4) уведомление стажёру (в lk-bot) + кнопка перехода в academy bot
+    await ctx.telegram
+      .sendMessage(
+        internTelegramId,
+        "🚀 Стажировка началась!\n\nНажмите кнопку ниже, чтобы перейти к обучению.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🚀 Перейти к обучению",
+                  url: "https://t.me/barista_academy_GR_bot",
+                },
+              ],
+            ],
+          },
+        }
+      )
+      .catch(() => {});
+
+    // 5) уведомление наставнику В academy bot через outbox (academy worker уже это обрабатывает)
+    await pushOutboxEvent("academy", "internship_started", {
+      mentor_telegram_id: mentorTelegramId,
+      intern_user_id: internUserId,
+      intern_name: internName,
+    });
+
+    startInternshipStates.delete(ctx.from.id);
+
+    // 6) перерисовываем карточку (теперь isTraineeMode станет true, потому что появилась активная сессия)
+    await ctx.answerCbQuery().catch(() => {});
+    await showCandidateCardLk(ctx, candidateId, { edit: true });
+  }
+
+  // 3) Пришёл вовремя
+  bot.action(/^lk_intern_start_late_no_(\d+)$/, async (ctx) => {
+    try {
+      await doStartInternship(ctx, false);
+    } catch (err) {
+      logError("lk_intern_start_late_no", err);
+    }
+  });
+
+  // 4) Опоздал
+  bot.action(/^lk_intern_start_late_yes_(\d+)$/, async (ctx) => {
+    try {
+      await doStartInternship(ctx, true);
+    } catch (err) {
+      logError("lk_intern_start_late_yes", err);
+    }
+  });
 
   // ---------------- НАЧАТЬ СТАЖИРОВКУ ----------------
 
