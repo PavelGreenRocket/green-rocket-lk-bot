@@ -9,9 +9,8 @@
   "dependencies": {
     "dotenv": "^16.0.0",
     "pg": "^8.0.0",
-    "telegraf": "^4.0.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.0"
+    "telegraf": "^4.0.0",
+    "gigachat": "^0.0.16",
+    "langchain-gigachat": "^0.0.14"
   }
 }
