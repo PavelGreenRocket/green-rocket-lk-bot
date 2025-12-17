@@ -780,7 +780,7 @@ function registerAdminAiLogs(bot, ensureUser, logError) {
 }
 
 module.exports = {
-  registerAdminAiLogs,
+  registerAiLogs: registerAdminAiLogs,
   getNewAiLogsCount,
   getPendingOfftopicCount,
 };
