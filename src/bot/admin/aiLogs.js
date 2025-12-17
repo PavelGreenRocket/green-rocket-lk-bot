@@ -270,7 +270,7 @@ async function showAiLogsList(ctx, page) {
     // Top-K сейчас реализован на стороне assistant.js как кол-во фрагментов (chunks).
     // UI-настройки Top-K добавим следующим шагом (когда заведём таблицу настроек).
     buttons.push([
-      Markup.button.callback("🧠 Top-K теории (сейчас: 3)", "noop"),
+      Markup.button.callback("🧠 Top-K теории", "admin_ai_topk_menu"),
     ]);
   }
 
@@ -421,6 +421,53 @@ async function showAiLogDetails(ctx, logId, returnPage) {
 
 // Регистрация action-хендлеров
 function registerAdminAiLogs(bot, ensureUser, logError) {
+  bot.action("admin_ai_topk_menu", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const admin = await ensureUser(ctx);
+    if (!isAdmin(admin)) return;
+
+    const text =
+      "🧠 Top-K теории\n\n" +
+      "Сколько фрагментов теории подставлять в промпт ассистента.\n" +
+      "По умолчанию: 3.\n\n" +
+      "Выбери значение:";
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("K=1", "admin_ai_topk_set_1"),
+        Markup.button.callback("K=2", "admin_ai_topk_set_2"),
+        Markup.button.callback("K=3 ✅", "admin_ai_topk_set_3"),
+      ],
+      [
+        Markup.button.callback("K=4", "admin_ai_topk_set_4"),
+        Markup.button.callback("K=5", "admin_ai_topk_set_5"),
+      ],
+      [Markup.button.callback("🔙 Назад", "admin_ai_logs_1")],
+    ]);
+
+    await deliver(ctx, { text, extra: kb }, { edit: true });
+  });
+
+  bot.action(/^admin_ai_topk_set_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const admin = await ensureUser(ctx);
+    if (!isAdmin(admin)) return;
+
+    const k = Number(ctx.match[1]);
+    if (!Number.isFinite(k) || k < 1 || k > 10) return;
+
+    // TODO: позже сохраним в БД ai_settings
+    // Пока просто показываем подтверждение:
+    await ctx.reply(
+      `✅ Top-K установлен: ${k}\n(сохранение в настройки сделаем следующим шагом)`
+    );
+
+    // Возвращаемся к списку логов
+    await ctx.telegram.sendMessage(ctx.chat.id, "Открываю историю…");
+    // либо сразу:
+    // await showAiLogsList(ctx, 1);
+  });
+
   bot.action(/^admin_ai_logs_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
