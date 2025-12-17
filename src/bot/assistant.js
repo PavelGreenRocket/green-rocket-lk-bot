@@ -1,11 +1,12 @@
 // src/bot/assistant.js
-
 const { Markup } = require("telegraf");
 const { deliver } = require("../utils/renderHelpers");
 const GigaChat = require("gigachat").default;
 const pool = require("../db/pool");
 const { getRelevantChunks } = require("./knowledge");
 const { Agent } = require("node:https");
+
+const { getAiConfig } = require("../ai/settings");
 
 console.log(
   "GIGACHAT_CREDENTIALS length =",
@@ -14,10 +15,7 @@ console.log(
 console.log("GIGACHAT_SCOPE =", process.env.GIGACHAT_SCOPE);
 console.log("GIGACHAT_MODEL =", process.env.GIGACHAT_MODEL);
 
-// агент, чтобы не заморачиваться с сертификатами (как в доке GigaChat)
-const httpsAgent = new Agent({
-  rejectUnauthorized: false,
-});
+const httpsAgent = new Agent({ rejectUnauthorized: false });
 
 const gigaClient = new GigaChat({
   timeout: 60,
@@ -27,17 +25,12 @@ const gigaClient = new GigaChat({
   httpsAgent,
 });
 
-// состояние: ждём вопрос от конкретного пользователя (по telegram_id)
 const questionState = new Set();
 
-// --- настройки ---
-const MAX_AI_LOGS = 500; // сколько последних обращений к ИИ храним в БД
-const TOP_K_CHUNKS = 3; // K=3 (top-K фрагментов базы знаний)
-const DEFAULT_DAILY_LIMIT = 3; // 3 успешных ответа в день
-const COMPANY_TZ = process.env.COMPANY_TZ || "Europe/Moscow"; // локальное время компании
+// сколько последних логов храним (глобально)
+const MAX_AI_LOGS = 500;
 
-async function getTodayAiAnswersCount(userId) {
-  // day_start считаем по TZ компании
+async function getTodayAiAnswersCount(userId, companyTz) {
   const res = await pool.query(
     `
     WITH bounds AS (
@@ -48,15 +41,9 @@ async function getTodayAiAnswersCount(userId) {
     WHERE user_id = $1
       AND created_at >= (SELECT day_start FROM bounds)
     `,
-    [userId, COMPANY_TZ]
+    [userId, companyTz]
   );
-
   return Number(res.rows[0]?.cnt || 0);
-}
-
-async function enforceDailyLimit(userId) {
-  const used = await getTodayAiAnswersCount(userId);
-  return used < DEFAULT_DAILY_LIMIT;
 }
 
 async function trimAiLogsToMax() {
@@ -74,13 +61,8 @@ async function trimAiLogsToMax() {
   );
 }
 
-/**
- * Вызов GigaChat: короткий ответ на вопрос бариста
- * теперь ассистент опирается на базу знаний
- */
-async function getAssistantAnswer(question) {
-  // 1) ищем подходящие фрагменты теории (K=3)
-  const chunks = await getRelevantChunks(question, TOP_K_CHUNKS);
+async function getAssistantAnswer(question, topK) {
+  const chunks = await getRelevantChunks(question, topK);
 
   if (!chunks.length) {
     return (
@@ -92,7 +74,7 @@ async function getAssistantAnswer(question) {
   const contextText = chunks
     .map(
       (ch, idx) =>
-        `[Фрагмент ${idx + 1} из источника "${ch.source}"]\n` + ch.text
+        `[Фрагмент ${idx + 1} из источника "${ch.source}"]\n${ch.text}`
     )
     .join("\n\n---\n\n");
 
@@ -104,10 +86,7 @@ async function getAssistantAnswer(question) {
           "Ты — наставник по обучению бариста в кофейне. " +
           "Отвечай строго на основе приведённых ниже фрагментов учебной базы. " +
           "Не выдумывай факты, которых там нет. " +
-          "Если информации недостаточно, честно скажи, что по базе нет точного ответа. " +
-          "Если вопрос связан с качеством, техникой приготовления, правилами сервиса или теорией, " +
-          "при необходимости можно обратиться к менеджеру по качеству +7 913 457 5883 (Шах). " +
-          "По всем другим вопросам — к главному администратору @k0nfe11ka (Ярослава).",
+          "Если информации недостаточно, честно скажи, что по базе нет точного ответа.",
       },
       {
         role: "user",
@@ -123,13 +102,9 @@ async function getAssistantAnswer(question) {
     max_tokens: 400,
   });
 
-  const answer = resp.choices?.[0]?.message?.content || "";
-  return answer.trim();
+  return (resp.choices?.[0]?.message?.content || "").trim();
 }
 
-/**
- * Регистрация хендлеров ассистента
- */
 function registerAssistant(bot, ensureUser, logError) {
   bot.action("user_ask_question", async (ctx) => {
     try {
@@ -148,10 +123,6 @@ function registerAssistant(bot, ensureUser, logError) {
         {
           text:
             "❓ Задай свой вопрос по обучению бариста.\n\n" +
-            "Например:\n" +
-            "• почему кофе получается кислым?\n" +
-            "• как понять, что молоко взбито правильно?\n" +
-            "• что делать, если эспрессо течёт слишком быстро?\n\n" +
             "Напиши вопрос одним сообщением.",
           extra: keyboard,
         },
@@ -168,8 +139,6 @@ function registerAssistant(bot, ensureUser, logError) {
       if (!user) return next();
 
       if (!questionState.has(ctx.from.id)) return next();
-
-      // это вопрос для ассистента
       questionState.delete(ctx.from.id);
 
       const question = (ctx.message.text || "").trim();
@@ -178,11 +147,19 @@ function registerAssistant(bot, ensureUser, logError) {
         return;
       }
 
-      // лимит 3 успешных ответа в день
-      const allowed = await enforceDailyLimit(user.id);
-      if (!allowed) {
+      const cfg = await getAiConfig();
+
+      // override лимита через карточку пользователя (если поле появится позже)
+      const userLimit = Number(user.ai_daily_limit);
+      const dailyLimit =
+        Number.isFinite(userLimit) && userLimit > 0
+          ? userLimit
+          : cfg.dailyLimitDefault;
+
+      const usedToday = await getTodayAiAnswersCount(user.id, cfg.companyTz);
+      if (usedToday >= dailyLimit) {
         await ctx.reply(
-          "🤖 Лимит вопросов к ИИ на сегодня исчерпан (3/день).\n" +
+          `🤖 Лимит вопросов к ИИ на сегодня исчерпан (${dailyLimit}/день).\n` +
             "Попробуй завтра или обратись к наставнику."
         );
         return;
@@ -192,7 +169,8 @@ function registerAssistant(bot, ensureUser, logError) {
 
       let answer;
       try {
-        answer = await getAssistantAnswer(question);
+        // “вопрос считается” только при успешном answer — лог пишем только после успеха
+        answer = await getAssistantAnswer(question, cfg.topK);
       } catch (err) {
         logError("getAssistantAnswer", err);
         await ctx.telegram.editMessageText(
@@ -204,17 +182,11 @@ function registerAssistant(bot, ensureUser, logError) {
         return;
       }
 
-      // ---- ЛОГИРУЕМ (успешный ответ = считается как “вопрос”) ----
       try {
         await pool.query(
-          `
-          INSERT INTO ai_chat_logs (user_id, question, answer)
-          VALUES ($1, $2, $3)
-          `,
+          `INSERT INTO ai_chat_logs (user_id, question, answer) VALUES ($1, $2, $3)`,
           [user.id, question, answer]
         );
-
-        // храним не больше MAX_AI_LOGS последних записей (глобально)
         await trimAiLogsToMax();
       } catch (err) {
         logError("ai_chat_logs_insert", err);
@@ -239,6 +211,4 @@ function registerAssistant(bot, ensureUser, logError) {
   });
 }
 
-module.exports = {
-  registerAssistant,
-};
+module.exports = { registerAssistant };

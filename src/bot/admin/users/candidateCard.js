@@ -279,12 +279,12 @@ FROM candidates c
   text += `• *Желаемый график:* ${scheduleText}\n`;
   text += `• *Предыдущий опыт:* ${experienceText}\n`;
   text += `• *Общий комментарий:* ${commentText}\n\n`;
-
+  text += "────────────────────────────────\n";
   // 📅 О собеседовании / Итоги собеседования
   if (cand.status === "interviewed" || cand.status === "internship_invited") {
-    text += "📅 *Итоги собеседования*\n";
+    text += "🔹 *Итоги собеседования*\n";
   } else {
-    text += "📅 *О собеседовании*\n";
+    text += "🔹 *О собеседовании*\n";
   }
 
   text += `• *Дата/время:* ${dtFull}\n`;
@@ -302,7 +302,7 @@ FROM candidates c
 
   // 🔹 Замечания — только если собес уже прошёл / стажировка
   if (cand.status === "interviewed" || cand.status === "internship_invited") {
-    text += "🔹 *Замечания*\n";
+    text += "🔹 *Замечания по собеседованию*\n";
 
     if (cand.was_on_time === true) {
       text += "• *Опоздание:* пришёл вовремя\n";
@@ -314,9 +314,16 @@ FROM candidates c
       text += "• *Опоздание:* не указано\n";
     }
 
+    if (cand.interview_comment) {
+      text += `• *Другие замечания:* ${cand.interview_comment}\n`;
+    } else {
+      text += "• *Другие замечания:* замечаний нет\n";
+    }
+
     // 🔹 О стажировке — когда уже приглашён
     if (cand.status === "internship_invited") {
-      text += "\n📌 *О стажировке*\n";
+      text += "────────────────────────────────\n";
+      text += "\🔹 *О стажировке*\n";
 
       if (cand.internship_date) {
         const dateLabel = formatDateWithWeekday(cand.internship_date);
@@ -338,12 +345,6 @@ FROM candidates c
       text += `• Ответственный по стажировке: ${
         cand.internship_admin_name || "не указан"
       }\n`;
-    }
-
-    if (cand.interview_comment) {
-      text += `• *Комментарий собеседования:* ${cand.interview_comment}\n`;
-    } else {
-      text += "• *Комментарий собеседования:* не указан\n";
     }
 
     if (cand.decline_reason) {
@@ -504,7 +505,9 @@ FROM candidates c
   rows.push([
     Markup.button.callback("⚙️ Настройки", `lk_cand_settings_${cand.id}`),
   ]);
-  rows.push([Markup.button.callback("◀️ К кандидатам", "lk_cand_list")]);
+  rows.push([
+    Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
+  ]);
 
   let keyboard;
 

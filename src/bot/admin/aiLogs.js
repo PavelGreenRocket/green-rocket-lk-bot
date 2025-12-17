@@ -8,6 +8,7 @@ const {
   setAdminAiViewState,
   isAdmin,
 } = require("./state");
+const { getAiConfig, setSetting } = require("../../ai/settings");
 
 const AI_LOGS_PAGE_SIZE = 10;
 

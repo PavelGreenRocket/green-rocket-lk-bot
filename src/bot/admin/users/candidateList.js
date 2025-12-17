@@ -55,7 +55,7 @@ function getStatusIcon(status) {
     case "internship_invited":
       return "☑️";
     case "cancelled":
-    case "declined":
+    case "rejected":
       return "❌";
     default:
       return "🕒";
@@ -107,14 +107,14 @@ async function loadCandidatesForAdmin(user, filters) {
   if (filters.waiting) statuses.push("invited");
   if (filters.arrived) statuses.push("interviewed");
   if (filters.internshipInvited) statuses.push("internship_invited");
-  if (filters.cancelled) statuses.push("cancelled");
+  if (filters.cancelled) statuses.push("cancelled", "rejected");
 
   if (!statuses.length) {
     statuses.push("invited", "interviewed", "internship_invited");
   }
 
   const params = [statuses];
-  let where = "c.status = ANY($1) AND c.status <> 'declined'";
+  let where = "c.status = ANY($1)";
 
   if (filters.scope === "personal") {
     params.push(user.id);
@@ -122,23 +122,34 @@ async function loadCandidatesForAdmin(user, filters) {
   }
 
   if (!filters.cancelled) {
-    where += " AND c.status <> 'cancelled'";
+    where += " AND c.status <> 'cancelled' AND c.status <> 'rejected'";
   }
 
   const res = await pool.query(
     `
       SELECT
-        c.id,
-        c.name,
-        c.age,
-        c.status,
-        c.interview_date,
-        c.interview_time,
-        COALESCE(tp_place.title, 'не указано') AS place_title
-      FROM candidates c
-        LEFT JOIN trade_points tp_place ON c.point_id = tp_place.id
-      WHERE ${where}
-      ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
+  c.id,
+  c.name,
+  c.age,
+  c.status,
+  c.is_deferred,
+  c.interview_date,
+  c.interview_time,
+
+  c.internship_date,
+  c.internship_time_from,
+  c.internship_time_to,
+
+  c.declined_at,
+
+  COALESCE(u.full_name, 'не назначен') AS admin_name,
+
+  COALESCE(tp_place.title, 'не указано') AS place_title
+FROM candidates c
+  LEFT JOIN trade_points tp_place ON c.point_id = tp_place.id
+  LEFT JOIN users u ON c.admin_id = u.id
+WHERE ${where}
+ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
     `,
     params
   );
@@ -181,16 +192,34 @@ async function showCandidatesListLk(ctx, user, options = {}) {
   const rows = [];
 
   for (const c of candidates) {
-    const icon = getStatusIcon(c.status);
+    const icon = c.is_deferred ? "🗑️" : getStatusIcon(c.status);
     const agePart = c.age ? ` (${c.age})` : "";
-    const dt = formatDateTimeShort(c.interview_date, c.interview_time);
+    const isAll = filters.scope === "all";
+    const adminTail = isAll ? ` к ${c.admin_name || "не назначен"}` : "";
 
-    rows.push([
-      Markup.button.callback(
-        `${icon} ${c.name}${agePart} — ${dt}`,
-        `lk_cand_open_${c.id}` // сюда кликаем → открывается карточка
-      ),
-    ]);
+    let label = "";
+
+    // ❌/🗑️ отказанные/на удалении/отложенные
+    if (c.status === "rejected" || c.status === "cancelled") {
+      const declinedDate = formatDateOnly(c.declined_at);
+      label = `${icon}${c.name}${agePart} - ${declinedDate}`;
+    }
+    // ☑️ приглашены на стажировку (показываем дату+диапазон времени стажировки)
+    else if (c.status === "internship_invited") {
+      const dt = formatInternshipLabel(
+        c.internship_date,
+        c.internship_time_from,
+        c.internship_time_to
+      );
+      label = `${icon} ${c.name}${agePart} — ${dt}`;
+    }
+    // 🕒 / ✔️ собеседования (как было, но в режиме "все" дописываем "к Павлу")
+    else {
+      const dt = formatDateTimeShort(c.interview_date, c.interview_time);
+      label = `${icon} ${c.name}${agePart} — ${dt}${adminTail}`;
+    }
+
+    rows.push([Markup.button.callback(label, `lk_cand_open_${c.id}`)]);
   }
 
   // 2) ТРИ РЕЖИМА — как в старом users.js
@@ -214,9 +243,7 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     ]);
 
     // скрыть
-    rows.push([
-      Markup.button.callback("🔼 скрыть 🔼", "lk_cand_toggle_history"),
-    ]);
+    rows.push([Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history")]);
 
     // общение с ИИ (заглушка)
     rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
@@ -225,9 +252,7 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
 
     // фильтр (в свернутом виде)
-    rows.push([
-      Markup.button.callback("🔽 Фильтр 🔽", "lk_cand_filter_toggle"),
-    ]);
+    rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
 
     // назад
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
@@ -235,13 +260,11 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     // --- СОСТОЯНИЕ: ФИЛЬТР РАСКРЫТ ---
   } else if (filters.filtersExpanded) {
     // раскрыть (свернутое) — отдельной кнопкой
-    rows.push([
-      Markup.button.callback("🔽 раскрыть 🔽", "lk_cand_toggle_history"),
-    ]);
+    rows.push([Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history")]);
 
     // фильтр (раскрытый) — отдельной кнопкой
     rows.push([
-      Markup.button.callback("🔼 Фильтр 🔼", "lk_cand_filter_toggle"),
+      Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
     ]);
 
     // статусы в 1 строку: 🕒 | ✔️ | ☑️ | ❌
@@ -287,14 +310,10 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     // --- СОСТОЯНИЕ: ОБЫЧНОЕ (ничего не раскрыто) ---
   } else {
     // раскрыть (отдельно)
-    rows.push([
-      Markup.button.callback("🔽 раскрыть 🔽", "lk_cand_toggle_history"),
-    ]);
+    rows.push([Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history")]);
 
     // фильтр (отдельно)
-    rows.push([
-      Markup.button.callback("🔽 Фильтр 🔽", "lk_cand_filter_toggle"),
-    ]);
+    rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
 
     // назад
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
@@ -306,6 +325,25 @@ async function showCandidatesListLk(ctx, user, options = {}) {
   await deliver(ctx, { text, extra }, { edit: shouldEdit });
 }
 
+function formatDateOnly(isoDate) {
+  if (!isoDate) return "не указано";
+  const d = isoDate instanceof Date ? isoDate : new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return "не указано";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}.${mm}`;
+}
+
+function formatInternshipLabel(isoDate, from, to) {
+  if (!isoDate) return "не указано";
+  const d = isoDate instanceof Date ? isoDate : new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return "не указано";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const wd = WEEK_DAYS[d.getDay()];
+  const range = from && to ? `(с ${from} до ${to})` : "";
+  return `${dd}.${mm} (${wd}) ${range}`.trim();
+}
 // ----------------------------------------
 // РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ДЛЯ СПИСКА И ФИЛЬТРОВ
 // ----------------------------------------
