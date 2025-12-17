@@ -150,6 +150,8 @@ function buildRestoreKeyboard(candidate) {
 async function showCandidateCardLk(ctx, candidateId, options = {}) {
   const { edit = true } = options;
   const isRestoreMode = options.restoreMode === true;
+  const isEditMode = !!options.keyboardOverride && !isRestoreMode;
+
   const res = await pool.query(
     `
      SELECT
@@ -237,12 +239,19 @@ FROM candidates c
     ? `🔻 СТАЖЁР — ДЕНЬ ${activeInternshipSession.day_number} (В ПРОЦЕССЕ)`
     : `🔻 СТАЖЁР — ВСЕГО СТАЖИРОВОК (${finishedInternshipCount})`;
 
-  // 🔻 Статус в шапке
-  const header = isRestoreMode
-    ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
-    : isTraineeMode
+  // 🔻 Заголовок в обычном режиме (как раньше, с деталями)
+  const normalHeader = isTraineeMode
     ? traineeHeader
     : getCandidateHeader(cand.status);
+
+  // 🔻 Заголовок в режиме изменения (только роль: кандидат/стажёр)
+  const editHeaderBase = isTraineeMode ? "🔻 СТАЖЁР" : "🔻 КАНДИДАТ";
+
+  const header = isRestoreMode
+    ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
+    : isEditMode
+    ? `${editHeaderBase} — РЕЖИМ ИЗМЕНЕНИЯ (✏️)`
+    : normalHeader;
 
   // Возраст без "лет"
   const agePart = cand.age ? ` (${cand.age})` : "";
@@ -405,14 +414,14 @@ FROM candidates c
         if (isMentor) {
           rows.push([
             Markup.button.url(
-              "🚀 Перейти к обучению",
+              "⏺️ Перейти к обучению",
               "https://t.me/barista_academy_GR_bot"
             ),
           ]);
         } else {
           rows.push([
             Markup.button.callback(
-              "🚀 идёт обучение",
+              "⏺️ идёт обучение",
               `lk_internship_training_locked_${cand.id}`
             ),
           ]);
@@ -422,7 +431,7 @@ FROM candidates c
         if (isMentor) {
           rows.push([
             Markup.button.callback(
-              "🚀 начать стажировку",
+              "▶️ начать стажировку",
               `lk_cand_start_intern_${cand.id}`
             ),
           ]);
@@ -433,7 +442,7 @@ FROM candidates c
       // 2) данные стажировок (заглушка)
       rows.push([
         Markup.button.callback(
-          "данные стажировок",
+          "▴ данные стажировок",
           `lk_internship_data_stub_${cand.id}`
         ),
       ]);
@@ -442,7 +451,7 @@ FROM candidates c
       const expanded = isTraineeCardsExpanded(ctx.from.id);
       rows.push([
         Markup.button.callback(
-          expanded ? "📋 Открыть карточку ⤴" : "📋 Открыть карточку ⤵З%",
+          expanded ? "▾ Скрыть карточку" : "▴ Открыть карточку",
           `lk_internship_toggle_cards_${cand.id}`
         ),
       ]);
@@ -607,14 +616,102 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
-  // заглушка "Настройки кандидата"
+  // меню "Настройки" в карточке
   bot.action(/^lk_cand_settings_(\d+)$/, async (ctx) => {
     try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      // берём статус, чтобы решить: "о собеседовании" / "о стажировке" / ничего
+      const r = await pool.query(
+        `SELECT status FROM candidates WHERE id = $1`,
+        [candidateId]
+      );
+      if (!r.rows.length) return;
+
+      const status = r.rows[0].status;
+
+      const rows = [];
+
+      // 1) Общая информация (переиспользуем существующий редактор)
+      rows.push([
+        Markup.button.callback(
+          "Общая информация (изменить)",
+          `lk_cand_edit_common_${candidateId}`
+        ),
+      ]);
+
+      // 2) Условная кнопка
+      if (status === "invited") {
+        rows.push([
+          Markup.button.callback(
+            "О собеседовании (изменить)",
+            `lk_cand_edit_interview_${candidateId}`
+          ),
+        ]);
+      } else if (status === "internship_invited") {
+        rows.push([
+          Markup.button.callback(
+            "О стажировке (изменить)",
+            `lk_cand_edit_internship_${candidateId}`
+          ),
+        ]);
+      }
+      // если status === "interviewed" — ничего не добавляем (как ты и просил)
+
+      // 3) Другие (пока заглушка)
+      rows.push([
+        Markup.button.callback(
+          "Другое (изменить)",
+          `lk_cand_settings_other_${candidateId}`
+        ),
+      ]);
+
+      // Назад в обычные кнопки карточки
+      rows.push([
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_cand_settings_back_${candidateId}`
+        ),
+      ]);
+
+      const kb = Markup.inlineKeyboard(rows);
+
+      // ✅ текст карточки оставляем, меняем только кнопки
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        keyboardOverride: kb,
+      });
+    } catch (err) {
+      logError("lk_cand_settings_menu", err);
+    }
+  });
+
+  bot.action(/^lk_cand_settings_back_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_settings_back", err);
+    }
+  });
+
+  bot.action(/^lk_cand_settings_other_(\d+)$/, async (ctx) => {
+    try {
       await ctx
-        .answerCbQuery("Настройки кандидата пока в разработке.")
+        .answerCbQuery("Раздел «Другие» пока в разработке.")
         .catch(() => {});
     } catch (err) {
-      logError("lk_cand_settings", err);
+      logError("lk_cand_settings_other", err);
     }
   });
 

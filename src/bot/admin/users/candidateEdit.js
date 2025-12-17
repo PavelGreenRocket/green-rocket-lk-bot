@@ -38,34 +38,41 @@ async function showEditInternshipMenu(ctx, candidateId, showCandidateCardLk) {
   const kb = Markup.inlineKeyboard([
     [
       Markup.button.callback(
-        "📅 Дата",
+        "Дата (изменить)",
         `lk_cand_edit_internship_date_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "⏰ Время (с)",
+        "Время (с) - изменить",
         `lk_cand_edit_internship_from_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "⏰ Время (до)",
+        "Время (до)- изменить",
         `lk_cand_edit_internship_to_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🏪 Место (точка)",
+        "Место (точка) - изменить",
         `lk_cand_edit_internship_point_${candidateId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "Ответственный (изменить)",
+        `lk_cand_edit_internship_responsible_${candidateId}`
       ),
     ],
     [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
   ]);
 
+  const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
   await showCandidateCardLk(ctx, candidateId, {
     edit: true,
-    restoreMode: true,
+    restoreMode,
     keyboardOverride: kb,
   });
 }
@@ -74,29 +81,30 @@ async function showEditInterviewMenu(ctx, candidateId, showCandidateCardLk) {
   const kb = Markup.inlineKeyboard([
     [
       Markup.button.callback(
-        "📅 Дата",
+        " Дата (изменить)",
         `lk_cand_edit_interview_date_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "⏰ Время",
+        "Время (изменить)",
         `lk_cand_edit_interview_time_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🏪 Место (точка)",
+        "Место (точка) - изменить",
         `lk_cand_edit_interview_point_${candidateId}`
       ),
     ],
     [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
   ]);
+  const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
 
   // ✅ текст карточки НЕ меняем, меняем только клавиатуру
   await showCandidateCardLk(ctx, candidateId, {
     edit: true,
-    restoreMode: true,
+    restoreMode,
     keyboardOverride: kb,
   });
 }
@@ -105,58 +113,59 @@ async function showEditCommonMenu(ctx, candidateId, showCandidateCardLk) {
   const kb = Markup.inlineKeyboard([
     [
       Markup.button.callback(
-        "✏️ Имя",
+        "Имя (изменить)",
         `lk_cand_edit_common_name_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🔢 Возраст",
+        "Возраст (изменить)",
         `lk_cand_edit_common_age_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "📞 Телефон",
+        "Телефон (изменить)",
         `lk_cand_edit_common_phone_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🏪 Желаемая точка",
+        "Желаемая точка (изменить)",
         `lk_cand_edit_common_point_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "💰 Желаемая ЗП",
+        "Желаемая ЗП (изменить)",
         `lk_cand_edit_common_salary_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🗓 Желаемый график",
+        "Желаемый график (изменить)",
         `lk_cand_edit_common_schedule_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "🧾 Опыт/анкета",
+        "Опыт/анкета (изменить)",
         `lk_cand_edit_common_questionnaire_${candidateId}`
       ),
     ],
     [
       Markup.button.callback(
-        "💬 Комментарий",
+        "Комментарий (изменить)",
         `lk_cand_edit_common_comment_${candidateId}`
       ),
     ],
     [Markup.button.callback("⬅️ Назад", `lk_cand_edit_back_${candidateId}`)],
   ]);
+  const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
 
   await showCandidateCardLk(ctx, candidateId, {
     edit: true,
-    restoreMode: true,
+    restoreMode,
     keyboardOverride: kb,
   });
 }
@@ -212,6 +221,7 @@ async function setCandidateField(candidateId, field, value) {
     "internship_time_from",
     "internship_time_to",
     "internship_point_id",
+    "internship_admin_id",
   ]);
 
   if (!allowed.has(field)) {
@@ -494,7 +504,7 @@ function registerCandidateEditHandlers(
 
       await showCandidateCardLk(ctx, candidateId, {
         edit: true,
-        restoreMode: true,
+        restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
         keyboardOverride: kb,
       });
     } catch (err) {
@@ -590,7 +600,7 @@ function registerCandidateEditHandlers(
 
       await showCandidateCardLk(ctx, candidateId, {
         edit: true,
-        restoreMode: true,
+        restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
         keyboardOverride: kb,
       });
     } catch (err) {
@@ -634,6 +644,72 @@ function registerCandidateEditHandlers(
       logError("lk_cand_edit_internship_date", err);
     }
   });
+
+  async function getAdmins() {
+    const res = await pool.query(`
+    SELECT id, COALESCE(full_name, 'Админ #' || id::text) AS full_name
+      FROM users
+     WHERE role IN ('admin','super_admin')
+     ORDER BY full_name ASC
+  `);
+    return res.rows;
+  }
+
+  bot.action(/^lk_cand_edit_internship_responsible_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const admins = await getAdmins();
+      const rows = admins
+        .slice(0, 30)
+        .map((a) => [
+          Markup.button.callback(
+            a.full_name,
+            `lk_cand_edit_set_internship_responsible_${candidateId}_${a.id}`
+          ),
+        ]);
+
+      rows.push([
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_cand_edit_internship_${candidateId}`
+        ),
+      ]);
+
+      await ctx.editMessageText(
+        "👤 <b>Выберите ответственного по стажировке</b>",
+        {
+          parse_mode: "HTML",
+          reply_markup: Markup.inlineKeyboard(rows).reply_markup,
+        }
+      );
+    } catch (err) {
+      logError("lk_cand_edit_internship_responsible", err);
+    }
+  });
+
+  bot.action(
+    /^lk_cand_edit_set_internship_responsible_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery("✅ Сохранено").catch(() => {});
+        const admin = await ensureUser(ctx);
+        if (!isAdmin(admin)) return;
+
+        const candidateId = Number(ctx.match[1]);
+        const adminId = Number(ctx.match[2]);
+
+        await setCandidateField(candidateId, "internship_admin_id", adminId);
+        await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
+      } catch (err) {
+        logError("lk_cand_edit_set_internship_responsible", err);
+      }
+    }
+  );
 
   bot.action(/^lk_cand_edit_internship_from_(\d+)$/, async (ctx) => {
     try {
@@ -784,49 +860,49 @@ function registerCandidateEditHandlers(
         const kb = Markup.inlineKeyboard([
           [
             Markup.button.callback(
-              "✏️ Имя",
+              "Имя (изменить)",
               `lk_cand_edit_common_name_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🔢 Возраст",
+              "Возраст (изменить)",
               `lk_cand_edit_common_age_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "📞 Телефон",
+              "Телефон (изменить)",
               `lk_cand_edit_common_phone_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🏪 Желаемая точка",
+              "Желаемая точка (изменить)",
               `lk_cand_edit_common_point_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "💰 Желаемая ЗП",
+              "Желаемая ЗП (изменить)",
               `lk_cand_edit_common_salary_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🗓 Желаемый график",
+              "Желаемый график (изменить)",
               `lk_cand_edit_common_schedule_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🧾 Опыт/анкета",
+              "Опыт/анкета (изменить)",
               `lk_cand_edit_common_questionnaire_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "💬 Комментарий",
+              "Комментарий (изменить)",
               `lk_cand_edit_common_comment_${candidateId}`
             ),
           ],
@@ -838,9 +914,10 @@ function registerCandidateEditHandlers(
           ],
         ]);
 
+        const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
         await showCandidateCardLk(ctx, candidateId, {
           edit: true,
-          restoreMode: true,
+          restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
           keyboardOverride: kb,
           ...(forceMessage ? { forceMessage } : {}),
         });
@@ -848,22 +925,29 @@ function registerCandidateEditHandlers(
         const kb = Markup.inlineKeyboard([
           [
             Markup.button.callback(
-              "📅 Дата",
+              " Дата (изменить)",
               `lk_cand_edit_interview_date_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "⏰ Время",
+              "Время (изменить)",
               `lk_cand_edit_interview_time_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🏪 Место (точка)",
+              "Место (точка) - изменить",
               `lk_cand_edit_interview_point_${candidateId}`
             ),
           ],
+          [
+            Markup.button.callback(
+              "Ответственный (изменить)",
+              `lk_cand_edit_internship_responsible_${candidateId}`
+            ),
+          ],
+
           [
             Markup.button.callback(
               "⬅️ Назад",
@@ -871,10 +955,11 @@ function registerCandidateEditHandlers(
             ),
           ],
         ]);
+        const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
 
         await showCandidateCardLk(ctx, candidateId, {
           edit: true,
-          restoreMode: true,
+          restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
           keyboardOverride: kb,
           ...(forceMessage ? { forceMessage } : {}),
         });
@@ -882,25 +967,25 @@ function registerCandidateEditHandlers(
         const kb = Markup.inlineKeyboard([
           [
             Markup.button.callback(
-              "📅 Дата",
+              "Дата - изменить",
               `lk_cand_edit_internship_date_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "⏰ Время (с)",
+              "Время (с) - изменить",
               `lk_cand_edit_internship_from_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "⏰ Время (до)",
+              "Время (до) - изменить",
               `lk_cand_edit_internship_to_${candidateId}`
             ),
           ],
           [
             Markup.button.callback(
-              "🏪 Место (точка)",
+              "Место (точка) - изменить",
               `lk_cand_edit_internship_point_${candidateId}`
             ),
           ],
@@ -911,17 +996,18 @@ function registerCandidateEditHandlers(
             ),
           ],
         ]);
+        const restoreMode = isRestoreModeFor(ctx.from.id, candidateId);
 
         await showCandidateCardLk(ctx, candidateId, {
           edit: true,
-          restoreMode: true,
+          restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
           keyboardOverride: kb,
           ...(forceMessage ? { forceMessage } : {}),
         });
       } else {
         await showCandidateCardLk(ctx, candidateId, {
           edit: true,
-          restoreMode: true,
+          restoreMode: isRestoreModeFor(ctx.from.id, candidateId),
           ...(forceMessage ? { forceMessage } : {}),
         });
       }
