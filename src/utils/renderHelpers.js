@@ -20,7 +20,7 @@ async function deliver(ctx, payload, options = {}) {
   // Если нужно отредактировать существующее сообщение (обычно с callback_query)
   if (edit && (ctx.callbackQuery || ctx.updateType === "callback_query")) {
     try {
-      return await ctx.editMessageText(text, extra);
+      return await ctx.editMessageText(text, { parse_mode: "HTML", ...extra });
     } catch (err) {
       const desc =
         err?.response?.description || err?.description || String(err || "");
@@ -33,7 +33,7 @@ async function deliver(ctx, payload, options = {}) {
       // Частые ошибки: "message can't be edited"
       console.error("deliver: edit failed, fallback to reply", err);
       try {
-        return await ctx.reply(text, extra);
+        return await ctx.reply(text, { parse_mode: "HTML", ...extra });
       } catch (err2) {
         console.error("deliver: reply after failed edit also failed", err2);
       }

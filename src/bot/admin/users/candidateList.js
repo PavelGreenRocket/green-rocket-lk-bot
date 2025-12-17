@@ -1819,6 +1819,27 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
+  bot.action(/^lk_cand_unpostpone_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const candidateId = Number(ctx.match[1]);
+
+      await pool.query(
+        `
+      UPDATE candidates
+         SET is_deferred = false,
+             declined_at = COALESCE(declined_at, NOW())
+       WHERE id = $1
+      `,
+        [candidateId]
+      );
+
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_unpostpone", err);
+    }
+  });
+
   bot.action(/^lk_cand_restore_apply_(\d+)$/, async (ctx) => {
     const admin = await ensureUser(ctx);
     if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))

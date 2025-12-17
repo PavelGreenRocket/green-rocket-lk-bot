@@ -13,7 +13,7 @@ function registerAdminPanel(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin"))
         return;
 
-      const text = "🛠 *Админ-панель*\n\nВыберите раздел:";
+      const text = "🛠 <b>Админ-панель</b>\n\nВыберите раздел:";
       const keyboard = Markup.inlineKeyboard([
         [{ text: "👥 Пользователи", callback_data: "admin_users" }],
         [{ text: "📢 Рассылки", callback_data: "admin_mailings" }],

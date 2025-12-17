@@ -182,18 +182,18 @@ async function buildStatusText(user) {
   // Дальше — обычный текст (включая кандидата на стажировку)
   let statusLine = "";
   if (staffStatus === "intern") {
-    statusLine = "Статус: 🎓 стажёр";
+    statusLine = "<b>Статус:</b> 🎓 стажёр";
   } else if (staffStatus === "worker") {
-    statusLine = "Статус: 👨‍💼 сотрудник";
+    statusLine = "<b>Статус:</b> 👨‍💼 сотрудник";
   } else if (staffStatus === "candidate") {
-    statusLine = "Статус: 🧩 кандидат";
+    statusLine = "<b>Статус:</b> 🧩 кандидат";
   } else {
-    statusLine = `Статус: ${staffStatus}`;
+    statusLine = `<b>Статус:</b> ${staffStatus}`;
   }
 
   let roleLine = "";
-  if (role === "admin") roleLine = "Роль: админ\n";
-  else if (role === "super_admin") roleLine = "Роль: супер-админ\n";
+  if (role === "admin") roleLine = "<b>Роль:</b> админ\n";
+  else if (role === "super_admin") roleLine = "<b>Роль:</b> супер-админ\n";
 
   let positionLine = "";
   if (position) {
@@ -204,11 +204,11 @@ async function buildStatusText(user) {
     if (position === "quality_manager") posLabel = "менеджер по качеству";
     if (position === "manager") posLabel = "управляющий";
 
-    positionLine = `Должность: ${posLabel}\n`;
+    positionLine = `<b>Должность:</b> ${posLabel}\n`;
   }
 
   return (
-    `Имя: ${name}\n` +
+    `<b>Имя:</b> ${name}\n` +
     `${statusLine}\n` +
     (roleLine || "") +
     (positionLine || "") +

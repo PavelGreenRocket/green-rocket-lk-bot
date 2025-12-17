@@ -65,11 +65,14 @@ function clearAdminTheorySession(adminId) {
 const adminAiViewStates = new Map(); // { aiFilter: 'all' | 'offtopic', aiToolsExpanded?: boolean }
 function getAdminAiViewState(adminTelegramId) {
   const st = adminAiViewStates.get(adminTelegramId);
-  if (!st) return { aiFilter: "all", aiToolsExpanded: false };
+
+  if (!st)
+    return { aiFilter: "all", aiToolsExpanded: false, aiFilterExpanded: false };
 
   return {
     aiFilter: st.aiFilter || "all",
     aiToolsExpanded: !!st.aiToolsExpanded,
+    aiFilterExpanded: !!st.aiFilterExpanded,
   };
 }
 function setAdminAiViewState(adminTelegramId, patch) {

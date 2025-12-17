@@ -158,6 +158,7 @@ async function showCandidateCardLk(ctx, candidateId, options = {}) {
         c.age,
         c.phone,
         c.status,
+        c.is_deferred,
         c.salary,
         c.schedule,
         c.questionnaire,
@@ -270,7 +271,9 @@ FROM candidates c
   text += `• *Телефон:* ${phoneText}\n`;
 
   if (lkUserTgId) {
-    text += `• *Пользователь:* tg://user?id=${lkUserTgId}\n`;
+    let bound = "привязан";
+    if (lkUserName) bound += ` (${lkUserName})`; // если хочешь именно @username — см. примечание ниже
+    text += `• *Пользователь:* ${bound}\n`;
   } else {
     text += "• *Пользователь:* не привязан\n";
   }
@@ -280,16 +283,19 @@ FROM candidates c
   text += `• *Предыдущий опыт:* ${experienceText}\n`;
   text += `• *Общий комментарий:* ${commentText}\n\n`;
   text += "────────────────────────────────\n";
-  // 📅 О собеседовании / Итоги собеседования
-  if (cand.status === "interviewed" || cand.status === "internship_invited") {
-    text += "🔹 *Итоги собеседования*\n";
-  } else {
-    text += "🔹 *О собеседовании*\n";
-  }
 
-  text += `• *Дата/время:* ${dtFull}\n`;
-  text += `• *Место собеседования:* ${placeTitle}\n`;
-  text += `• *Ответственный:* ${adminName}\n\n`;
+  // 📅 О собеседовании / Итоги собеседования
+  if (!isTraineeMode) {
+    if (cand.status === "interviewed" || cand.status === "internship_invited") {
+      text += "🔹 *Итоги собеседования*\n";
+    } else {
+      text += "🔹 *О собеседовании*\n";
+    }
+
+    text += `• *Дата/время:* ${dtFull}\n`;
+    text += `• *Место собеседования:* ${placeTitle}\n`;
+    text += `• *Ответственный:* ${adminName}\n\n`;
+  }
 
   // --- Блок причины отказа для отклонённого кандидата ---
   if (cand.status === "rejected") {
@@ -300,52 +306,55 @@ FROM candidates c
     text += `Причина: ${reason}\n\n`;
   }
 
-  // 🔹 Замечания — только если собес уже прошёл / стажировка
-  if (cand.status === "interviewed" || cand.status === "internship_invited") {
-    text += "🔹 *Замечания по собеседованию*\n";
+  if (!isTraineeMode) {
+    // 🔹 Замечания — только если собес уже прошёл / стажировка
+    if (cand.status === "interviewed" || cand.status === "internship_invited") {
+      text += "🔹 *Замечания по собеседованию*\n";
 
-    if (cand.was_on_time === true) {
-      text += "• *Опоздание:* пришёл вовремя\n";
-    } else if (cand.was_on_time === false) {
-      const minutes =
-        cand.late_minutes != null ? `${cand.late_minutes} мин` : "есть";
-      text += `• *Опоздание:* опоздал (${minutes})\n`;
-    } else {
-      text += "• *Опоздание:* не указано\n";
-    }
-
-    if (cand.interview_comment) {
-      text += `• *Другие замечания:* ${cand.interview_comment}\n`;
-    } else {
-      text += "• *Другие замечания:* замечаний нет\n";
-    }
-
-    // 🔹 О стажировке — когда уже приглашён
-    if (cand.status === "internship_invited") {
-      text += "────────────────────────────────\n";
-      text += "\🔹 *О стажировке*\n";
-
-      if (cand.internship_date) {
-        const dateLabel = formatDateWithWeekday(cand.internship_date);
-        if (cand.internship_time_from && cand.internship_time_to) {
-          text += `• Дата стажировки: ${dateLabel} (с ${cand.internship_time_from.slice(
-            0,
-            5
-          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
-        } else {
-          text += `• Дата стажировки: ${dateLabel}\n`;
-        }
+      if (cand.was_on_time === true) {
+        text += "• *Опоздание:* пришёл вовремя\n";
+      } else if (cand.was_on_time === false) {
+        const minutes =
+          cand.late_minutes != null ? `${cand.late_minutes} мин` : "есть";
+        text += `• *Опоздание:* опоздал (${minutes})\n`;
       } else {
-        text += "• Дата стажировки: не указана\n";
+        text += "• *Опоздание:* не указано\n";
       }
 
-      text += `• Место стажировки: ${
-        cand.internship_point_title || cand.place_title || "не указано"
-      }\n`;
-      text += `• Ответственный по стажировке: ${
-        cand.internship_admin_name || "не указан"
-      }\n`;
+      if (cand.interview_comment) {
+        text += `• *Другие замечания:* ${cand.interview_comment}\n`;
+        text += "────────────────────────────────\n";
+      } else {
+        text += "• *Другие замечания:* замечаний нет\n";
+        text += "────────────────────────────────\n";
+      }
     }
+  }
+
+  // 🔹 О стажировке — когда уже приглашён
+  if (cand.status === "internship_invited") {
+    text += "🔹 *О стажировке*\n";
+
+    if (cand.internship_date) {
+      const dateLabel = formatDateWithWeekday(cand.internship_date);
+      if (cand.internship_time_from && cand.internship_time_to) {
+        text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
+          0,
+          5
+        )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+      } else {
+        text += `• *Дата стажировки:* ${dateLabel}\n`;
+      }
+    } else {
+      text += "• *Дата стажировки:* не указана\n";
+    }
+
+    text += `• *Место стажировки:* ${
+      cand.internship_point_title || cand.place_title || "не указано"
+    }\n`;
+    text += `• *Ответственный по стажировке:* ${
+      cand.internship_admin_name || "не указан"
+    }\n`;
 
     if (cand.decline_reason) {
       text += `• *Причина отказа:* ${cand.decline_reason}\n`;
@@ -429,11 +438,11 @@ FROM candidates c
         ),
       ]);
 
-      // 3) 📋 Открыть карточку ⤵️/⤴️ (toggle)
+      // 3) ▾ Открыть карточку ⤵/⤴ (toggle)
       const expanded = isTraineeCardsExpanded(ctx.from.id);
       rows.push([
         Markup.button.callback(
-          expanded ? "📋 Открыть карточку ⤴️" : "📋 Открыть карточку ⤵️",
+          expanded ? "📋 Открыть карточку ⤴" : "📋 Открыть карточку ⤵З%",
           `lk_internship_toggle_cards_${cand.id}`
         ),
       ]);
@@ -493,12 +502,21 @@ FROM candidates c
       ),
     ]);
 
-    rows.push([
-      Markup.button.callback(
-        "🗑️ перенести в отложенные",
-        `lk_cand_postpone_${cand.id}`
-      ),
-    ]);
+    if (cand.is_deferred) {
+      rows.push([
+        Markup.button.callback(
+          "↩️🗑️ убрать из отложенных",
+          `lk_cand_unpostpone_${cand.id}`
+        ),
+      ]);
+    } else {
+      rows.push([
+        Markup.button.callback(
+          "🗑️ перенести в отложенные",
+          `lk_cand_postpone_${cand.id}`
+        ),
+      ]);
+    }
   }
 
   // Общие кнопки

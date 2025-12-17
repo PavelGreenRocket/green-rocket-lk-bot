@@ -180,7 +180,8 @@ async function getAiMetrics(period = "month") {
 // Отображение списка обращений к ИИ
 async function showAiLogsList(ctx, page) {
   const adminId = ctx.from.id;
-  const { aiFilter, aiToolsExpanded } = getAdminAiViewState(adminId);
+  const { aiFilter, aiToolsExpanded, aiFilterExpanded } =
+    getAdminAiViewState(adminId);
 
   const {
     total,
@@ -191,8 +192,7 @@ async function showAiLogsList(ctx, page) {
 
   if (!total) {
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback("👥 К пользователям", "admin_users")],
-      [Markup.button.callback("🔙 В админ-панель", "admin_menu")],
+      [Markup.button.callback("🔙 Назад", "admin_users")],
     ]);
 
     await deliver(
@@ -237,21 +237,33 @@ async function showAiLogsList(ctx, page) {
     ]);
   }
 
-  // фильтр
-  if (aiFilter === "all") {
-    buttons.push([
-      Markup.button.callback(
-        "🚫🤖 Обращения не по работе",
-        `admin_ai_logs_filter_offtopic_${realPage}`
-      ),
-    ]);
-  } else {
-    buttons.push([
-      Markup.button.callback(
-        "🔄 Показать все обращения",
-        `admin_ai_logs_filter_all_${realPage}`
-      ),
-    ]);
+  // 🔎 фильтр (панель)
+  const filterToggleLabel = aiFilterExpanded
+    ? "🔎 Фильтр (скрыть)"
+    : "🔎 Фильтр";
+  buttons.push([
+    Markup.button.callback(
+      filterToggleLabel,
+      `admin_ai_filter_toggle_${realPage}`
+    ),
+  ]);
+
+  if (aiFilterExpanded) {
+    if (aiFilter === "all") {
+      buttons.push([
+        Markup.button.callback(
+          "🚫🤖 Обращения не по работе",
+          `admin_ai_logs_filter_offtopic_${realPage}`
+        ),
+      ]);
+    } else {
+      buttons.push([
+        Markup.button.callback(
+          "🔄 Показать все обращения",
+          `admin_ai_logs_filter_all_${realPage}`
+        ),
+      ]);
+    }
   }
 
   // раскрытие (вместо отдельной “Статистики”)
@@ -289,8 +301,7 @@ async function showAiLogsList(ctx, page) {
   }
   if (navRow.length) buttons.push(navRow);
 
-  buttons.push([Markup.button.callback("👥 К пользователям", "admin_users")]);
-  buttons.push([Markup.button.callback("🔙 В админ-панель", "admin_menu")]);
+  buttons.push([Markup.button.callback("🔙 Назад", "admin_users")]);
 
   await deliver(
     ctx,
@@ -410,8 +421,7 @@ async function showAiLogDetails(ctx, logId, returnPage) {
       `admin_ai_logs_${returnPage || 1}`
     ),
   ]);
-  buttons.push([Markup.button.callback("👥 К пользователям", "admin_users")]);
-  buttons.push([Markup.button.callback("🔙 В админ-панель", "admin_menu")]);
+  buttons.push([Markup.button.callback("🔙 Назад", "admin_users")]);
 
   await deliver(
     ctx,
@@ -496,6 +506,29 @@ function registerAdminAiLogs(bot, ensureUser, logError) {
       await showAiLogsList(ctx, page);
     } catch (err) {
       logError("admin_ai_tools_toggle_x", err);
+    }
+  });
+
+  bot.action(/^admin_ai_filter_toggle_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const page = parseInt(ctx.match[1], 10) || 1;
+      const st = getAdminAiViewState(ctx.from.id);
+
+      // при открытии фильтра можно свернуть "инструменты", чтобы не раздувать клавиатуру
+      const nextExpanded = !st.aiFilterExpanded;
+
+      setAdminAiViewState(ctx.from.id, {
+        aiFilterExpanded: nextExpanded,
+        aiToolsExpanded: nextExpanded ? false : st.aiToolsExpanded,
+      });
+
+      await showAiLogsList(ctx, page);
+    } catch (err) {
+      logError("admin_ai_filter_toggle_x", err);
     }
   });
 
