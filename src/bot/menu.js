@@ -57,8 +57,37 @@ async function buildMainKeyboard(user) {
   // Обычная клавиатура (смены, Академия, склад, ИИ, уведомления и т.п.)
   const buttons = [];
 
-  // 1) Открыть смену
-  buttons.push([Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle")]);
+  // 1) Смена (открыть/закрыть) + задачи (только если смена активна)
+  let activeShift = null;
+  try {
+    const sres = await pool.query(
+      `
+        SELECT id, status
+        FROM shifts
+        WHERE user_id = $1
+          AND opened_at::date = CURRENT_DATE
+          AND status IN ('opening_in_progress','opened')
+        ORDER BY opened_at DESC
+        LIMIT 1
+      `,
+      [user.id]
+    );
+    activeShift = sres.rows[0] || null;
+  } catch (e) {
+    // если таблица shifts ещё не подключена/пусто — не ломаем меню
+    activeShift = null;
+  }
+
+  if (activeShift) {
+    buttons.push([
+      Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle"),
+    ]);
+    buttons.push([Markup.button.callback("📋 Задачи", "lk_tasks_today")]);
+  } else {
+    buttons.push([
+      Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle"),
+    ]);
+  }
 
   // 2) Академия бариста
   if (staffStatus === "candidate") {

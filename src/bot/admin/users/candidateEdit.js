@@ -488,19 +488,189 @@ function registerCandidateEditHandlers(
       const admin = await ensureUser(ctx);
       if (!isAdmin(admin)) return;
 
+      const candidateId = Number(ctx.match[1]);
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✍️ Ввести ID / @username",
+            `lk_cand_edit_user_manual_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "👥 Выбрать из ожидающих",
+            `lk_cand_edit_user_waiting_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            `lk_cand_edit_common_${candidateId}`
+          ),
+        ],
+      ]);
+
+      await ctx.editMessageText(
+        "👤 <b>Привязать/изменить пользователя</b>\n\nВыберите способ:",
+        {
+          parse_mode: "HTML",
+          reply_markup: kb.reply_markup,
+        }
+      );
+    } catch (err) {
+      logError("lk_cand_edit_user_menu", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_user_manual_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
       const id = Number(ctx.match[1]);
 
-      // Просим tg id или @username
       await askText(
         ctx,
         id,
         "Привязать/изменить пользователя",
         `lk_cand_edit_common_${id}`,
         "lk_user_tg_id",
-        "Например: 8192106284 или @username"
+        "Например: 8192106284"
       );
     } catch (err) {
-      logError("lk_cand_edit_user", err);
+      logError("lk_cand_edit_user_manual", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_user_waiting_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const res = await pool.query(
+        `
+        SELECT id, telegram_id, full_name, age, phone, created_at
+          FROM lk_waiting_users
+         WHERE linked_user_id IS NULL
+         ORDER BY created_at DESC
+         LIMIT 20
+      `
+      );
+
+      const rows = res.rows;
+
+      if (!rows.length) {
+        return ctx.editMessageText(
+          "Пока нет новых непривязанных пользователей (ожидающих).",
+          {
+            parse_mode: "HTML",
+            reply_markup: Markup.inlineKeyboard([
+              [
+                Markup.button.callback(
+                  "⬅️ Назад",
+                  `lk_cand_edit_user_${candidateId}`
+                ),
+              ],
+            ]).reply_markup,
+          }
+        );
+      }
+
+      const buttons = rows.map((u) => {
+        const agePart = u.age ? ` (${u.age})` : "";
+        const phonePart = u.phone ? ` ${u.phone}` : "";
+        const label = `${u.full_name || "Без имени"}${agePart}${phonePart}`;
+
+        return [
+          Markup.button.callback(
+            label,
+            `lk_cand_edit_user_waiting_select_${candidateId}_${u.id}`
+          ),
+        ];
+      });
+
+      buttons.push([
+        Markup.button.callback("⬅️ Назад", `lk_cand_edit_user_${candidateId}`),
+      ]);
+
+      await ctx.editMessageText(
+        "👥 <b>Выберите пользователя из ожидающих</b>:",
+        {
+          parse_mode: "HTML",
+          reply_markup: Markup.inlineKeyboard(buttons).reply_markup,
+        }
+      );
+    } catch (err) {
+      logError("lk_cand_edit_user_waiting", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_user_waiting_select_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("✅ Привязано").catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const candidateId = Number(ctx.match[1]);
+      const waitingId = Number(ctx.match[2]);
+
+      const wRes = await pool.query(
+        `
+        SELECT id, telegram_id, full_name
+          FROM lk_waiting_users
+         WHERE id = $1
+         LIMIT 1
+      `,
+        [waitingId]
+      );
+      if (!wRes.rows.length) return;
+
+      const w = wRes.rows[0];
+
+      // 1) создаём/обновляем пользователя users по telegram_id и привязываем к candidate_id
+      const uRes = await pool.query(
+        `
+        INSERT INTO users (telegram_id, full_name, role, staff_status, position, candidate_id)
+        VALUES ($1, $2, 'user', 'candidate', NULL, $3)
+        ON CONFLICT (telegram_id) DO UPDATE
+          SET full_name = EXCLUDED.full_name,
+              staff_status = 'candidate',
+              candidate_id = $3
+        RETURNING id
+      `,
+        [w.telegram_id, w.full_name, candidateId]
+      );
+      const userId = uRes.rows[0]?.id;
+
+      // 2) записываем tg_id в кандидата (ваша текущая модель карточки это использует)
+      await pool.query(
+        `UPDATE candidates SET lk_user_tg_id = $1 WHERE id = $2`,
+        [w.telegram_id, candidateId]
+      );
+
+      // 3) помечаем запись ожидания как linked
+      if (userId) {
+        await pool.query(
+          `
+          UPDATE lk_waiting_users
+             SET status = 'linked',
+                 linked_user_id = $2,
+                 linked_at = NOW()
+           WHERE id = $1
+        `,
+          [w.id, userId]
+        );
+      }
+
+      // возвращаем в меню общей информации
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("lk_cand_edit_user_waiting_select", err);
     }
   });
 
