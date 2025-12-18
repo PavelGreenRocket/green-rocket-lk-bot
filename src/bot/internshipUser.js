@@ -351,6 +351,7 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
   });
 
   // Кнопка "❌ Отказаться от стажировки"
+  // Кнопка "❌ Отказаться от стажировки" -> экран подтверждения
   bot.action("lk_internship_decline", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -363,23 +364,136 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
         return;
       }
 
-      await pool.query(
+      const text =
+        "❗️Вы точно хотите отказаться от стажировки?\n\n" +
+        "Если нажмёте «Да» — наставнику придёт уведомление, " +
+        "а ваша заявка перейдёт в список на удаление.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ Да, отказаться",
+            "lk_internship_decline_yes"
+          ),
+        ],
+        [Markup.button.callback("⬅️ Нет, назад", "lk_internship_decline_no")],
+      ]);
+
+      await deliver(
+        ctx,
+        { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+        { edit: true }
+      );
+    } catch (err) {
+      logError("lk_internship_decline_confirm", err);
+    }
+  });
+
+  // Нет -> назад к деталям стажировки
+  bot.action("lk_internship_decline_no", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      await showInternshipDetails(ctx, user, {
+        withReadButton: false,
+        edit: true,
+      });
+    } catch (err) {
+      logError("lk_internship_decline_no", err);
+    }
+  });
+
+  // Да -> оформить отказ (идемпотентно) + уведомить наставника
+  bot.action("lk_internship_decline_yes", async (ctx) => {
+    let client;
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const candidate = await getActiveInternshipCandidate(user.id);
+      if (!candidate) {
+        await ctx.reply("У вас нет активной стажировки.");
+        return;
+      }
+
+      client = await pool.connect();
+      await client.query("BEGIN");
+
+      // Идемпотентно: только если кандидат ещё реально на статусе internship_invited
+      const upd = await client.query(
         `
-          UPDATE candidates
-          SET status = 'declined',
-              decline_reason = 'кандидат отказался от стажировки',
-              closed_from_status = status,
-              closed_by_admin_id = $2,
-              declined_at = NOW()
-          WHERE id = $1
-        `,
+        UPDATE candidates
+           SET status = 'rejected',
+               decline_reason = 'отказался сам',
+               closed_from_status = status,
+               closed_by_admin_id = $2,
+               declined_at = NOW(),
+               is_deferred = false
+         WHERE id = $1
+           AND status = 'internship_invited'
+        RETURNING id
+      `,
         [candidate.id, user.id]
       );
 
-      // Отвязываем кандидата от пользователя
-      await pool.query(`UPDATE users SET candidate_id = NULL WHERE id = $1`, [
+      if (!upd.rowCount) {
+        await client.query("ROLLBACK");
+        await ctx.reply("Отказ уже был оформлен ранее.");
+        await showMainMenu(ctx);
+        return;
+      }
+
+      await client.query("UPDATE users SET candidate_id = NULL WHERE id = $1", [
         user.id,
       ]);
+
+      await client.query("COMMIT");
+
+      // Уведомление наставнику — по стилю как при “назначена стажировка”
+      // (там используется mentor_telegram_id и кнопки "Открыть кандидата" / "Мои стажировки") :contentReference[oaicite:2]{index=2}
+      const mentorTgId = candidate.internship_admin_telegram_id;
+      if (mentorTgId) {
+        try {
+          const adminTextLines = [];
+          adminTextLines.push("❌ *Кандидат отказался от стажировки*");
+          adminTextLines.push("");
+          adminTextLines.push(
+            `• Кандидат: ${candidate.name || "без имени"}${
+              candidate.age ? ` (${candidate.age})` : ""
+            }`
+          );
+          adminTextLines.push("• Причина: отказался сам");
+
+          const adminKeyboard = Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "👤 Открыть кандидата",
+                `lk_cand_open_${candidate.id}`
+              ),
+            ],
+            [
+              Markup.button.callback(
+                "📋 Мои стажировки",
+                "lk_admin_my_internships"
+              ),
+            ],
+          ]);
+
+          await ctx.telegram.sendMessage(
+            mentorTgId,
+            adminTextLines.join("\n"),
+            {
+              parse_mode: "Markdown",
+              reply_markup: adminKeyboard.reply_markup,
+            }
+          );
+        } catch (e) {
+          logError("lk_internship_decline_notify_mentor", e);
+        }
+      }
 
       await ctx.reply(
         "Вы отказались от стажировки. " +
@@ -388,8 +502,15 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
 
       await showMainMenu(ctx);
     } catch (err) {
-      logError("lk_internship_decline", err);
+      if (client) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (_) {}
+      }
+      logError("lk_internship_decline_yes", err);
       await ctx.reply("Не удалось оформить отказ от стажировки.");
+    } finally {
+      if (client) client.release();
     }
   });
 }

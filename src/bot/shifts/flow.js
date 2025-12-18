@@ -146,7 +146,14 @@ async function showShiftQuestion(ctx, st) {
     [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
   ]);
 
-  await deliver(ctx, { text, extra: kb }, { edit: true });
+  // Если пришли из нажатия кнопки — можно edit
+  if (ctx.callbackQuery) {
+    await deliver(ctx, { text, extra: kb }, { edit: true });
+    return;
+  }
+
+  // Если пришли из ввода текста/фото/видео — только новое сообщение
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
 }
 
 function registerShiftFlow(bot, ensureUser, logError) {
@@ -173,10 +180,9 @@ function registerShiftFlow(bot, ensureUser, logError) {
       const active = await getActiveShift(user.id);
 
       // Пока закрытие смены сделаем позже: если смена уже есть — просто алерт
+      // Пока закрытие смены сделаем позже: если смена уже есть — просто алерт
       if (active) {
-        await ctx
-          .answerCbQuery("Смена уже открыта сегодня ✅", { show_alert: true })
-          .catch(() => {});
+        await toast(ctx, "Смена уже открыта сегодня ✅");
         return;
       }
 

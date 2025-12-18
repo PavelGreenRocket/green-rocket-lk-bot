@@ -246,6 +246,7 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
   });
 
   // Кнопка "❌ Отказаться от собеседования" -> экран подтверждения
+  // Кнопка "❌ Отказаться от собеседования" -> экран подтверждения
   bot.action("lk_interview_decline", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -260,7 +261,8 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
 
       const text =
         "❗️Вы точно хотите отказаться от собеседования?\n\n" +
-        "Если нажмёте «Да» — ответственному придёт уведомление, а ваша заявка перейдёт в список на удаление.";
+        "Если нажмёте «Да» — ответственному придёт уведомление, " +
+        "а ваша заявка перейдёт в список на удаление.";
 
       const keyboard = Markup.inlineKeyboard([
         [
@@ -279,6 +281,131 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
       );
     } catch (err) {
       logError("lk_interview_decline_confirm", err);
+    }
+  });
+
+  // Нет -> назад к деталям собеседования
+  bot.action("lk_interview_decline_no", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      await showInterviewDetails(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_interview_decline_no", err);
+    }
+  });
+
+  // Да -> оформить отказ (идемпотентно) + уведомить ответственного
+  bot.action("lk_interview_decline_yes", async (ctx) => {
+    let client;
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const candidate = await getActiveInterviewCandidate(user.id);
+      if (!candidate) {
+        await ctx.reply("У вас нет назначенного собеседования.");
+        return;
+      }
+
+      // Транзакция, чтобы не было “обновили кандидата, но не отвязали юзера”
+      client = await pool.connect();
+      await client.query("BEGIN");
+
+      // ✅ ВАЖНО: статус должен быть 'rejected', т.к. "Кандидаты на удалении"
+      // в админке ЛК выбираются по c.status='rejected' + declined_at not null + is_deferred=false
+      // см. candidateList.js :contentReference[oaicite:1]{index=1}
+      const upd = await client.query(
+        `
+        UPDATE candidates
+           SET status = 'rejected',
+               decline_reason = 'отказался сам',
+               closed_from_status = status,
+               closed_by_admin_id = $2,
+               declined_at = NOW(),
+               is_deferred = false
+         WHERE id = $1
+           AND status = 'invited'
+        RETURNING id
+      `,
+        [candidate.id, user.id]
+      );
+
+      // Идемпотентность: двойной клик/повтор колбэка
+      if (!upd.rowCount) {
+        await client.query("ROLLBACK");
+        await ctx.reply("Отказ уже был оформлен ранее.");
+        await showMainMenu(ctx);
+        return;
+      }
+
+      await client.query("UPDATE users SET candidate_id = NULL WHERE id = $1", [
+        user.id,
+      ]);
+
+      await client.query("COMMIT");
+
+      // Уведомление ответственному — копипаст-паттерн из sendInterviewInvitation
+      // (candidateCreate.js) :contentReference[oaicite:2]{index=2}
+      if (candidate.admin_telegram_id) {
+        try {
+          const adminTextLines = [];
+          adminTextLines.push("❌ *Кандидат отказался от собеседования*");
+          adminTextLines.push("");
+          adminTextLines.push(
+            `• Кандидат: ${candidate.name || "без имени"}${
+              candidate.age ? ` (${candidate.age})` : ""
+            }`
+          );
+          adminTextLines.push("• Причина: отказался сам");
+
+          const adminKeyboard = Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "👤 Открыть кандидата",
+                `lk_cand_open_${candidate.id}`
+              ),
+            ],
+            [
+              Markup.button.callback(
+                "📋 Мои собеседования",
+                "lk_admin_my_interviews"
+              ),
+            ],
+          ]);
+
+          await ctx.telegram.sendMessage(
+            candidate.admin_telegram_id,
+            adminTextLines.join("\n"),
+            {
+              reply_markup: adminKeyboard.reply_markup,
+              parse_mode: "Markdown",
+            }
+          );
+        } catch (e) {
+          logError("lk_interview_decline_notify_admin", e);
+        }
+      }
+
+      await ctx.reply(
+        "Вы отказались от собеседования.\n" +
+          "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
+      );
+
+      await showMainMenu(ctx);
+    } catch (err) {
+      if (client) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (_) {}
+      }
+      logError("lk_interview_decline_yes", err);
+      await ctx.reply("Не удалось оформить отказ от собеседования.");
+    } finally {
+      if (client) client.release();
     }
   });
 
