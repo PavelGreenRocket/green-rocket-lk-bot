@@ -355,11 +355,24 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
           const adminTextLines = [];
           adminTextLines.push("❌ *Кандидат отказался от собеседования*");
           adminTextLines.push("");
+
           adminTextLines.push(
             `• Кандидат: ${candidate.name || "без имени"}${
               candidate.age ? ` (${candidate.age})` : ""
             }`
           );
+
+          const dateStr = formatDateRu(candidate.interview_date);
+          const timeStr = candidate.interview_time || "не указано";
+          const pointTitle = candidate.point_title || "не указана";
+          const pointAddress =
+            candidate.point_address || "будет добавлен позже";
+
+          adminTextLines.push(`• Дата: ${dateStr}`);
+          adminTextLines.push(`• Время: ${timeStr}`);
+          adminTextLines.push(`• Точка: ${pointTitle}`);
+          adminTextLines.push(`• Адрес: ${pointAddress}`);
+
           adminTextLines.push("• Причина: отказался сам");
 
           const adminKeyboard = Markup.inlineKeyboard([
@@ -376,6 +389,15 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
               ),
             ],
           ]);
+
+          await ctx.telegram.sendMessage(
+            candidate.admin_telegram_id,
+            adminTextLines.join("\n"),
+            {
+              reply_markup: adminKeyboard.reply_markup,
+              parse_mode: "Markdown",
+            }
+          );
 
           await ctx.telegram.sendMessage(
             candidate.admin_telegram_id,
