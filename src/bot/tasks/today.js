@@ -281,7 +281,6 @@ function registerTodayTasks(bot, ensureUser, logError) {
   // entry from menu
   bot.action("lk_tasks_today", async (ctx) => {
     try {
-      await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
