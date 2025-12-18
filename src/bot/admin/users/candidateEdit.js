@@ -228,7 +228,6 @@ async function setCandidateField(candidateId, field, value) {
     "internship_time_from",
     "internship_time_to",
     "internship_point_id",
-    "lk_user_tg_id",
     "internship_admin_id",
   ]);
 
@@ -647,13 +646,7 @@ function registerCandidateEditHandlers(
       );
       const userId = uRes.rows[0]?.id;
 
-      // 2) записываем tg_id в кандидата (ваша текущая модель карточки это использует)
-      await pool.query(
-        `UPDATE candidates SET lk_user_tg_id = $1 WHERE id = $2`,
-        [w.telegram_id, candidateId]
-      );
-
-      // 3) помечаем запись ожидания как linked
+      // 2) помечаем запись ожидания как linked
       if (userId) {
         await pool.query(
           `

@@ -1,12 +1,11 @@
-// src/bot/shifts/flow.js
-function registerShiftFlow(bot, ensureUser, logError) {
+function registerShifts(bot, ensureUser, logError) {
   bot.action("lk_shift_toggle", async (ctx) => {
     try {
-      await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
 
       const staffStatus = user.staff_status || "worker";
+
       if (staffStatus === "candidate") {
         await ctx
           .answerCbQuery(
@@ -16,10 +15,16 @@ function registerShiftFlow(bot, ensureUser, logError) {
           .catch(() => {});
         return;
       }
+
+      await ctx
+        .answerCbQuery("Функционал учёта смен пока не готов.", {
+          show_alert: true,
+        })
+        .catch(() => {});
     } catch (err) {
       logError("lk_shift_toggle", err);
+      // на всякий случай, чтобы не зависали “часики”
+      await ctx.answerCbQuery("Ошибка", { show_alert: true }).catch(() => {});
     }
   });
 }
-
-module.exports = { registerShiftFlow };
