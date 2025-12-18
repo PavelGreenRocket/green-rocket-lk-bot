@@ -468,4 +468,4 @@ function registerTodayTasks(bot, ensureUser, logError) {
   });
 }
 
-module.exports = { registerTodayTasks };
+module.exports = { registerTodayTasks, showTodayTasks };

@@ -460,11 +460,24 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
           const adminTextLines = [];
           adminTextLines.push("❌ *Кандидат отказался от стажировки*");
           adminTextLines.push("");
+
           adminTextLines.push(
             `• Кандидат: ${candidate.name || "без имени"}${
               candidate.age ? ` (${candidate.age})` : ""
             }`
           );
+
+          const datePart = formatDateRu(candidate.internship_date);
+          const timeFromText = candidate.internship_time_from || "не указано";
+          const timeToText = candidate.internship_time_to || "не указано";
+          const pointTitle = candidate.internship_point_name || "не указана";
+          const pointAddress = candidate.internship_point_address || null;
+
+          adminTextLines.push(`• Дата: ${datePart}`);
+          adminTextLines.push(`• Время: с ${timeFromText} до ${timeToText}`);
+          adminTextLines.push(`• Точка: ${pointTitle}`);
+          if (pointAddress) adminTextLines.push(`• Адрес: ${pointAddress}`);
+
           adminTextLines.push("• Причина: отказался сам");
 
           const adminKeyboard = Markup.inlineKeyboard([

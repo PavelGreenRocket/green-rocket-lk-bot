@@ -4,7 +4,7 @@ const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { getUserState, setUserState, clearUserState } = require("../state");
 const { toast, alert } = require("../../utils/toast");
-
+const { showTodayTasks } = require("../tasks/today");
 const MODE = "shift_open";
 
 function getShiftState(tgId) {
@@ -146,13 +146,13 @@ async function showShiftQuestion(ctx, st) {
     [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
   ]);
 
-  // Если пришли из нажатия кнопки — можно edit
+  // ✅ Если мы пришли из кнопки (callback) — можем редактировать сообщение
   if (ctx.callbackQuery) {
     await deliver(ctx, { text, extra: kb }, { edit: true });
     return;
   }
 
-  // Если пришли из ввода текста/фото/видео — только новое сообщение
+  // ✅ Если пришли из ввода текста/фото/видео — редактировать нельзя, шлём новое сообщение
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
 }
 
@@ -393,13 +393,14 @@ function registerShiftFlow(bot, ensureUser, logError) {
           `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
           [st.shiftId, user.id]
         );
+        await pool.query(
+          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
+          [st.shiftId, user.id]
+        );
         clearShiftState(ctx.from.id);
-        await ctx.reply("✅ Опрос завершён. Смена открыта!");
-        await ctx.telegram.sendMessage(ctx.chat.id, "⬅️ В меню:", {
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "В меню", callback_data: "lk_main_menu" }],
-          ]).reply_markup,
-        });
+
+        // ✅ сразу показываем экран задач на сегодня
+        await showTodayTasks(ctx, user);
         return;
       }
 
@@ -451,13 +452,14 @@ function registerShiftFlow(bot, ensureUser, logError) {
           `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
           [st.shiftId, user.id]
         );
+        await pool.query(
+          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
+          [st.shiftId, user.id]
+        );
         clearShiftState(ctx.from.id);
-        await ctx.reply("✅ Опрос завершён. Смена открыта!");
-        await ctx.telegram.sendMessage(ctx.chat.id, "⬅️ В меню:", {
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "В меню", callback_data: "lk_main_menu" }],
-          ]).reply_markup,
-        });
+
+        // ✅ сразу показываем экран задач на сегодня
+        await showTodayTasks(ctx, user);
         return;
       }
 
