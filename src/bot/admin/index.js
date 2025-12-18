@@ -1,11 +1,12 @@
+// src/bot/admin/index.js
 const { Markup } = require("telegraf");
 const { deliver } = require("../../utils/renderHelpers");
 const registerAdminUsers = require("./users");
 const { registerAdminMailings } = require("./mailings");
 const { registerAdminSettings } = require("./settings");
+const { registerAdminTasks } = require("./tasks"); 
 
 function registerAdminPanel(bot, ensureUser, logError) {
-  // Корневое меню админ-панели
   bot.action("lk_admin_menu", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -17,6 +18,7 @@ function registerAdminPanel(bot, ensureUser, logError) {
       const keyboard = Markup.inlineKeyboard([
         [{ text: "👥 Пользователи", callback_data: "admin_users" }],
         [{ text: "📢 Рассылки", callback_data: "admin_mailings" }],
+        [{ text: "📝 Создать задачу", callback_data: "admin_task_create" }], 
         [{ text: "⚙️ Настройки", callback_data: "admin_settings" }],
         [{ text: "⬅️ В меню", callback_data: "lk_main_menu" }],
       ]);
@@ -27,10 +29,10 @@ function registerAdminPanel(bot, ensureUser, logError) {
     }
   });
 
-  // ✅ единичные вызовы
   registerAdminUsers(bot, ensureUser, logError, deliver);
   registerAdminMailings(bot, ensureUser, logError);
   registerAdminSettings(bot, ensureUser, logError);
+  registerAdminTasks(bot, ensureUser, logError); // ✅ добавили
 }
 
 module.exports = { registerAdminPanel };

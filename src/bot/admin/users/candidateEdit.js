@@ -131,6 +131,13 @@ async function showEditCommonMenu(ctx, candidateId, showCandidateCardLk) {
     ],
     [
       Markup.button.callback(
+        "Пользователь (изменить)",
+        `lk_cand_edit_user_${candidateId}`
+      ),
+    ],
+
+    [
+      Markup.button.callback(
         "Желаемая точка (изменить)",
         `lk_cand_edit_common_point_${candidateId}`
       ),
@@ -221,6 +228,7 @@ async function setCandidateField(candidateId, field, value) {
     "internship_time_from",
     "internship_time_to",
     "internship_point_id",
+    "lk_user_tg_id",
     "internship_admin_id",
   ]);
 
@@ -471,6 +479,28 @@ function registerCandidateEditHandlers(
       );
     } catch (err) {
       logError("lk_cand_edit_common_comment", err);
+    }
+  });
+
+  bot.action(/^lk_cand_edit_user_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
+
+      const id = Number(ctx.match[1]);
+
+      // Просим tg id или @username
+      await askText(
+        ctx,
+        id,
+        "Привязать/изменить пользователя",
+        `lk_cand_edit_common_${id}`,
+        "lk_user_tg_id",
+        "Например: 8192106284 или @username"
+      );
+    } catch (err) {
+      logError("lk_cand_edit_user", err);
     }
   });
 
@@ -821,6 +851,22 @@ function registerCandidateEditHandlers(
       // Парсинг по полям
       let value = raw;
 
+      if (field === "lk_user_tg_id") {
+        // допускаем: @username или число
+        if (raw.startsWith("@")) {
+          // пока просто сохраняем как текст в отдельное поле нельзя,
+          // поэтому просим именно TG ID
+          return ctx.reply(
+            "Введите числовой Telegram ID (например 8192106284)."
+          );
+        }
+        const n = parseMaybeInt(raw);
+        if (n === null || n <= 0) {
+          return ctx.reply("Введите корректный числовой Telegram ID.");
+        }
+        value = n;
+      }
+
       if (field === "age") {
         value = parseMaybeInt(raw);
         if (value === null || value < 14 || value > 99) {
@@ -876,6 +922,13 @@ function registerCandidateEditHandlers(
               `lk_cand_edit_common_phone_${candidateId}`
             ),
           ],
+          [
+            Markup.button.callback(
+              "Пользователь (изменить)",
+              `lk_cand_edit_user_${candidateId}`
+            ),
+          ],
+
           [
             Markup.button.callback(
               "Желаемая точка (изменить)",
