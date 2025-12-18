@@ -1,6 +1,6 @@
 //src\bot\index.js
 const { registerMenu } = require("./menu");
-const { registerShifts } = require("./shifts");
+const { registerShifts } = require("./shifts/index.js");
 const { registerTasks } = require("./tasks");
 const { registerNotifications } = require("./notifications");
 const { registerQuestions } = require("./questions");
@@ -14,7 +14,7 @@ const { registerAdminPanel } = require("./admin");
 function registerLkBot(bot, ensureUser, logError) {
   registerMenu(bot, ensureUser, logError);
   registerShifts(bot, ensureUser, logError);
-  registerTasks(bot, ensureUser, logError); 
+  registerTasks(bot, ensureUser, logError);
   registerNotifications(bot, ensureUser, logError);
   registerAiLogs(bot, ensureUser, logError);
   registerQuestions(bot, ensureUser, logError);
