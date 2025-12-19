@@ -1,25 +1,18 @@
 // src/bot/shifts/close.js
-const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
-const { deliver } = require("../../utils/renderHelpers");
 const { toast } = require("../../utils/toast");
+const { startOrContinueClosing } = require("./closingFlow");
 
-async function closeTodayShift(userId) {
+async function getActiveShift(userId) {
   const res = await pool.query(
     `
-      UPDATE shifts
-      SET status = 'closed',
-          closed_at = NOW()
-      WHERE id = (
-        SELECT id
-        FROM shifts
-        WHERE user_id = $1
-          AND opened_at::date = CURRENT_DATE
-          AND status IN ('opening_in_progress','opened')
-        ORDER BY opened_at DESC
-        LIMIT 1
-      )
-      RETURNING id
+    SELECT id, status, trade_point_id
+    FROM shifts
+    WHERE user_id=$1
+      AND opened_at::date = CURRENT_DATE
+      AND status IN ('opening_in_progress','opened','closing_in_progress')
+    ORDER BY opened_at DESC
+    LIMIT 1
     `,
     [userId]
   );
@@ -27,8 +20,9 @@ async function closeTodayShift(userId) {
 }
 
 function registerShiftClose(bot, ensureUser, logError) {
-  // Временный "закрыть смену" на ту же кнопку lk_shift_toggle:
-  // если смена активна — закрываем, иначе ничего не делаем (открытие обработает flow.js)
+  // Временный роутер на lk_shift_toggle:
+  // если смена есть -> запускаем закрытие
+  // если смены нет -> next() (открытие обработает flow.js)
   bot.action("lk_shift_toggle", async (ctx, next) => {
     try {
       const user = await ensureUser(ctx);
@@ -37,31 +31,18 @@ function registerShiftClose(bot, ensureUser, logError) {
         return;
       }
 
-      // Пытаемся закрыть активную смену
-      const closed = await closeTodayShift(user.id);
+      const active = await getActiveShift(user.id);
 
-      if (closed) {
-        await toast(ctx, "Смена закрыта ✅");
-        // вернём в меню (обновится клавиатура)
-        await deliver(
-          ctx,
-          {
-            text: "Смена закрыта ✅\n\nВозвращаю в меню.",
-            extra: Markup.inlineKeyboard([
-              [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
-            ]),
-          },
-          { edit: true }
-        );
+      if (active) {
+        await ctx.answerCbQuery().catch(() => {});
+        await startOrContinueClosing(ctx, user); // ✅ запуск/продолжение закрытия
         return;
       }
 
-      // Если нечего закрывать — передаём управление дальше (в flow.js откроет смену)
       return next();
     } catch (err) {
-      logError("lk_shift_toggle_close_temp", err);
-      await ctx.answerCbQuery("Ошибка", { show_alert: true }).catch(() => {});
-      return;
+      logError("lk_shift_toggle_close_router", err);
+      await toast(ctx, "Ошибка").catch(() => {});
     }
   });
 }
