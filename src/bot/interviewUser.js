@@ -130,6 +130,10 @@ function buildInterviewDetailsText(candidate) {
 }
 
 async function showInterviewDetails(ctx, user, { edit } = {}) {
+  if (!candidate || candidate.status === "rejected") {
+    return showMainMenu(ctx);
+  }
+
   const candidate = await getActiveInterviewCandidate(user.id);
   const text = buildInterviewDetailsText(candidate);
 
@@ -412,8 +416,10 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
         }
       }
 
-      await ctx.reply(
-        "Вы отказались от собеседования.\n" +
+      await showDeclineFinalScreen(
+        ctx,
+        "❌ Вы отказались от собеседования.\n\n" +
+          "Мы сообщили наставнику.\n" +
           "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
       );
 

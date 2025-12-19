@@ -136,6 +136,10 @@ function buildInternshipDetailsText(candidate, userNameFallback = "Вы") {
  * withReadButton = true → показываем кнопку "Прочитал"
  */
 async function showInternshipDetails(ctx, user, { withReadButton, edit } = {}) {
+  if (!candidate || candidate.status === "rejected") {
+    return showMainMenu(ctx);
+  }
+
   const candidate = await getActiveInternshipCandidate(user.id);
 
   const text = buildInternshipDetailsText(candidate, user.full_name || "Вы");

@@ -45,34 +45,31 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
   // -----------------------------
   // Заглушки разделов (пока)
   // -----------------------------
-  bot.action(
-    /^(admin_shift_day_root|admin_shift_closing_root)$/,
-    async (ctx) => {
-      try {
-        await ctx.answerCbQuery().catch(() => {});
-        const user = await ensureUser(ctx);
-        if (!user || (user.role !== "admin" && user.role !== "super_admin"))
-          return;
+  bot.action(/^(admin_shift_day_root)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
 
-        const key = ctx.callbackQuery.data;
-        const title =
-          key === "admin_shift_opening_root"
-            ? "🚀 Задачи открытия смены"
-            : key === "admin_shift_day_root"
-            ? "📋 Задачи смены (в течении дня)"
-            : "🛑 Задачи закрытия смены";
+      const key = ctx.callbackQuery.data;
+      const title =
+        key === "admin_shift_opening_root"
+          ? "🚀 Задачи открытия смены"
+          : key === "admin_shift_day_root"
+          ? "📋 Задачи смены (в течении дня)"
+          : "🛑 Задачи закрытия смены";
 
-        const text = `${title}\n\nРаздел в разработке. Следующим модулем добавим CRUD задач.`;
-        const keyboard = Markup.inlineKeyboard([
-          [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
-        ]);
+      const text = `${title}\n\nРаздел в разработке. Следующим модулем добавим CRUD задач.`;
+      const keyboard = Markup.inlineKeyboard([
+        [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+      ]);
 
-        await deliver(ctx, { text, extra: keyboard }, { edit: true });
-      } catch (err) {
-        logError("admin_shift_settings_section_stub", err);
-      }
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_shift_settings_section_stub", err);
     }
-  );
+  });
 }
 
 module.exports = { registerAdminShiftSettings };
