@@ -38,6 +38,7 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
       SELECT
         c.id,
         c.name,
+        c.point_id,
         tp.title    AS point_title,
         tp.address  AS point_address,
         tp.landmark AS point_landmark
@@ -84,6 +85,29 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
     { edit: !!edit }
   );
+
+  // Фотографии точки, если есть в базе
+  try {
+    if (row.point_id) {
+      const photosRes = await pool.query(
+        `
+        SELECT file_id
+        FROM trade_point_photos
+        WHERE trade_point_id = $1
+        ORDER BY id
+      `,
+        [row.point_id]
+      );
+
+      for (const p of photosRes.rows) {
+        if (p.file_id) {
+          await ctx.replyWithPhoto(p.file_id);
+        }
+      }
+    }
+  } catch (err) {
+    logError("lk_interview_route_photos", err);
+  }
 }
 
 function formatDateRu(date) {
@@ -130,11 +154,12 @@ function buildInterviewDetailsText(candidate) {
 }
 
 async function showInterviewDetails(ctx, user, { edit } = {}) {
+  const candidate = await getActiveInterviewCandidate(user.id);
+
   if (!candidate || candidate.status === "rejected") {
     return showMainMenu(ctx);
   }
 
-  const candidate = await getActiveInterviewCandidate(user.id);
   const text = buildInterviewDetailsText(candidate);
 
   const buttons = [
