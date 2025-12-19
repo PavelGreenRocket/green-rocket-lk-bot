@@ -66,7 +66,7 @@ async function buildMainKeyboard(user) {
         FROM shifts
         WHERE user_id = $1
           AND opened_at::date = CURRENT_DATE
-          AND status IN ('opening_in_progress','opened')
+          AND status IN ('opening_in_progress','opened','closing_in_progress')
         ORDER BY opened_at DESC
         LIMIT 1
       `,

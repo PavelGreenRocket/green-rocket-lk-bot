@@ -145,28 +145,108 @@ function formatQ(idx, total, q) {
   return `${emoji} <b>${idx}/${total}</b>\n<b>${q.title}</b>\n\n${hint}`;
 }
 
-async function showTextStep(ctx, title, stepKey, hint = "Введите числом:") {
-  setSt(ctx.from.id, { step: stepKey });
-  const kb = Markup.inlineKeyboard([
-    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-    [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
-  ]);
-  await deliver(
-    ctx,
-    { text: `${title}\n\n${hint}`, extra: kb },
-    { edit: true }
-  );
+function fmtMoney(v) {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n.toLocaleString("ru-RU");
 }
 
-async function showYesNo(ctx, title, stepKey) {
+async function getTradePointTitle(tradePointId) {
+  const r = await pool.query(
+    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  return r.rows[0]?.title || `#${tradePointId}`;
+}
+
+function buildClosingSummary(tpTitle, dateStr, row) {
+  const lines = [];
+  lines.push(`<b>${tpTitle}</b>`);
+  lines.push(`${dateStr}`);
+
+  const s1 = fmtMoney(row?.sales_total);
+  if (s1) lines.push(`Сумма продаж: <b>${s1}</b>`);
+
+  const s2 = fmtMoney(row?.sales_cash);
+  if (s2) lines.push(`Наличными: <b>${s2}</b>`);
+
+  const s3 = fmtMoney(row?.cash_in_drawer);
+  if (s3) lines.push(`Наличные в кассе: <b>${s3}</b>`);
+
+  if (row?.was_cash_collection === true) {
+    const s4 = fmtMoney(row?.cash_collection_amount);
+    lines.push(`Инкассация: <b>Да</b>${s4 ? ` (${s4})` : ""}`);
+  } else if (row?.was_cash_collection === false) {
+    lines.push(`Инкассация: <b>Нет</b>`);
+  }
+
+  if (row?.checks_count !== null && row?.checks_count !== undefined) {
+    lines.push(`Чеков: <b>${row.checks_count}</b>`);
+  }
+
+  return lines.join("\n");
+}
+
+function closeKb() {
+  return Markup.inlineKeyboard([
+    [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
+    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+    [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
+  ]);
+}
+
+async function showTextStep(
+  ctx,
+  user,
+  title,
+  stepKey,
+  idx,
+  total,
+  hint = "Введите числом:"
+) {
   setSt(ctx.from.id, { step: stepKey });
+
+  const st = getSt(ctx.from.id);
+  const row = await getClosingRow(st.shiftId);
+
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+  const dateStr = new Date().toLocaleDateString("ru-RU");
+
+  const head = buildClosingSummary(tpTitle, dateStr, row);
+
+  const text =
+    `🛑 <b>${idx}/${total}</b>\n` +
+    `${head}\n\n` +
+    `<b>${title}</b>\n\n` +
+    `${hint}`;
+
+  await deliver(ctx, { text, extra: closeKb() }, { edit: true });
+}
+
+async function showYesNo(ctx, user, title, stepKey, idx, total) {
+  setSt(ctx.from.id, { step: stepKey });
+
+  const st = getSt(ctx.from.id);
+  const row = await getClosingRow(st.shiftId);
+
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+  const dateStr = new Date().toLocaleDateString("ru-RU");
+
+  const head = buildClosingSummary(tpTitle, dateStr, row);
+
+  const text =
+    `🛑 <b>${idx}/${total}</b>\n` + `${head}\n\n` + `<b>${title}</b>`;
+
   const kb = Markup.inlineKeyboard([
     [{ text: "✅ Да", callback_data: `shift_close_yes_${stepKey}` }],
     [{ text: "❌ Нет", callback_data: `shift_close_no_${stepKey}` }],
-    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
+    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+    [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
   ]);
-  await deliver(ctx, { text: title, extra: kb }, { edit: true });
+
+  await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
 async function showEditMenu(ctx) {
@@ -278,25 +358,58 @@ async function showByStep(ctx, user, step) {
 
   // читаем актуальную строку закрытия
   const row = await getClosingRow(shiftId);
+  const TOTAL = 5;
 
   if (step === "sales_total") {
-    return showTextStep(ctx, "1) Общая сумма продаж за день", "sales_total");
+    return showTextStep(
+      ctx,
+      user,
+      "Введите общую сумму продаж за день",
+      "sales_total",
+      1,
+      TOTAL
+    );
   }
   if (step === "sales_cash") {
-    return showTextStep(ctx, "2) Продажи за наличные", "sales_cash");
+    return showTextStep(
+      ctx,
+      user,
+      "Введите сумму продаж за наличные",
+      "sales_cash",
+      2,
+      TOTAL
+    );
   }
   if (step === "cash_in_drawer") {
     return showTextStep(
       ctx,
-      "3) Наличные в кассе (пересчитать)",
-      "cash_in_drawer"
+      user,
+      "Сколько наличных в кассе? (ПЕРЕСЧИТАТЬ!)",
+      "cash_in_drawer",
+      3,
+      TOTAL
     );
   }
   if (step === "was_cash_collection") {
-    return showYesNo(ctx, "4) Была ли инкассация?", "was_cash_collection");
+    return showYesNo(
+      ctx,
+      user,
+      "Была ли инкассация?",
+      "was_cash_collection",
+      4,
+      TOTAL
+    );
   }
   if (step === "cash_collection_amount") {
-    return showTextStep(ctx, "4.1) Сумма инкассации", "cash_collection_amount");
+    // это подпункт 4, по UX оставляем 4/5
+    return showTextStep(
+      ctx,
+      user,
+      "Введите сумму инкассации",
+      "cash_collection_amount",
+      4,
+      TOTAL
+    );
   }
   if (step === "cash_collection_by") {
     // временно: выбор “кто инкассировал” — просто 2 кнопки
@@ -313,7 +426,15 @@ async function showByStep(ctx, user, step) {
     );
   }
   if (step === "checks_count") {
-    return showTextStep(ctx, "5) Количество чеков за день", "checks_count");
+    return showTextStep(
+      ctx,
+      user,
+      "Введите количество чеков за день",
+      "checks_count",
+      5,
+      TOTAL,
+      "Введите целым числом:"
+    );
   }
 
   if (step === "regulated") {
@@ -347,6 +468,27 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       await startOrContinueClosing(ctx, user);
     } catch (e) {
       logError("shift_close_continue", e);
+    }
+  });
+
+  bot.action("shift_close_to_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      // Важно: ничего не сбрасываем в БД — закрытие можно продолжить
+      clrSt(ctx.from.id);
+
+      await deliver(
+        ctx,
+        {
+          text: "Ок. Можно продолжить закрытие смены позже.",
+          extra: Markup.inlineKeyboard([
+            [{ text: "⬅️ В меню", callback_data: "lk_main_menu" }],
+          ]),
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("shift_close_to_menu", e);
     }
   });
 
