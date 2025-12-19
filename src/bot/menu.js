@@ -16,7 +16,7 @@ async function buildMainKeyboard(user) {
   // Особая клавиатура для кандидата
   if (staffStatus === "candidate" && user.candidate_id) {
     const res = await pool.query(
-      "SELECT status, is_deferred FROM candidates WHERE id = $1",
+      "SELECT status, is_deferred, decline_reason FROM candidates WHERE id = $1",
       [user.candidate_id]
     );
     const cand = res.rows[0];
@@ -194,6 +194,15 @@ async function buildStatusText(user) {
     // ✅ rejected (и отложенные тоже rejected+is_deferred=true):
     // меню НЕ открываем, показываем “закрыто”
     if (cand?.status === "rejected") {
+      // если отказался сам — показываем “вы отказались…”
+      if (cand.decline_reason === "отказался сам") {
+        return (
+          "❌ Вы отказались от собеседования.\n\n" +
+          "Мы сообщили наставнику.\n" +
+          "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
+        );
+      }
+
       return (
         "❌ К сожалению, мы не готовы продолжить с вами сотрудничество.\n\n" +
         "Спасибо, что нашли время!"
@@ -274,7 +283,11 @@ function registerMenu(bot, ensureUser, logError) {
 
       const text = await buildStatusText(user);
       const keyboard = await buildMainKeyboard(user);
-      await deliver(ctx, { text, extra: keyboard || {} }, { edit: false });
+      await deliver(
+        ctx,
+        { text, extra: { ...(keyboard || {}), parse_mode: "HTML" } },
+        { edit: false }
+      );
     } catch (err) {
       logError("lk_start", err);
     }
@@ -292,7 +305,7 @@ function registerMenu(bot, ensureUser, logError) {
         ctx,
         {
           text,
-          extra: keyboard || {},
+          extra: { ...(keyboard || {}), parse_mode: "HTML" },
         },
         { edit: true }
       );

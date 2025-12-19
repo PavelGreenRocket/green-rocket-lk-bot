@@ -113,6 +113,7 @@ async function sendInterviewInvitation(telegram, chatId, candidateId) {
       SELECT
         c.id,
         c.name,
+        c.age,
         c.interview_date,
         c.interview_time,
         tp.title      AS point_title,
@@ -1428,7 +1429,6 @@ function registerCandidateCreate(bot, ensureUser, logError, deliver) {
     }
   });
 
-  // async function notifyAdminAboutInterview(telegram, adminId, candidateId) {
   //   // Берём телеграм админа + ФИО и данные по кандидату
   //   const res = await pool.query(
   //     `
@@ -1484,4 +1484,7 @@ function registerCandidateCreate(bot, ensureUser, logError, deliver) {
   });
 }
 
-module.exports = { registerCandidateCreate };
+module.exports = {
+  registerCandidateCreate,
+  sendInterviewInvitation,
+};

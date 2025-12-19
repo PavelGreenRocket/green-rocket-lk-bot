@@ -126,28 +126,34 @@ function formatDateRu(date) {
   return `${dd}.${mm} (${weekday})`;
 }
 
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function buildInterviewDetailsText(candidate) {
-  if (!candidate) {
-    return "У вас нет назначенного собеседования.";
-  }
+  if (!candidate) return "У вас нет назначенного собеседования.";
 
-  const dateStr = formatDateRu(candidate.interview_date);
-  const timeStr = candidate.interview_time || "не указано";
-  const pointTitle = candidate.point_title || "не указана";
-  const pointAddress = candidate.point_address || "не указан";
+  const dateStr = escapeHtml(formatDateRu(candidate.interview_date));
+  const timeStr = escapeHtml(candidate.interview_time || "не указано");
+  const pointTitle = escapeHtml(candidate.point_title || "не указана");
+  const pointAddress = escapeHtml(candidate.point_address || "не указан");
 
-  const adminName = candidate.admin_name || "не указан";
-  const adminPosition = candidate.admin_position || "не указана должность";
-  const adminUsername = candidate.admin_username
+  const adminName = escapeHtml(candidate.admin_name || "не указан");
+  const adminPos = escapeHtml(
+    candidate.admin_position || "не указана должность"
+  );
+  const username = candidate.admin_username
     ? `@${candidate.admin_username}`
     : "";
-
-  const responsible = adminUsername
-    ? `${adminName}, ${adminPosition} (${adminUsername})`
-    : `${adminName}, ${adminPosition}`;
+  const responsible = username
+    ? `${adminName}, ${adminPos} (${escapeHtml(username)})`
+    : `${adminName}, ${adminPos}`;
 
   return (
-    "📄 *Детали собеседования*\n\n" +
+    "📄 <b>Детали собеседования</b>\n\n" +
     `• Дата: ${dateStr}\n` +
     `• Время: ${timeStr}\n` +
     `• Кофейня: ${pointTitle}\n` +
@@ -181,7 +187,7 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
 
   await deliver(
     ctx,
-    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { text, extra: { ...keyboard, parse_mode: "HTML" } },
     { edit: !!edit }
   );
 }
@@ -189,13 +195,9 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
 // ---------- РЕГИСТРАЦИЯ ----------
 
 async function showDeclineFinalScreen(ctx, text, { edit } = {}) {
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback("⬅️ В главное меню", "lk_main_menu")],
-  ]);
-
   await deliver(
     ctx,
-    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { text }, // без кнопок
     { edit: !!edit }
   );
 }

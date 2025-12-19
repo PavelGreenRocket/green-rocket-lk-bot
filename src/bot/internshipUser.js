@@ -450,10 +450,6 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
         return;
       }
 
-      await client.query("UPDATE users SET candidate_id = NULL WHERE id = $1", [
-        user.id,
-      ]);
-
       await client.query("COMMIT");
 
       // Уведомление наставнику — по стилю как при “назначена стажировка”

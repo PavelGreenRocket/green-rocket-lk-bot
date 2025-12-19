@@ -43,7 +43,7 @@ async function deliver(ctx, payload, options = {}) {
 
   // Обычный режим — просто отправляем новое сообщение
   try {
-    return await ctx.reply(text, extra);
+    return await ctx.reply(text, { parse_mode: "HTML", ...(extra || {}) });
   } catch (err) {
     console.error("deliver: reply failed", err);
   }
