@@ -17,8 +17,7 @@ function registerAdminPanel(bot, ensureUser, logError) {
       const text = "🛠 <b>Админ-панель</b>\n\nВыберите раздел:";
       const keyboard = Markup.inlineKeyboard([
         [{ text: "👥 Пользователи", callback_data: "admin_users" }],
-        [{ text: "📢 Рассылки", callback_data: "admin_mailings" }],
-        [{ text: "📝 Создать задачу", callback_data: "admin_task_create" }], 
+        [{ text: "📢 Рассылки", callback_data: "admin_mailings" }], 
         [{ text: "⚙️ Настройки", callback_data: "admin_settings" }],
         [{ text: "⬅️ В меню", callback_data: "lk_main_menu" }],
       ]);
