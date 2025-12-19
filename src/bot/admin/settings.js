@@ -2,6 +2,8 @@ const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { registerAiSettings } = require("./aiSettings");
+const { registerAdminShiftSettings } = require("./shiftSettings");
+const { registerAdminShiftOpeningTasks } = require("./shiftOpeningTasks");
 
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
@@ -19,6 +21,8 @@ function clearTpState(tgId) {
 }
 
 function registerAdminSettings(bot, ensureUser, logError) {
+  registerAdminShiftSettings(bot, ensureUser, logError);
+  registerAdminShiftOpeningTasks(bot, ensureUser, logError);
   registerAiSettings(bot, ensureUser, logError);
   // -----------------------------
   // ВХОД В НАСТРОЙКИ
@@ -69,6 +73,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
       const text = "🏢 *Настройки компании*\n\nВыберите раздел:";
       const keyboard = Markup.inlineKeyboard([
         [{ text: "🏬 Торговые точки", callback_data: "admin_tp_list" }],
+        [{ text: "🛠️ Настройка смен", callback_data: "admin_shift_settings" }],
         [{ text: "⬅️ Назад", callback_data: "admin_settings" }],
       ]);
 

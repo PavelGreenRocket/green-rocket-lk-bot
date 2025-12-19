@@ -312,18 +312,14 @@ function registerShiftFlow(bot, ensureUser, logError) {
       const queue = await loadShiftQuestionsForUser(user, st.tradePointId);
 
       if (!queue.length) {
-        // вопросов нет — сразу считаем что смена открыта (следующий шаг: чек-лист)
         await pool.query(
           `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
           [st.shiftId, user.id]
         );
         clearShiftState(ctx.from.id);
-        await ctx.reply("✅ Смена открыта! (вопросов не задано)");
-        await ctx.telegram.sendMessage(ctx.chat.id, "⬅️ В меню:", {
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "В меню", callback_data: "lk_main_menu" }],
-          ]).reply_markup,
-        });
+
+        // ✅ сразу показываем задачи на сегодня
+        await showTodayTasks(ctx, user);
         return;
       }
 
@@ -509,12 +505,13 @@ function registerShiftFlow(bot, ensureUser, logError) {
           [st.shiftId, user.id]
         );
         clearShiftState(ctx.from.id);
-        await ctx.reply("✅ Опрос завершён. Смена открыта!");
-        await ctx.telegram.sendMessage(ctx.chat.id, "⬅️ В меню:", {
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "В меню", callback_data: "lk_main_menu" }],
-          ]).reply_markup,
-        });
+        await pool.query(
+          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
+          [st.shiftId, user.id]
+        );
+        clearShiftState(ctx.from.id);
+
+        await showTodayTasks(ctx, user);
         return;
       }
 
