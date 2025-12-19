@@ -3,13 +3,14 @@ const { Markup } = require("telegraf");
 const { deliver } = require("../utils/renderHelpers");
 const pool = require("../db/pool");
 const { countUnreadNotifications } = require("./notifications");
+const { showInterviewDetails } = require("./interviewUser");
 
 async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
   const role = user.role || "user";
 
   if (staffStatus === "candidate" && !user.candidate_id) {
-    return "Личный кабинет пока закрыт.";
+    return null;
   }
 
   // Особая клавиатура для кандидата
@@ -254,11 +255,22 @@ async function buildStatusText(user) {
 function registerMenu(bot, ensureUser, logError) {
   // /start
   bot.start(async (ctx) => {
-
-
     try {
       const user = await ensureUser(ctx);
       if (!user) return;
+
+      // ✅ если кандидат приглашён — сразу экран собеседования (без промежуточного меню)
+      if (user.staff_status === "candidate" && user.candidate_id) {
+        const res = await pool.query(
+          "SELECT status FROM candidates WHERE id = $1",
+          [user.candidate_id]
+        );
+        const cand = res.rows[0];
+        if (cand?.status === "invited") {
+          await showInterviewDetails(ctx, user, { edit: false });
+          return;
+        }
+      }
 
       const text = await buildStatusText(user);
       const keyboard = await buildMainKeyboard(user);

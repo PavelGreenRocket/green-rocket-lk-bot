@@ -27,7 +27,7 @@ async function getActiveShift(userId) {
       FROM shifts
       WHERE user_id = $1
         AND opened_at::date = CURRENT_DATE
-        AND status IN ('opening_in_progress','opened')
+        AND status IN ('opening_in_progress','opened','closing_in_progress')
       ORDER BY opened_at DESC
       LIMIT 1
     `,
@@ -250,11 +250,8 @@ function registerShiftFlow(bot, ensureUser, logError) {
       const shiftId = ins.rows[0].id;
 
       setShiftState(ctx.from.id, {
-        ...st,
-        step: "survey",
-        queue,
-        idx: 0,
-        cashAmount: num,
+        step: "pick_point",
+        shiftId,
       });
 
       await ctx.answerCbQuery().catch(() => {});
@@ -382,6 +379,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
         step: "survey",
         queue,
         idx: 0,
+        cashAmount: num,
       });
 
       // покажем первый вопрос
@@ -453,19 +451,9 @@ function registerShiftFlow(bot, ensureUser, logError) {
         await showTodayTasks(ctx, user);
         return;
       }
-
-      setShiftState(ctx.from.id, { ...st, idx: nextIdx });
-      // чтобы корректно “edit: true” работал — обновляем экран вопроса через callback-сообщение:
-      // отправим новый вопрос отдельным сообщением (проще и стабильнее)
-      await ctx.reply(
-        formatQuestionText(nextIdx + 1, st.queue.length, st.queue[nextIdx]),
-        {
-          parse_mode: "HTML",
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
-          ]).reply_markup,
-        }
-      );
+      const newSt = { ...st, idx: nextIdx };
+      setShiftState(ctx.from.id, newSt);
+      await showShiftQuestion(ctx, newSt);
     } catch (err) {
       logError("shift_survey_text", err);
       await ctx.reply("❌ Ошибка при сохранении ответа. Попробуйте ещё раз.");

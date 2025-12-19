@@ -67,45 +67,50 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
   text += `Адрес: ${address}\n`;
   text += `Ориентир: ${landmark}\n`;
 
-  const buttons = [
+  // 1) подготовили keyboard как сейчас
+  const keyboard = Markup.inlineKeyboard([
     [
       Markup.button.callback(
         "⬅️ Назад к собеседованию",
         "lk_interview_details"
       ),
     ],
-  ];
+  ]);
 
-  const keyboard = Markup.inlineKeyboard(buttons);
+  // 2) получили фото
+  let photos = [];
+  if (row.point_id) {
+    const photosRes = await pool.query(
+      `SELECT file_id
+       FROM trade_point_photos
+      WHERE trade_point_id = $1
+      ORDER BY id`,
+      [row.point_id]
+    );
+    photos = photosRes.rows.map((r) => r.file_id).filter(Boolean);
+  }
 
+  // 3) если есть фото — шлём 1 фото с caption=текст и keyboard
+  if (photos.length > 0) {
+    await ctx.replyWithPhoto(photos[0], {
+      caption: text,
+      parse_mode: "Markdown",
+      reply_markup: keyboard.reply_markup,
+    });
+
+    // остальные фото (если есть) — без кнопок
+    for (const fileId of photos.slice(1)) {
+      await ctx.replyWithPhoto(fileId);
+    }
+    return;
+  }
+
+  // 4) если фото нет — текстом как раньше
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
     { edit: !!edit }
   );
-
-  // Фото точки (если есть)
-  try {
-    if (row.point_id) {
-      const photosRes = await pool.query(
-        `
-        SELECT file_id
-        FROM trade_point_photos
-        WHERE trade_point_id = $1
-        ORDER BY id
-      `,
-        [row.point_id]
-      );
-
-      for (const p of photosRes.rows) {
-        if (p.file_id) {
-          await ctx.replyWithPhoto(p.file_id);
-        }
-      }
-    }
-  } catch (err) {
-    logError("lk_interview_route_photos", err);
-  }
 }
 
 function formatDateRu(date) {
@@ -155,7 +160,9 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
   const candidate = await getActiveInterviewCandidate(user.id);
 
   if (!candidate || candidate.status === "rejected") {
-    return showMainMenu(ctx);
+    await ctx.answerCbQuery().catch(() => {});
+    await ctx.reply("У вас нет активного приглашения на собеседование.");
+    return;
   }
 
   const text = buildInterviewDetailsText(candidate);
@@ -168,7 +175,6 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
         "lk_interview_decline"
       ),
     ],
-    [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
   ];
 
   const keyboard = Markup.inlineKeyboard(buttons);
@@ -311,9 +317,8 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
 
       // Идемпотентность: двойной клик/повтор колбэка
       if (!upd.rowCount) {
-        await client.query("ROLLBACK");
         await ctx.reply("Отказ уже был оформлен ранее.");
-        await showMainMenu(ctx);
+        await ctx.reply("Нажмите /start");
         return;
       }
 
