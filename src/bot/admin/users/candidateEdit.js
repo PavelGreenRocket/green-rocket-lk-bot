@@ -241,6 +241,123 @@ async function setCandidateField(candidateId, field, value) {
   ]);
 }
 
+async function notifyInterviewRescheduled(ctx, candidateId) {
+  const res = await pool.query(
+    `
+    SELECT
+      c.interview_date, c.interview_time,
+      tp.title AS point_title, tp.address AS point_address,
+      u.telegram_id AS user_tg,
+      a.telegram_id AS admin_tg,
+      c.name, c.age
+    FROM candidates c
+    LEFT JOIN users u ON u.candidate_id = c.id
+    LEFT JOIN trade_points tp ON tp.id = c.point_id
+    LEFT JOIN users a ON a.id = c.admin_id
+    WHERE c.id = $1
+    LIMIT 1
+    `,
+    [candidateId]
+  );
+
+  const row = res.rows[0];
+  if (!row) return;
+
+  const date = row.interview_date
+    ? new Date(row.interview_date).toLocaleDateString("ru-RU")
+    : "не указана";
+  const time = row.interview_time || "не указано";
+  const point = row.point_title || "не указана";
+  const addr = row.point_address || "не указан";
+
+  // Кандидату
+  if (row.user_tg) {
+    await ctx.telegram.sendMessage(
+      row.user_tg,
+      "📌 *Собеседование перенесено/обновлено*\n\n" +
+        `• Дата: ${date}\n` +
+        `• Время: ${time}\n` +
+        `• Точка: ${point}\n` +
+        `• Адрес: ${addr}\n`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  // Ответственному
+  if (row.admin_tg) {
+    const agePart = row.age ? ` (${row.age})` : "";
+    await ctx.telegram.sendMessage(
+      row.admin_tg,
+      "🔁 *Обновлены детали собеседования*\n\n" +
+        `• Кандидат: ${row.name || "без имени"}${agePart}\n` +
+        `• Дата: ${date}\n` +
+        `• Время: ${time}\n` +
+        `• Точка: ${point}\n` +
+        `• Адрес: ${addr}\n`,
+      { parse_mode: "Markdown" }
+    );
+  }
+}
+
+async function notifyInternshipRescheduled(ctx, candidateId) {
+  const res = await pool.query(
+    `
+    SELECT
+      c.internship_date, c.internship_time_from, c.internship_time_to,
+      tp.title AS point_title, tp.address AS point_address,
+      u.telegram_id AS user_tg,
+      m.telegram_id AS mentor_tg,
+      c.name, c.age
+    FROM candidates c
+    LEFT JOIN users u ON u.candidate_id = c.id
+    LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
+    LEFT JOIN users m ON m.id = c.internship_admin_id
+    WHERE c.id = $1
+    LIMIT 1
+    `,
+    [candidateId]
+  );
+
+  const row = res.rows[0];
+  if (!row) return;
+
+  const date = row.internship_date
+    ? new Date(row.internship_date).toLocaleDateString("ru-RU")
+    : "не указана";
+  const from = row.internship_time_from || "не указано";
+  const to = row.internship_time_to || "не указано";
+  const point = row.point_title || "не указана";
+  const addr = row.point_address || "не указан";
+
+  // Кандидату
+  if (row.user_tg) {
+    await ctx.telegram.sendMessage(
+      row.user_tg,
+      "📌 *Стажировка перенесена/обновлена*\n\n" +
+        `• Дата: ${date}\n` +
+        `• Время: с ${from} до ${to}\n` +
+        `• Точка: ${point}\n` +
+        `• Адрес: ${addr}\n`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  // Наставнику
+  if (row.mentor_tg) {
+    const agePart = row.age ? ` (${row.age})` : "";
+    await ctx.telegram.sendMessage(
+      row.mentor_tg,
+      "🔁 *Обновлены детали стажировки*\n\n" +
+        `• Кандидат: ${row.name || "без имени"}${agePart}\n` +
+        `• Дата: ${date}\n` +
+        `• Время: с ${from} до ${to}\n` +
+        `• Точка: ${point}\n` +
+        `• Адрес: ${addr}\n`,
+      { parse_mode: "Markdown" }
+    );
+  }
+}
+
 function parseMaybeInt(s) {
   const n = Number(String(s).trim());
   return Number.isFinite(n) ? n : null;
@@ -715,7 +832,7 @@ function registerCandidateEditHandlers(
       const pointId = Number(ctx.match[2]);
 
       await setCandidateField(candidateId, "desired_point_id", pointId);
-
+      await notifyInterviewRescheduled(ctx, candidateId);
       // Возвращаемся в меню редактирования общей инфы
       await showEditCommonMenu(ctx, candidateId, showCandidateCardLk);
     } catch (err) {
@@ -811,6 +928,7 @@ function registerCandidateEditHandlers(
       const pointId = Number(ctx.match[2]);
 
       await setCandidateField(candidateId, "point_id", pointId);
+      await notifyInterviewRescheduled(ctx, candidateId);
       await showEditInterviewMenu(ctx, candidateId, showCandidateCardLk);
     } catch (err) {
       logError("lk_cand_edit_set_point", err);
@@ -897,6 +1015,7 @@ function registerCandidateEditHandlers(
         const adminId = Number(ctx.match[2]);
 
         await setCandidateField(candidateId, "internship_admin_id", adminId);
+        await notifyInterviewRescheduled(ctx, candidateId);
         await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
       } catch (err) {
         logError("lk_cand_edit_set_internship_responsible", err);
@@ -988,6 +1107,7 @@ function registerCandidateEditHandlers(
       const pointId = Number(ctx.match[2]);
 
       await setCandidateField(candidateId, "internship_point_id", pointId);
+      await notifyInterviewRescheduled(ctx, candidateId);
       await showEditInternshipMenu(ctx, candidateId, showCandidateCardLk);
     } catch (err) {
       logError("lk_cand_edit_set_internship_point", err);
@@ -1057,6 +1177,7 @@ function registerCandidateEditHandlers(
 
       // Сохраняем
       await setCandidateField(candidateId, field, value);
+      await notifyInterviewRescheduled(ctx, candidateId);
 
       editState.delete(ctx.from.id);
 

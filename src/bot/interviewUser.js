@@ -185,71 +185,6 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
     }
   });
 
-  // Кнопка "🧭 Как пройти?"
-  bot.action("lk_interview_route", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-
-      const candidate = await getActiveInterviewCandidate(user.id);
-      if (!candidate) {
-        await ctx.reply("У вас нет назначенного собеседования.");
-        return;
-      }
-
-      const pointTitle = candidate.point_title || "не указана";
-      const pointAddress = candidate.point_address || "не указан";
-      const pointLandmark = candidate.point_landmark || "не указан";
-
-      let text = "🧭 *Как пройти*\n\n";
-      text += `• Кофейня: ${pointTitle}\n`;
-      text += `• Адрес: ${pointAddress}\n`;
-      text += `• Ориентир: ${pointLandmark}\n`;
-
-      const keyboard = Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "📄 Детали собеседования",
-            "lk_interview_details"
-          ),
-        ],
-        [Markup.button.callback("⬅️ В меню", "lk_interview_details")],
-      ]);
-
-      await deliver(
-        ctx,
-        { text, extra: { ...keyboard, parse_mode: "Markdown" } },
-        { edit: false }
-      );
-
-      // Фотографии точки, если есть в базе
-      try {
-        const photosRes = await pool.query(
-          `
-            SELECT file_id
-            FROM trade_point_photos
-            WHERE trade_point_id = $1
-            ORDER BY id
-          `,
-          [candidate.point_id]
-        );
-
-        for (const row of photosRes.rows) {
-          if (row.file_id) {
-            await ctx.replyWithPhoto(row.file_id);
-          }
-        }
-      } catch (err) {
-        // если таблицы/фото ещё нет — просто логируем
-        logError("lk_interview_route_photos", err);
-      }
-    } catch (err) {
-      logError("lk_interview_route", err);
-    }
-  });
-
-  // Кнопка "❌ Отказаться от собеседования" -> экран подтверждения
   // Кнопка "❌ Отказаться от собеседования" -> экран подтверждения
   bot.action("lk_interview_decline", async (ctx) => {
     try {
@@ -402,15 +337,6 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
               parse_mode: "Markdown",
             }
           );
-
-          await ctx.telegram.sendMessage(
-            candidate.admin_telegram_id,
-            adminTextLines.join("\n"),
-            {
-              reply_markup: adminKeyboard.reply_markup,
-              parse_mode: "Markdown",
-            }
-          );
         } catch (e) {
           logError("lk_interview_decline_notify_admin", e);
         }
@@ -434,114 +360,6 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
       await ctx.reply("Не удалось оформить отказ от собеседования.");
     } finally {
       if (client) client.release();
-    }
-  });
-
-  // Нет -> назад к деталям
-  bot.action("lk_interview_decline_no", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-      await showInterviewDetails(ctx, user, { edit: true });
-    } catch (err) {
-      logError("lk_interview_decline_no", err);
-    }
-  });
-
-  // Да -> оформить отказ + уведомить ответственного
-  bot.action("lk_interview_decline_yes", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-
-      const candidate = await getActiveInterviewCandidate(user.id);
-      if (!candidate) {
-        await ctx.reply("У вас нет назначенного собеседования.");
-        return;
-      }
-
-      // 1) Делаем отказ идемпотентно (только если ещё invited)
-      const upd = await pool.query(
-        `
-        UPDATE candidates
-           SET status = 'rejected',
-               decline_reason = 'отказался сам',
-               closed_from_status = status,
-               closed_by_admin_id = $2,
-               declined_at = NOW(),
-               is_deferred = FALSE
-         WHERE id = $1
-           AND status = 'invited'
-        RETURNING id
-      `,
-        [candidate.id, user.id]
-      );
-
-      // если уже успели отказать раньше (двойной клик/повтор)
-      if (!upd.rowCount) {
-        await ctx.reply("Отказ уже был оформлен ранее.");
-        await showMainMenu(ctx);
-        return;
-      }
-
-      // 2) Отвязываем кандидата от пользователя ЛК (как было)
-      await pool.query("UPDATE users SET candidate_id = NULL WHERE id = $1", [
-        user.id,
-      ]);
-
-      // 3) Уведомление ответственному (по стилю как в sendInterviewInvitation)
-      if (candidate.admin_telegram_id) {
-        try {
-          const adminTextLines = [];
-          adminTextLines.push("❌ *Кандидат отказался от собеседования*");
-          adminTextLines.push("");
-          adminTextLines.push(
-            `• Кандидат: ${candidate.name || "без имени"}${
-              candidate.age ? ` (${candidate.age})` : ""
-            }`
-          );
-          adminTextLines.push("• Причина: отказался сам");
-
-          const adminKeyboard = Markup.inlineKeyboard([
-            [
-              Markup.button.callback(
-                "👤 Открыть кандидата",
-                `lk_cand_open_${candidate.id}`
-              ),
-            ],
-            [
-              Markup.button.callback(
-                "📋 Мои собеседования",
-                "lk_admin_my_interviews"
-              ),
-            ],
-          ]);
-
-          await ctx.telegram.sendMessage(
-            candidate.admin_telegram_id,
-            adminTextLines.join("\n"),
-            {
-              reply_markup: adminKeyboard.reply_markup,
-              parse_mode: "Markdown",
-            }
-          );
-        } catch (e) {
-          logError("lk_interview_decline_notify_admin", e);
-        }
-      }
-
-      // 4) Ответ кандидату
-      await ctx.reply(
-        "Вы отказались от собеседования.\n" +
-          "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
-      );
-
-      await showMainMenu(ctx);
-    } catch (err) {
-      logError("lk_interview_decline_yes", err);
-      await ctx.reply("Не удалось оформить отказ от собеседования.");
     }
   });
 
