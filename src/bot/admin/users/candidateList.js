@@ -378,16 +378,15 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     { code: "super_admin", label: "Супер-админ" },
   ];
 
-  // Вход в раздел "Пользователи" → сразу показываем кандидатов
+  // Вход в раздел "Пользователи" → сразу показываем СОТРУДНИКОВ
   bot.action("admin_users", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
-      if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
         return;
-      }
 
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await showWorkersListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("admin_users", err);
     }

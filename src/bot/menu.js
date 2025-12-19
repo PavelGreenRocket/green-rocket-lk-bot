@@ -3,7 +3,7 @@ const { Markup } = require("telegraf");
 const { deliver } = require("../utils/renderHelpers");
 const pool = require("../db/pool");
 const { countUnreadNotifications } = require("./notifications");
-const { showInterviewDetails } = require("./interviewUser");
+const { showInterviewDetails, showInternshipDetails } = require("./interviewUser");
 
 async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
@@ -268,15 +268,26 @@ function registerMenu(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      // ✅ если кандидат приглашён — сразу экран собеседования (без промежуточного меню)
+      // ✅ если кандидат приглашён — сразу нужный экран (без промежуточного меню)
       if (user.staff_status === "candidate" && user.candidate_id) {
         const res = await pool.query(
           "SELECT status FROM candidates WHERE id = $1",
           [user.candidate_id]
         );
         const cand = res.rows[0];
+
+        // 1) invited → детали собеседования
         if (cand?.status === "invited") {
           await showInterviewDetails(ctx, user, { edit: false });
+          return;
+        }
+
+        // 2) internship_invited → детали стажировки (скрин 2)
+        if (cand?.status === "internship_invited") {
+          await showInternshipDetails(ctx, user, {
+            withReadButton: false,
+            edit: false,
+          });
           return;
         }
       }

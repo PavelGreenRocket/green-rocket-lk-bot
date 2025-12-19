@@ -30,51 +30,111 @@ function timeLabel(r) {
   return "В течение дня";
 }
 
-async function loadDayAssignments() {
-  const res = await pool.query(`
-    SELECT
-      a.id AS assignment_id,
-      a.is_active,
-      a.task_type,
-      a.point_scope,
-      a.trade_point_id,
-      t.title,
-      t.answer_type,
-      s.schedule_type,
-      s.start_date,
-      s.single_date,
-      s.weekdays_mask,
-      s.every_x_days,
-      s.time_mode,
-      s.deadline_time
-    FROM task_assignments a
-    JOIN task_schedules s ON s.assignment_id = a.id
-    JOIN task_templates t ON t.id = a.template_id
-    ORDER BY a.id DESC
-    LIMIT 30
-  `);
+/**
+ * filter:
+ *  - { mode: "all" }
+ *  - { mode: "common" } -> point_scope = all_points
+ *  - { mode: "point", tradePointId: number } -> point_scope = one_point AND trade_point_id=...
+ */
+async function loadDayAssignments(filter = { mode: "all" }) {
+  const params = [];
+  let where = "";
+
+  if (filter?.mode === "common") {
+    where = `WHERE a.point_scope = 'all_points'`;
+  } else if (filter?.mode === "point") {
+    params.push(Number(filter.tradePointId));
+    where = `WHERE a.point_scope = 'one_point' AND a.trade_point_id = $1`;
+  }
+
+  const res = await pool.query(
+    `
+      SELECT
+        a.id AS assignment_id,
+        a.is_active,
+        a.task_type,
+        a.point_scope,
+        a.trade_point_id,
+        t.title,
+        t.answer_type,
+        s.schedule_type,
+        s.start_date,
+        s.single_date,
+        s.weekdays_mask,
+        s.every_x_days,
+        s.time_mode,
+        s.deadline_time
+      FROM task_assignments a
+      JOIN task_schedules s ON s.assignment_id = a.id
+      JOIN task_templates t ON t.id = a.template_id
+      ${where}
+      ORDER BY a.id DESC
+      LIMIT 30
+    `,
+    params
+  );
+
   return res.rows;
 }
 
 async function showDayRoot(ctx) {
-  const text = "📋 <b>Задачи смены (в течение дня)</b>\n\nВыберите действие:";
+  const text = "🗓️ <b>Задачи по расписанию (авто)</b>\n\n" + "Выберите раздел:";
+
   const kb = Markup.inlineKeyboard([
+    [{ text: "🌐 Общие задачи", callback_data: "admin_shift_day_list_common" }],
     [
       {
-        text: "➕ Назначить / создать задачу",
-        callback_data: "admin_task_create",
+        text: "📍 Задачи конкретной точки",
+        callback_data: "admin_shift_day_points",
       },
     ],
-    [{ text: "📄 Список назначений", callback_data: "admin_shift_day_list" }],
     [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
   ]);
+
   await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
-async function showDayList(ctx) {
-  const rows = await loadDayAssignments();
+async function showPickPointForDayTasks(ctx) {
+  const res = await pool.query(
+    `
+      SELECT id, title
+      FROM trade_points
+      WHERE is_active = TRUE
+      ORDER BY id
+    `
+  );
 
-  let text = "📄 <b>Назначения задач (в течение дня)</b>\n\n";
+  let text = "📍 <b>Выберите торговую точку</b>\n\n";
+  if (!res.rows.length) text += "Нет активных точек.";
+
+  const rows = [];
+  for (const p of res.rows) {
+    rows.push([
+      Markup.button.callback(
+        `${p.title}`,
+        `admin_shift_day_list_point_${p.id}`
+      ),
+    ]);
+  }
+  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_day_root")]);
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
+
+async function showDayList(ctx, filter) {
+  const rows = await loadDayAssignments(filter);
+
+  let title = "📄 <b>Назначения задач (по расписанию)</b>\n\n";
+  if (filter?.mode === "common") title = "📄 <b>Общие авто-задачи</b>\n\n";
+  if (filter?.mode === "point")
+    title = `📄 <b>Авто-задачи точки #${Number(filter.tradePointId)}</b>\n\n`;
+
+  let text = title;
+
   if (!rows.length) {
     text += "Пока нет ни одного назначения.\n";
   } else {
@@ -86,6 +146,7 @@ async function showDayList(ctx) {
         r.point_scope === "all_points"
           ? "🏬 все точки"
           : `📍 точка #${r.trade_point_id}`;
+
       const type =
         r.answer_type === "photo"
           ? "📷"
@@ -111,9 +172,8 @@ async function showDayList(ctx) {
     );
     for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
   }
-  kb.push([
-    { text: "➕ Назначить / создать", callback_data: "admin_task_create" },
-  ]);
+
+  // ВАЖНО: здесь НЕ добавляем "создать задачу" — это отдельно через мастер из других мест
   kb.push([{ text: "⬅️ Назад", callback_data: "admin_shift_day_root" }]);
 
   await deliver(
@@ -126,27 +186,27 @@ async function showDayList(ctx) {
 async function showDayCard(ctx, assignmentId) {
   const res = await pool.query(
     `
-    SELECT
-      a.id AS assignment_id,
-      a.is_active,
-      a.task_type,
-      a.point_scope,
-      a.trade_point_id,
-      t.title,
-      t.answer_type,
-      s.schedule_type,
-      s.start_date,
-      s.single_date,
-      s.weekdays_mask,
-      s.every_x_days,
-      s.time_mode,
-      s.deadline_time
-    FROM task_assignments a
-    JOIN task_schedules s ON s.assignment_id = a.id
-    JOIN task_templates t ON t.id = a.template_id
-    WHERE a.id = $1
-    LIMIT 1
-  `,
+      SELECT
+        a.id AS assignment_id,
+        a.is_active,
+        a.task_type,
+        a.point_scope,
+        a.trade_point_id,
+        t.title,
+        t.answer_type,
+        s.schedule_type,
+        s.start_date,
+        s.single_date,
+        s.weekdays_mask,
+        s.every_x_days,
+        s.time_mode,
+        s.deadline_time
+      FROM task_assignments a
+      JOIN task_schedules s ON s.assignment_id = a.id
+      JOIN task_templates t ON t.id = a.template_id
+      WHERE a.id = $1
+      LIMIT 1
+    `,
     [assignmentId]
   );
 
@@ -155,7 +215,7 @@ async function showDayCard(ctx, assignmentId) {
     await ctx
       .answerCbQuery("Назначение не найдено", { show_alert: true })
       .catch(() => {});
-    return showDayList(ctx);
+    return showDayRoot(ctx);
   }
 
   const status = r.is_active ? "🟢 Активно" : "🔴 Выключено";
@@ -182,14 +242,33 @@ async function showDayCard(ctx, assignmentId) {
         callback_data: `admin_shift_day_toggle_${r.assignment_id}`,
       },
     ],
-    [{ text: "⬅️ Назад к списку", callback_data: "admin_shift_day_list" }],
+    [{ text: "⬅️ Назад", callback_data: "admin_shift_day_root" }],
+  ]);
+
+  await deliver(ctx, { text, extra: kb }, { edit: true });
+}
+
+async function showIndividualInfo(ctx) {
+  const text =
+    "👤 <b>Дать задачу индивидуально сотруднику</b>\n\n" +
+    "Чтобы выдать задачу конкретному сотруднику/стажёру:\n" +
+    "1) Перейдите в список сотрудников\n" +
+    "2) Откройте карточку нужного человека\n" +
+    "3) Нажмите кнопку <b>«➕ Дать задачу»</b>\n\n" +
+    "Так задача будет назначена именно этому человеку.";
+
+  const kb = Markup.inlineKeyboard([
+    [{ text: "👥 Перейти к списку сотрудников", callback_data: "admin_users" }],
+    [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
   ]);
 
   await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
 function registerAdminShiftSettings(bot, ensureUser, logError) {
+  // -----------------------------
   // Вход в "Настройка смен"
+  // -----------------------------
   bot.action("admin_shift_settings", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -206,8 +285,14 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
         ],
         [
           {
-            text: "📋 Задачи смены (в течении дня)",
+            text: "🗓️ Задачи по расписанию (авто)",
             callback_data: "admin_shift_day_root",
+          },
+        ],
+        [
+          {
+            text: "👤 Дать задачу индивидуально сотруднику",
+            callback_data: "admin_shift_individual_info",
           },
         ],
         [
@@ -225,27 +310,51 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
     }
   });
 
+  // --- Day tasks root (AUTO) ---
   bot.action("admin_shift_day_root", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-
       await showDayRoot(ctx);
     } catch (err) {
       logError("admin_shift_day_root", err);
     }
   });
 
-  bot.action("admin_shift_day_list", async (ctx) => {
+  bot.action("admin_shift_day_points", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-
-      await showDayList(ctx);
+      await showPickPointForDayTasks(ctx);
     } catch (err) {
-      logError("admin_shift_day_list", err);
+      logError("admin_shift_day_points", err);
+    }
+  });
+
+  bot.action("admin_shift_day_list_common", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await showDayList(ctx, { mode: "common" });
+    } catch (err) {
+      logError("admin_shift_day_list_common", err);
+    }
+  });
+
+  bot.action(/^admin_shift_day_list_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await showDayList(ctx, {
+        mode: "point",
+        tradePointId: Number(ctx.match[1]),
+      });
+    } catch (err) {
+      logError("admin_shift_day_list_point", err);
     }
   });
 
@@ -254,7 +363,6 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-
       await showDayCard(ctx, Number(ctx.match[1]));
     } catch (err) {
       logError("admin_shift_day_card", err);
@@ -277,6 +385,18 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       await showDayCard(ctx, id);
     } catch (err) {
       logError("admin_shift_day_toggle", err);
+    }
+  });
+
+  // --- Info screen about individual tasks ---
+  bot.action("admin_shift_individual_info", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await showIndividualInfo(ctx);
+    } catch (err) {
+      logError("admin_shift_individual_info", err);
     }
   });
 }
