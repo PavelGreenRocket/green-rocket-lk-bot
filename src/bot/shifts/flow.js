@@ -53,11 +53,11 @@ async function showPickPoint(ctx) {
     ]);
   }
   rows.push([Markup.button.callback("❌ Отмена", "shift_open_cancel")]);
-
+  const total = openingTotal(0);
   await deliver(
     ctx,
     {
-      text: "🏬 <b>Открытие смены</b>\n\n1) Выберите торговую точку:",
+      text: `🚀 <b>1/${total}</b>\n\n<b>Выберите торговую точку:</b>`,
       extra: Markup.inlineKeyboard(rows),
     },
     { edit: true }
@@ -65,6 +65,12 @@ async function showPickPoint(ctx) {
 }
 
 async function showAskCash(ctx) {
+  const st = getShiftState(ctx.from.id) || {};
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+  const total = openingTotal(0);
+
+  const head = openingHeader(tpTitle, null);
+
   const kb = Markup.inlineKeyboard([
     [{ text: "⬅️ Назад", callback_data: "shift_open_back_to_points" }],
     [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
@@ -73,7 +79,7 @@ async function showAskCash(ctx) {
   await deliver(
     ctx,
     {
-      text: "💰 2) Введите количество <b>наличных</b> в кассе (числом):",
+      text: `🚀 <b>2/${total}</b>\n${head}\n\n<b>Введите количество наличных (числом):</b>`,
       extra: kb,
     },
     { edit: true }
@@ -116,7 +122,38 @@ async function loadShiftQuestionsForUser(user, tradePointId) {
   }));
 }
 
-function formatQuestionText(idx, total, q) {
+async function getTradePointTitle(tpId) {
+  if (!tpId) return null;
+  const r = await pool.query(
+    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tpId]
+  );
+  return r.rows[0]?.title || `#${tpId}`;
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n.toLocaleString("ru-RU");
+}
+
+function openingHeader(tpTitle, cashAmount) {
+  const lines = [];
+  if (tpTitle) lines.push(`<b>${tpTitle}</b>`);
+  lines.push(new Date().toLocaleDateString("ru-RU"));
+  if (cashAmount !== undefined && cashAmount !== null) {
+    const c = fmtMoney(cashAmount);
+    if (c) lines.push(`Наличные в кассе: <b>${c}</b>`);
+  }
+  return lines.join("\n");
+}
+
+function openingTotal(queueLen) {
+  return 2 + (queueLen || 0); // 1: точка, 2: наличные, дальше вопросы
+}
+
+function formatQuestionText(stepIndex, totalSteps, q, tpTitle, cashAmount) {
   const emoji =
     q.answerType === "photo"
       ? "📷"
@@ -135,24 +172,38 @@ function formatQuestionText(idx, total, q) {
       ? "Введите число."
       : "Введите текст.";
 
-  return `${emoji} <b>${idx}/${total}</b>\n<b>${q.title}</b>\n\n${hint}`;
+  const head = openingHeader(tpTitle, cashAmount);
+
+  return (
+    `🚀 <b>${stepIndex}/${totalSteps}</b>\n` +
+    `${head}\n\n` +
+    `${emoji} <b>${q.title}</b>\n\n${hint}`
+  );
 }
 
 async function showShiftQuestion(ctx, st) {
   const q = st.queue[st.idx];
-  const text = formatQuestionText(st.idx + 1, st.queue.length, q);
+  const totalSteps = openingTotal(st.queue.length);
+  const stepIndex = 3 + st.idx; // 1:точка, 2:наличные, 3..N: вопросы
+
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+
+  const text = formatQuestionText(
+    stepIndex,
+    totalSteps,
+    q,
+    tpTitle,
+    st.cashAmount ?? null
+  );
 
   const kb = Markup.inlineKeyboard([
     [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
   ]);
 
-  // ✅ Если мы пришли из кнопки (callback) — можем редактировать сообщение
   if (ctx.callbackQuery) {
     await deliver(ctx, { text, extra: kb }, { edit: true });
     return;
   }
-
-  // ✅ Если пришли из ввода текста/фото/видео — редактировать нельзя, шлём новое сообщение
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
 }
 
@@ -199,8 +250,11 @@ function registerShiftFlow(bot, ensureUser, logError) {
       const shiftId = ins.rows[0].id;
 
       setShiftState(ctx.from.id, {
-        step: "pick_point",
-        shiftId,
+        ...st,
+        step: "survey",
+        queue,
+        idx: 0,
+        cashAmount: num,
       });
 
       await ctx.answerCbQuery().catch(() => {});

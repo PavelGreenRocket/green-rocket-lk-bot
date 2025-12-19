@@ -412,19 +412,28 @@ async function showByStep(ctx, user, step) {
     );
   }
   if (step === "cash_collection_by") {
-    // временно: выбор “кто инкассировал” — просто 2 кнопки
     setSt(ctx.from.id, { step: "cash_collection_by" });
+
+    const st = getSt(ctx.from.id);
+    const row = await getClosingRow(st.shiftId);
+
+    const tpTitle = await getTradePointTitle(st.tradePointId);
+    const dateStr = new Date().toLocaleDateString("ru-RU");
+    const head = buildClosingSummary(tpTitle, dateStr, row);
+
+    const text = `🛑 <b>4/5</b>\n` + `${head}\n\n` + `<b>Кто инкассировал?</b>`;
+
+    // пока минимально: "Я" (как и было), позже расширим списком разрешённых
     const kb = Markup.inlineKeyboard([
-      [{ text: "Я", callback_data: "shift_close_cash_by_me" }],
-      [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+      [{ text: "🙋 Я", callback_data: "shift_close_cash_by_me" }],
       [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
+      [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+      [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
     ]);
-    return deliver(
-      ctx,
-      { text: "4.2) Кто инкассировал?", extra: kb },
-      { edit: true }
-    );
+
+    return deliver(ctx, { text, extra: kb }, { edit: true });
   }
+
   if (step === "checks_count") {
     return showTextStep(
       ctx,

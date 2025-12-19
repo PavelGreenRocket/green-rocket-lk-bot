@@ -8,6 +8,10 @@ async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
   const role = user.role || "user";
 
+  if (staffStatus === "candidate" && !user.candidate_id) {
+    return "Личный кабинет пока закрыт.";
+  }
+
   // Особая клавиатура для кандидата
   if (staffStatus === "candidate" && user.candidate_id) {
     const res = await pool.query(
@@ -250,6 +254,8 @@ async function buildStatusText(user) {
 function registerMenu(bot, ensureUser, logError) {
   // /start
   bot.start(async (ctx) => {
+
+
     try {
       const user = await ensureUser(ctx);
       if (!user) return;

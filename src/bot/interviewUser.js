@@ -36,12 +36,12 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
   const res = await pool.query(
     `
       SELECT
-        c.id,
-        c.name,
-        c.point_id,
-        tp.title    AS point_title,
-        tp.address  AS point_address,
-        tp.landmark AS point_landmark
+  c.id,
+  c.name,
+  c.point_id,
+  tp.title    AS point_title,
+  tp.address  AS point_address,
+  tp.landmark AS point_landmark
       FROM users u
       INNER JOIN candidates c ON c.id = u.candidate_id
       LEFT JOIN trade_points tp ON tp.id = c.point_id
@@ -67,8 +67,6 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
   text += `Адрес: ${address}\n`;
   text += `Ориентир: ${landmark}\n`;
 
-  // Фото точки добавим позже, когда допилим хранение
-
   const buttons = [
     [
       Markup.button.callback(
@@ -86,7 +84,7 @@ async function showInterviewRoute(ctx, user, { edit } = {}) {
     { edit: !!edit }
   );
 
-  // Фотографии точки, если есть в базе
+  // Фото точки (если есть)
   try {
     if (row.point_id) {
       const photosRes = await pool.query(
@@ -163,6 +161,7 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
   const text = buildInterviewDetailsText(candidate);
 
   const buttons = [
+    [Markup.button.callback("🧭 Как пройти?", "lk_interview_route")],
     [
       Markup.button.callback(
         "❌ Отказаться от собеседования",
@@ -182,6 +181,18 @@ async function showInterviewDetails(ctx, user, { edit } = {}) {
 }
 
 // ---------- РЕГИСТРАЦИЯ ----------
+
+async function showDeclineFinalScreen(ctx, text, { edit } = {}) {
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("⬅️ В главное меню", "lk_main_menu")],
+  ]);
+
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit: !!edit }
+  );
+}
 
 function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
   // Слеш-команда /собеседование — можно давать ссылкой
@@ -373,8 +384,6 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
           "Мы сообщили наставнику.\n" +
           "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
       );
-
-      await showMainMenu(ctx);
     } catch (err) {
       if (client) {
         try {
@@ -405,4 +414,5 @@ function registerInterviewUser(bot, ensureUser, logError, showMainMenu) {
 module.exports = {
   registerInterviewUser,
   getActiveInterviewCandidate,
+  showInterviewDetails,
 };
