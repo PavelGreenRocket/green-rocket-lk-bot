@@ -180,7 +180,7 @@ ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
 
 async function loadInternsForAdmin(user, filters) {
   const params = [];
-  let where = "c.status = 'internship_invited'";
+  let where = "c.status = 'intern'";
 
   // у стажёров привязка к наставнику/админу идёт через internship_admin_id
   if (filters.scope === "personal") {
@@ -224,7 +224,32 @@ async function showInternsListLk(ctx, user, options = {}) {
       ? options.edit
       : ctx.updateType === "callback_query";
 
-  const interns = await loadInternsForAdmin(user, filters);
+  // ✅ стажёры — это candidates со статусом intern
+  const params = [];
+  let where = "c.status = 'intern'";
+
+  if (filters.scope === "personal") {
+    params.push(user.id);
+    where += ` AND c.internship_admin_id = $${params.length}`;
+  }
+
+  const res = await pool.query(
+    `
+    SELECT
+      c.id,
+      c.name,
+      c.age,
+      c.internship_date,
+      c.internship_time_from,
+      c.internship_time_to
+    FROM candidates c
+    WHERE ${where}
+    ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
+    `,
+    params
+  );
+
+  const interns = res.rows;
 
   let text = "🧑‍🎓 *Стажёры*\n\n";
   text += "▶️ — ожидание стажировки\n";
@@ -242,9 +267,8 @@ async function showInternsListLk(ctx, user, options = {}) {
   const rows = [];
 
   for (const c of interns) {
+    // если есть дата стажировки — значит обучение уже “в процессе”
     const icon = c.internship_date ? "⏺️" : "▶️";
-    const days = calcInternshipDays(c.internship_date);
-    const daysText = `${days}дн.`;
 
     const name = c.name || "Без имени";
     const ageText = c.age ? ` (${c.age})` : "";
@@ -256,8 +280,8 @@ async function showInternsListLk(ctx, user, options = {}) {
 
     rows.push([
       Markup.button.callback(
-        `${icon} ${daysText} ${name}${ageText} – ${when}`,
-        `admin_intern_open_${c.id}`
+        `${icon} ${name}${ageText} — ${when}`,
+        `admin_intern_open_${c.id}` // ✅ передаём candidateId
       ),
     ]);
   }
@@ -269,14 +293,13 @@ async function showInternsListLk(ctx, user, options = {}) {
     Markup.button.callback("Сотрудники", "admin_users_workers"),
   ]);
 
-  // низ экрана — тот же паттерн, что и у кандидатов
+  // низ как у кандидатов
   if (filters.historyExpanded) {
     rows.push([
       Markup.button.callback("+ добавить", "lk_cand_create_start"),
       Markup.button.callback("+ добавить", "lk_add_intern"),
       Markup.button.callback("+ добавить", "lk_add_worker"),
     ]);
-
     rows.push([Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history")]);
     rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
     rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
@@ -993,108 +1016,6 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
   // ----- СПИСОК СОТРУДНИКОВ -----
 
-  async function showInternsListLk(ctx, currentUser, options = {}) {
-    const tgId = ctx.from.id;
-    const filters = getCandidateFilters(tgId);
-
-    const res = await pool.query(
-      `
-      SELECT id, full_name, position, role, staff_status
-      FROM users
-      WHERE staff_status = 'intern'
-      ORDER BY full_name
-    `
-    );
-
-    const interns = res.rows;
-
-    let text = "🧑‍🎓 *Стажёры*\n\n";
-    text += "▶️ — ожидание стажировки\n";
-    text += "⏺️ — идёт обучение\n\n";
-    text += "Показаны только твои стажёры:\n\n";
-    text += interns.length
-      ? "Выбери стажёра:\n\n"
-      : "Пока нет ни одного стажёра.\n\n";
-
-    const rows = [];
-
-    for (const u of interns) {
-      const name = u.full_name || "Без имени";
-      const posText = u.position || "без должности";
-      rows.push([
-        Markup.button.callback(
-          `${name} — ${posText}`,
-          `admin_intern_open_${u.id}`
-        ),
-      ]);
-    }
-
-    rows.push([
-      Markup.button.callback("Кандидаты", "admin_users_candidates"),
-      Markup.button.callback("✅ Стажёры", "admin_users_interns"),
-      Markup.button.callback("Сотрудники", "admin_users_workers"),
-    ]);
-
-    if (filters.historyExpanded) {
-      rows.push([
-        Markup.button.callback("+ добавить", "lk_cand_create_start"),
-        Markup.button.callback("+ добавить", "lk_add_intern"),
-        Markup.button.callback("+ добавить", "lk_add_worker"),
-      ]);
-
-      rows.push([
-        Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history"),
-      ]);
-
-      rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
-      rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
-      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
-      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-    } else if (filters.filtersExpanded) {
-      rows.push([
-        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
-      ]);
-
-      rows.push([
-        Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
-      ]);
-
-      // Фильтры стажёров по ТЗ пока только: 👤 личные / 👥 все
-      rows.push([
-        Markup.button.callback(
-          filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
-          "lk_cand_filter_scope_personal"
-        ),
-        Markup.button.callback(
-          filters.scope === "all" ? "✅ 👥 все" : "👥 все",
-          "lk_cand_filter_scope_all"
-        ),
-      ]);
-
-      rows.push([
-        Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
-      ]);
-
-      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-    } else {
-      rows.push([
-        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
-      ]);
-      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
-      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-    }
-
-    const keyboard = Markup.inlineKeyboard(rows);
-    const extra = { ...keyboard, parse_mode: "Markdown" };
-
-    const shouldEdit =
-      typeof options.edit === "boolean"
-        ? options.edit
-        : ctx.updateType === "callback_query";
-
-    await deliver(ctx, { text, extra }, { edit: shouldEdit });
-  }
-
   async function showWorkersListLk(ctx, currentUser, options = {}) {
     const tgId = ctx.from.id;
     const filters = getCandidateFilters(tgId);
@@ -1486,7 +1407,10 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
 
       const candidateId = Number(ctx.match[1]);
-      await showCandidateCardLk(ctx, candidateId, { edit: true });
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        backTo: "interns",
+      });
     } catch (err) {
       logError("admin_intern_open", err);
     }
@@ -2051,7 +1975,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       const tgId = ctx.from.id;
       setCandidateFilters(tgId, { scope: "all" });
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_scope_all", err);
     }

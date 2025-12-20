@@ -1053,6 +1053,18 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       [internUserId]
     );
 
+    // 3.1) КРИТИЧНО:
+    // переводим кандидата в статус "intern",
+    // чтобы он исчез из списка "Кандидаты" и появился в "Стажёры"
+    await pool.query(
+      `
+  UPDATE candidates
+  SET status = 'intern'
+  WHERE id = $1
+  `,
+      [candidateId]
+    );
+
     // 4) уведомление стажёру (в lk-bot) + кнопка перехода в academy bot
     await ctx.telegram
       .sendMessage(

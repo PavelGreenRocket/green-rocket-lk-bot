@@ -230,10 +230,13 @@ FROM candidates c
       sessions.find((s) => !s.finished_at && !s.is_canceled) || null;
   }
 
-  // режим "СТАЖЁР" включаем, если стажировка уже реально стартовала
+  // режим "СТАЖЁР":
+  // - для status='intern' всегда считаем стажёром
+  // - для status='internship_invited' — стажёрский режим включаем только если уже есть сессии
   const isTraineeMode =
-    cand.status === "internship_invited" &&
-    (activeInternshipSession !== null || finishedInternshipCount > 0);
+    cand.status === "intern" ||
+    (cand.status === "internship_invited" &&
+      (activeInternshipSession !== null || finishedInternshipCount > 0));
 
   const traineeHeader = activeInternshipSession
     ? `🔻 СТАЖЁР — ДЕНЬ ${activeInternshipSession.day_number} (В ПРОЦЕССЕ)`
@@ -340,8 +343,8 @@ FROM candidates c
     }
   }
 
-  // 🔹 О стажировке — когда уже приглашён
-  if (cand.status === "internship_invited") {
+  // 🔹 О стажировке — когда приглашён или уже стажёр
+  if (cand.status === "internship_invited" || cand.status === "intern") {
     text += "🔹 *О стажировке*\n";
 
     if (cand.internship_date) {
@@ -403,7 +406,7 @@ FROM candidates c
         `lk_cand_decline_reason_${cand.id}`
       ),
     ]);
-  } else if (cand.status === "internship_invited") {
+  } else if (cand.status === "internship_invited" || cand.status === "intern") {
     // приглашён / стажировка в процессе
     if (isTraineeMode) {
       const mentorTgId = cand.internship_admin_tg_id || null;
@@ -533,7 +536,9 @@ FROM candidates c
     Markup.button.callback("⚙️ Настройки", `lk_cand_settings_${cand.id}`),
   ]);
   rows.push([
-    Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
+    options.backTo === "interns"
+      ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
+      : Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
   ]);
 
   let keyboard;
