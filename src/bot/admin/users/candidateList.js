@@ -41,6 +41,27 @@ function clearWorkerEditState(tgId) {
 }
 
 // ----------------------------------------
+// СОСТОЯНИЕ "РАСКРЫТА КАРТОЧКА" ДЛЯ СОТРУДНИКОВ
+// ----------------------------------------
+
+const workerCardsExpanded = new Map(); // key: tgId -> Set(workerId)
+
+function isWorkerCardExpanded(tgId, workerId) {
+  const set = workerCardsExpanded.get(tgId);
+  return set ? set.has(workerId) : false;
+}
+
+function toggleWorkerCardExpanded(tgId, workerId) {
+  let set = workerCardsExpanded.get(tgId);
+  if (!set) {
+    set = new Set();
+    workerCardsExpanded.set(tgId, set);
+  }
+  if (set.has(workerId)) set.delete(workerId);
+  else set.add(workerId);
+}
+
+// ----------------------------------------
 // ХЕЛПЕРЫ ФОРМАТИРОВАНИЯ
 // ----------------------------------------
 
@@ -932,14 +953,46 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     const tgId = ctx.from.id;
     const filters = getCandidateFilters(tgId);
 
-    const res = await pool.query(
+    let res;
+    try {
+      res = await pool.query(
+        `
+        SELECT
+          u.id,
+          u.full_name,
+          u.position,
+          u.role,
+          u.staff_status,
+          s.trade_point_id,
+          tp.title AS trade_point_title
+        FROM users u
+        LEFT JOIN LATERAL (
+          SELECT trade_point_id
+          FROM shifts
+          WHERE user_id = u.id
+            AND opened_at::date = CURRENT_DATE
+            AND status IN ('opening_in_progress','opened','closing_in_progress')
+          ORDER BY opened_at DESC
+          LIMIT 1
+        ) s ON TRUE
+        LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE u.staff_status = 'worker'
+          AND ($1::boolean IS FALSE OR s.trade_point_id IS NOT NULL)
+        ORDER BY u.full_name
+      `,
+        [filters.workerOnShift === true]
+      );
+    } catch (e) {
+      // если shifts ещё не подключены — не ломаем экран
+      res = await pool.query(
+        `
+        SELECT id, full_name, position, role, staff_status
+        FROM users
+        WHERE staff_status = 'worker'
+        ORDER BY full_name
       `
-      SELECT id, full_name, position, role, staff_status
-      FROM users
-      WHERE staff_status = 'worker'
-      ORDER BY full_name
-    `
-    );
+      );
+    }
 
     const workers = res.rows;
 
@@ -958,9 +1011,15 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     for (const w of workers) {
       const name = w.full_name || "Без имени";
       const posText = w.position || "без должности";
+
+      const onShiftTail =
+        w.trade_point_id && w.trade_point_title
+          ? ` (💼 ${w.trade_point_title})`
+          : "";
+
       rows.push([
         Markup.button.callback(
-          `${name} — ${posText}`,
+          `${name} — ${posText}${onShiftTail}`,
           `admin_worker_open_${w.id}`
         ),
       ]);
@@ -1003,8 +1062,22 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
       ]);
 
-      // ВАЖНО: сами фильтры сотрудников мы добавим следующим шагом,
-      // сейчас только выравниваем нижнюю часть под общий 3-режимный паттерн.
+      const programLabel = filters.workerProgram
+        ? "📚 по программе ✅"
+        : "📚 по программе";
+      const onShiftLabel = filters.workerOnShift
+        ? "💼 на смене ✅"
+        : "💼 на смене";
+
+      rows.push([
+        Markup.button.callback(programLabel, "lk_workers_filter_program"),
+      ]);
+      rows.push([
+        Markup.button.callback(onShiftLabel, "lk_workers_filter_onshift"),
+      ]);
+      rows.push([
+        Markup.button.callback("🔄 сбросить фильтр", "lk_workers_filter_reset"),
+      ]);
 
       rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
 
@@ -1086,6 +1159,30 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     text += `• Username: ${usernameText}\n`;
 
     const rows = [];
+
+    const expanded = isWorkerCardExpanded(ctx.from.id, u.id);
+
+    rows.push([
+      Markup.button.callback(
+        expanded ? "▾ Скрыть карточку" : "▴ Открыть карточку",
+        `lk_worker_toggle_cards_${u.id}`
+      ),
+    ]);
+
+    if (expanded) {
+      rows.push([
+        Markup.button.callback(
+          "📝 задачи смены",
+          `lk_worker_shift_tasks_${u.id}`
+        ),
+      ]);
+      rows.push([
+        Markup.button.callback(
+          "📊 успеваемость",
+          `lk_worker_performance_${u.id}`
+        ),
+      ]);
+    }
 
     rows.push([
       Markup.button.callback("⚙️ Настройки", `admin_worker_settings_${u.id}`),
@@ -1284,6 +1381,41 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await showWorkerSettingsMenu(ctx, workerId, { edit: true });
     } catch (err) {
       logError("admin_worker_settings", err);
+    }
+  });
+
+  // Раскрыть/свернуть карточку сотрудника (как у стажёра)
+  bot.action(/^lk_worker_toggle_cards_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+      toggleWorkerCardExpanded(ctx.from.id, workerId);
+      await showWorkerCardLk(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("lk_worker_toggle_cards", err);
+    }
+  });
+
+  // Заглушка: задачи смены
+  bot.action(/^lk_worker_shift_tasks_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
+    } catch (err) {
+      logError("lk_worker_shift_tasks", err);
+    }
+  });
+
+  // Заглушка: успеваемость
+  bot.action(/^lk_worker_performance_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
+    } catch (err) {
+      logError("lk_worker_performance", err);
     }
   });
 
@@ -1633,6 +1765,57 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_toggle", err);
+    }
+  });
+
+  bot.action("lk_workers_filter_program", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const tgId = ctx.from.id;
+      const f = getCandidateFilters(tgId);
+      setCandidateFilters(tgId, { workerProgram: !f.workerProgram });
+
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      await showWorkersListLk(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_workers_filter_program", err);
+    }
+  });
+
+  bot.action("lk_workers_filter_onshift", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const tgId = ctx.from.id;
+      const f = getCandidateFilters(tgId);
+      setCandidateFilters(tgId, { workerOnShift: !f.workerOnShift });
+
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      await showWorkersListLk(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_workers_filter_onshift", err);
+    }
+  });
+
+  bot.action("lk_workers_filter_reset", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const tgId = ctx.from.id;
+
+      setCandidateFilters(tgId, { workerProgram: false, workerOnShift: false });
+
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      await showWorkersListLk(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_workers_filter_reset", err);
     }
   });
 

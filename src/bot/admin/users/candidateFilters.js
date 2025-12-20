@@ -12,6 +12,10 @@ function getDefaultFilters() {
     scope: "personal", // "personal" | "all"
     filtersExpanded: false, // раскрыт ли блок фильтров
     historyExpanded: false, // пока почти не используем, но оставим
+
+    // --- фильтры сотрудников (ЛК-бот) ---
+    workerProgram: false, // заглушка "по программе"
+    workerOnShift: false, // 💼 на смене
   };
 }
 
