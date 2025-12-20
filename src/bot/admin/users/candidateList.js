@@ -41,6 +41,29 @@ function clearWorkerEditState(tgId) {
 }
 
 // ----------------------------------------
+// СОЗДАНИЕ СОТРУДНИКА (wizard) — состояние по tg_id
+// ----------------------------------------
+
+const addWorkerStates = new Map(); // tgId -> { step, data... }
+
+function getAddWorkerState(tgId) {
+  return addWorkerStates.get(tgId) || null;
+}
+function setAddWorkerState(tgId, patch) {
+  const cur = addWorkerStates.get(tgId) || {};
+  addWorkerStates.set(tgId, { ...cur, ...patch });
+}
+function clearAddWorkerState(tgId) {
+  addWorkerStates.delete(tgId);
+}
+
+function normalizePhone(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  return s;
+}
+
+// ----------------------------------------
 // СОСТОЯНИЕ "РАСКРЫТА КАРТОЧКА" ДЛЯ СОТРУДНИКОВ
 // ----------------------------------------
 
@@ -176,6 +199,219 @@ ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
   );
 
   return res.rows;
+}
+
+async function askWorkerName(ctx) {
+  const text = "👤 Введите *имя сотрудника*:";
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+
+  if (ctx.updateType === "callback_query") {
+    await ctx
+      .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+      .catch(() => {});
+  } else {
+    await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+  }
+}
+
+async function askWorkerAge(ctx) {
+  const text = "🎂 Введите *возраст* (число) или нажмите «Пропустить»:";
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("⏭ Пропустить", "lk_add_worker_skip_age")],
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
+async function askWorkerPhone(ctx) {
+  const text = "📞 Введите *телефон* или нажмите «Пропустить»:";
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("⏭ Пропустить", "lk_add_worker_skip_phone")],
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
+async function askWorkerPosition(ctx) {
+  const text = "💼 Введите *должность* или нажмите «Пропустить»:";
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("⏭ Пропустить", "lk_add_worker_skip_position")],
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
+async function askWorkerQual(ctx) {
+  const text =
+    "🧾 Выберите *статус квалификации*:\n\n" +
+    "🔴 – база не сдана\n" +
+    "🟡 – база сдана\n" +
+    "🟢 – всё сдано";
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("🔴", "lk_add_worker_qual_red"),
+      Markup.button.callback("🟡", "lk_add_worker_qual_yellow"),
+      Markup.button.callback("🟢 ✅", "lk_add_worker_qual_green"),
+    ],
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
+async function askWorkerLink(ctx) {
+  const text =
+    "👥 Теперь *привяжем пользователя ЛК* (чтобы сотруднику приходили уведомления).\n\n" +
+    "Выберите вариант:";
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "🔗 Привязать пользователя",
+        "lk_add_worker_link_existing"
+      ),
+    ],
+    [Markup.button.callback("⏳ Привяжу позже", "lk_add_worker_link_later")],
+    [Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")],
+  ]);
+
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
+async function showWaitingUsersForWorkerLink(ctx) {
+  const { rows } = await pool.query(
+    `
+    SELECT id, telegram_id, full_name, age, phone, created_at
+    FROM lk_waiting_users
+    WHERE status = 'new'
+    ORDER BY created_at DESC
+    `
+  );
+
+  if (!rows.length) {
+    await ctx.reply(
+      "Пока нет новых пользователей ЛК для привязки.\n" +
+        "Можно привязать позже из настроек сотрудника."
+    );
+    await ctx.answerCbQuery().catch(() => {});
+    await finalizeWorkerCreate(ctx, null, null);
+    return;
+  }
+
+  const buttons = rows.map((u) => {
+    const agePart = u.age ? ` (${u.age})` : "";
+    const phonePart = u.phone ? ` ${u.phone}` : "";
+    const label = `${u.full_name || "Без имени"}${agePart}${phonePart}`;
+    return [Markup.button.callback(label, `lk_add_worker_link_select_${u.id}`)];
+  });
+
+  buttons.push([
+    Markup.button.callback("⏳ Привязать позже", "lk_add_worker_link_later"),
+  ]);
+  buttons.push([Markup.button.callback("❌ Отмена", "lk_add_worker_cancel")]);
+
+  const keyboard = Markup.inlineKeyboard(buttons);
+  await ctx
+    .editMessageText("Выберите пользователя ЛК для привязки:", { ...keyboard })
+    .catch(async () => {
+      await ctx.reply("Выберите пользователя ЛК для привязки:", {
+        ...keyboard,
+      });
+    });
+}
+
+async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
+  const st = getAddWorkerState(ctx.from.id);
+  if (!st) return;
+
+  const name = st.name;
+  const age = st.age || null;
+  const phone = st.phone || null;
+  const position = st.position || null;
+  const qual = st.qual || "green";
+
+  let telegramId = telegramIdOverride || null;
+
+  // если выбрали waitingId — берём telegram_id оттуда
+  if (waitingId) {
+    const wRes = await pool.query(
+      `SELECT telegram_id FROM lk_waiting_users WHERE id = $1 LIMIT 1`,
+      [waitingId]
+    );
+    if (wRes.rows.length) {
+      telegramId = wRes.rows[0].telegram_id;
+    }
+  }
+
+  // создаём пользователя-сотрудника
+  // ВАЖНО: в вашей схеме users.age нет — возраст сохраняем только если есть куда (пока нет).
+  // Поэтому age используем лишь в UI из candidates при наличии; тут просто игнорируем.
+  // Телефон пишем в work_phone (у вас это поле точно используется у наставников).
+  let userId = null;
+  try {
+    const ins = await pool.query(
+      `
+      INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone, qualification_status)
+      VALUES ($1, $2, 'worker', 'worker', $3, $4, $5)
+      RETURNING id
+      `,
+      [telegramId, name, position, phone, qual]
+    );
+    userId = ins.rows[0].id;
+  } catch (e) {
+    // если qualification_status отсутствует — создадим без него
+    const ins2 = await pool.query(
+      `
+      INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone)
+      VALUES ($1, $2, 'worker', 'worker', $3, $4)
+      RETURNING id
+      `,
+      [telegramId, name, position, phone]
+    );
+    userId = ins2.rows[0].id;
+  }
+
+  // помечаем waiting user как linked (если было)
+  if (waitingId && userId) {
+    await pool
+      .query(
+        `
+      UPDATE lk_waiting_users
+      SET status = 'linked',
+          linked_user_id = $2,
+          linked_at = NOW()
+      WHERE id = $1
+      `,
+        [waitingId, userId]
+      )
+      .catch(() => {});
+  }
+
+  clearAddWorkerState(ctx.from.id);
+
+  // открываем карточку сотрудника
+  await showWorkerCardLk(ctx, userId, { edit: true });
 }
 
 async function loadInternsForAdmin(user, filters) {
@@ -599,6 +835,61 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     { code: "super_admin", label: "Супер-админ" },
   ];
 
+  bot.on("text", async (ctx, next) => {
+    const st = getAddWorkerState(ctx.from.id);
+    if (!st) return next();
+
+    try {
+      const raw = (ctx.message.text || "").trim();
+
+      if (st.step === "name") {
+        if (!raw) {
+          await ctx.reply("Имя не может быть пустым. Введите имя сотрудника:");
+          return;
+        }
+        setAddWorkerState(ctx.from.id, { name: raw, step: "age" });
+        await askWorkerAge(ctx);
+        return;
+      }
+
+      if (st.step === "age") {
+        const n = Number(raw.replace(/[^\d]/g, ""));
+        if (!Number.isFinite(n) || n <= 0 || n > 120) {
+          await ctx.reply(
+            "Возраст не распознан. Введите число (например 22) или нажмите «Пропустить»."
+          );
+          return;
+        }
+        setAddWorkerState(ctx.from.id, { age: n, step: "phone" });
+        await askWorkerPhone(ctx);
+        return;
+      }
+
+      if (st.step === "phone") {
+        setAddWorkerState(ctx.from.id, {
+          phone: normalizePhone(raw),
+          step: "position",
+        });
+        await askWorkerPosition(ctx);
+        return;
+      }
+
+      if (st.step === "position") {
+        setAddWorkerState(ctx.from.id, { position: raw || null, step: "qual" });
+        await askWorkerQual(ctx);
+        return;
+      }
+
+      return next();
+    } catch (err) {
+      logError("lk_add_worker_text", err);
+      clearAddWorkerState(ctx.from.id);
+      await ctx.reply(
+        "Не удалось сохранить данные сотрудника. Попробуйте снова."
+      );
+    }
+  });
+
   // Вход в раздел "Пользователи" → сразу показываем СОТРУДНИКОВ
   bot.action("admin_users", async (ctx) => {
     try {
@@ -610,6 +901,128 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await showWorkersListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("admin_users", err);
+    }
+  });
+
+  bot.action("lk_add_worker", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      clearAddWorkerState(ctx.from.id);
+      setAddWorkerState(ctx.from.id, { step: "name" });
+
+      await askWorkerName(ctx);
+    } catch (err) {
+      logError("lk_add_worker", err);
+    }
+  });
+
+  bot.action("lk_add_worker_cancel", async (ctx) => {
+    try {
+      clearAddWorkerState(ctx.from.id);
+      await ctx.answerCbQuery("Отменено").catch(() => {});
+      const u = await ensureUser(ctx);
+      if (!u) return;
+      await showWorkersListLk(ctx, u, { edit: true });
+    } catch (err) {
+      logError("lk_add_worker_cancel", err);
+    }
+  });
+
+  bot.action("lk_add_worker_skip_age", async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      setAddWorkerState(ctx.from.id, { age: null, step: "phone" });
+      await ctx.answerCbQuery().catch(() => {});
+      await askWorkerPhone(ctx);
+    } catch (err) {
+      logError("lk_add_worker_skip_age", err);
+    }
+  });
+
+  bot.action("lk_add_worker_skip_phone", async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      setAddWorkerState(ctx.from.id, { phone: null, step: "position" });
+      await ctx.answerCbQuery().catch(() => {});
+      await askWorkerPosition(ctx);
+    } catch (err) {
+      logError("lk_add_worker_skip_phone", err);
+    }
+  });
+
+  bot.action("lk_add_worker_skip_position", async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      setAddWorkerState(ctx.from.id, { position: null, step: "qual" });
+      await ctx.answerCbQuery().catch(() => {});
+      await askWorkerQual(ctx);
+    } catch (err) {
+      logError("lk_add_worker_skip_position", err);
+    }
+  });
+
+  bot.action("lk_add_worker_qual_red", async (ctx) => {
+    const st = getAddWorkerState(ctx.from.id);
+    if (!st) return;
+    setAddWorkerState(ctx.from.id, { qual: "red", step: "link" });
+    await ctx.answerCbQuery().catch(() => {});
+    await askWorkerLink(ctx);
+  });
+
+  bot.action("lk_add_worker_qual_yellow", async (ctx) => {
+    const st = getAddWorkerState(ctx.from.id);
+    if (!st) return;
+    setAddWorkerState(ctx.from.id, { qual: "yellow", step: "link" });
+    await ctx.answerCbQuery().catch(() => {});
+    await askWorkerLink(ctx);
+  });
+
+  bot.action("lk_add_worker_qual_green", async (ctx) => {
+    const st = getAddWorkerState(ctx.from.id);
+    if (!st) return;
+    setAddWorkerState(ctx.from.id, { qual: "green", step: "link" });
+    await ctx.answerCbQuery().catch(() => {});
+    await askWorkerLink(ctx);
+  });
+
+  bot.action("lk_add_worker_link_existing", async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      await ctx.answerCbQuery().catch(() => {});
+      await showWaitingUsersForWorkerLink(ctx);
+    } catch (err) {
+      logError("lk_add_worker_link_existing", err);
+    }
+  });
+
+  bot.action(/^lk_add_worker_link_select_(\d+)$/, async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      const waitingId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await finalizeWorkerCreate(ctx, waitingId, null);
+    } catch (err) {
+      logError("lk_add_worker_link_select", err);
+    }
+  });
+
+  bot.action("lk_add_worker_link_later", async (ctx) => {
+    try {
+      const st = getAddWorkerState(ctx.from.id);
+      if (!st) return;
+      await ctx.answerCbQuery().catch(() => {});
+      await finalizeWorkerCreate(ctx, null, null);
+    } catch (err) {
+      logError("lk_add_worker_link_later", err);
     }
   });
 
