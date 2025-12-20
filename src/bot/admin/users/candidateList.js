@@ -178,9 +178,141 @@ ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
   return res.rows;
 }
 
+async function loadInternsForAdmin(user, filters) {
+  const params = [];
+  let where = "c.status = 'internship_invited'";
+
+  // у стажёров привязка к наставнику/админу идёт через internship_admin_id
+  if (filters.scope === "personal") {
+    params.push(user.id);
+    where += ` AND c.internship_admin_id = $${params.length}`;
+  }
+
+  const res = await pool.query(
+    `
+SELECT
+  c.id,
+  c.name,
+  c.age,
+
+  c.internship_date,
+  c.internship_time_from,
+  c.internship_time_to,
+
+  COALESCE(tp_place.title, 'не указано') AS place_title
+FROM candidates c
+  LEFT JOIN trade_points tp_place ON c.internship_point_id = tp_place.id
+WHERE ${where}
+ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
+    `,
+    params
+  );
+
+  return res.rows;
+}
+
 // ----------------------------------------
 // ОТРИСОВКА СПИСКА КАНДИДАТОВ
 // ----------------------------------------
+
+async function showInternsListLk(ctx, user, options = {}) {
+  const tgId = ctx.from.id;
+  const filters = getCandidateFilters(tgId);
+
+  const shouldEdit =
+    options.edit !== undefined
+      ? options.edit
+      : ctx.updateType === "callback_query";
+
+  const interns = await loadInternsForAdmin(user, filters);
+
+  let text = "🧑‍🎓 *Стажёры*\n\n";
+  text += "▶️ — ожидание стажировки\n";
+  text += "⏺️ — идёт обучение\n\n";
+
+  text +=
+    filters.scope === "personal"
+      ? "Показаны только твои стажёры:\n\n"
+      : "Показаны все стажёры:\n\n";
+
+  text += interns.length
+    ? "Выбери стажёра:\n\n"
+    : "Пока нет ни одного стажёра.\n\n";
+
+  const rows = [];
+
+  for (const c of interns) {
+    const icon = c.internship_date ? "⏺️" : "▶️";
+    const days = calcInternshipDays(c.internship_date);
+    const daysText = `${days}дн.`;
+
+    const name = c.name || "Без имени";
+    const ageText = c.age ? ` (${c.age})` : "";
+    const when = formatInternshipLabel(
+      c.internship_date,
+      c.internship_time_from,
+      c.internship_time_to
+    );
+
+    rows.push([
+      Markup.button.callback(
+        `${icon} ${daysText} ${name}${ageText} – ${when}`,
+        `admin_intern_open_${c.id}`
+      ),
+    ]);
+  }
+
+  // вкладки
+  rows.push([
+    Markup.button.callback("Кандидаты", "admin_users_candidates"),
+    Markup.button.callback("✅ Стажёры", "admin_users_interns"),
+    Markup.button.callback("Сотрудники", "admin_users_workers"),
+  ]);
+
+  // низ экрана — тот же паттерн, что и у кандидатов
+  if (filters.historyExpanded) {
+    rows.push([
+      Markup.button.callback("+ добавить", "lk_cand_create_start"),
+      Markup.button.callback("+ добавить", "lk_add_intern"),
+      Markup.button.callback("+ добавить", "lk_add_worker"),
+    ]);
+
+    rows.push([Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history")]);
+    rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
+    rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
+    rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+  } else if (filters.filtersExpanded) {
+    rows.push([Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history")]);
+    rows.push([
+      Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
+        "lk_cand_filter_scope_personal"
+      ),
+      Markup.button.callback(
+        filters.scope === "all" ? "✅ 👥 все" : "👥 все",
+        "lk_cand_filter_scope_all"
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
+    ]);
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+  } else {
+    rows.push([Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history")]);
+    rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+  }
+
+  const keyboard = Markup.inlineKeyboard(rows);
+  const extra = { ...keyboard, parse_mode: "Markdown" };
+  await deliver(ctx, { text, extra }, { edit: shouldEdit });
+}
 
 async function showCandidatesListLk(ctx, user, options = {}) {
   const tgId = ctx.from.id;
@@ -365,6 +497,20 @@ function formatInternshipLabel(isoDate, from, to) {
   const range = from && to ? `(с ${from} до ${to})` : "";
   return `${dd}.${mm} (${wd}) ${range}`.trim();
 }
+
+function calcInternshipDays(isoDate) {
+  if (!isoDate) return 0;
+  const d = isoDate instanceof Date ? isoDate : new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return 0;
+
+  const now = new Date();
+  // считаем полные дни от даты стажировки до сегодня включительно
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.floor((today - start) / 86400000) + 1;
+  return diff < 0 ? 0 : diff;
+}
+
 // ----------------------------------------
 // РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ДЛЯ СПИСКА И ФИЛЬТРОВ
 // ----------------------------------------
@@ -1320,19 +1466,29 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     return showWorkersListLk(ctx, user, options);
   }
 
-  // Стажёры — пока заглушка
   bot.action("admin_users_interns", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
-        return;
-      }
+      const u = await ensureUser(ctx);
+      if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
 
       setCandidateFilters(ctx.from.id, { activeTab: "interns" });
-      await showInternsListLk(ctx, user, { edit: true });
+      await showInternsListLk(ctx, u, { edit: true });
     } catch (err) {
       logError("admin_users_interns", err);
+    }
+  });
+
+  bot.action(/^admin_intern_open_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const u = await ensureUser(ctx);
+      if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+
+      const candidateId = Number(ctx.match[1]);
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("admin_intern_open", err);
     }
   });
 
