@@ -136,14 +136,16 @@ function buildInternshipDetailsText(candidate, userNameFallback = "Вы") {
  * withReadButton = true → показываем кнопку "Прочитал"
  */
 async function showInternshipDetails(ctx, user, { withReadButton, edit } = {}) {
-  if (!candidate || candidate.status === "rejected") {
-    return showMainMenu(ctx);
-  }
-
   const candidate = await getActiveInternshipCandidate(user.id);
 
-  const text = buildInternshipDetailsText(candidate, user.full_name || "Вы");
+  // если стажировки нет (или уже не активна) — просто сообщение и выход
+  if (!candidate || candidate.status === "rejected") {
+    await ctx.answerCbQuery().catch(() => {});
+    await ctx.reply("У вас нет активного приглашения на стажировку.");
+    return;
+  }
 
+  const text = buildInternshipDetailsText(candidate, user.full_name || "Вы");
   const rows = [];
 
   // (опционально) "Прочитал" — оставим как было, если нужно
@@ -531,4 +533,5 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
 module.exports = {
   registerInternshipUser,
   getActiveInternshipCandidate,
+  showInternshipDetails,
 };

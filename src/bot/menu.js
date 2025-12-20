@@ -3,7 +3,8 @@ const { Markup } = require("telegraf");
 const { deliver } = require("../utils/renderHelpers");
 const pool = require("../db/pool");
 const { countUnreadNotifications } = require("./notifications");
-const { showInterviewDetails, showInternshipDetails } = require("./interviewUser");
+const { showInterviewDetails } = require("./interviewUser");
+const { showInternshipDetails } = require("./internshipUser");
 
 async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";

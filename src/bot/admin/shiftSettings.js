@@ -78,7 +78,29 @@ async function loadDayAssignments(filter = { mode: "all" }) {
 }
 
 async function showDayRoot(ctx) {
-  const text = "🗓️ <b>Задачи по расписанию (авто)</b>\n\n" + "Выберите раздел:";
+  const text = "📋 <b>Задачи в течение дня</b>\n\n" + "Выберите раздел:";
+
+  const kb = Markup.inlineKeyboard([
+    [
+      {
+        text: "🗓️ Задачи по расписанию (авто)",
+        callback_data: "admin_shift_day_auto_root",
+      },
+    ],
+    [
+      {
+        text: "👤 Дать задачу индивидуально сотруднику",
+        callback_data: "admin_shift_day_individual_info",
+      },
+    ],
+    [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+  ]);
+
+  await deliver(ctx, { text, extra: kb }, { edit: true });
+}
+
+async function showAutoRoot(ctx) {
+  const text = "🗓️ <b>Задачи по расписанию (авто)</b>\n\n" + "Выберите тип:";
 
   const kb = Markup.inlineKeyboard([
     [{ text: "🌐 Общие задачи", callback_data: "admin_shift_day_list_common" }],
@@ -88,7 +110,7 @@ async function showDayRoot(ctx) {
         callback_data: "admin_shift_day_points",
       },
     ],
-    [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+    [{ text: "⬅️ Назад", callback_data: "admin_shift_day_root" }],
   ]);
 
   await deliver(ctx, { text, extra: kb }, { edit: true });
@@ -285,14 +307,8 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
         ],
         [
           {
-            text: "🗓️ Задачи по расписанию (авто)",
+            text: "📋 Задачи в течение дня",
             callback_data: "admin_shift_day_root",
-          },
-        ],
-        [
-          {
-            text: "👤 Дать задачу индивидуально сотруднику",
-            callback_data: "admin_shift_individual_info",
           },
         ],
         [
@@ -330,6 +346,18 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       await showPickPointForDayTasks(ctx);
     } catch (err) {
       logError("admin_shift_day_points", err);
+    }
+  });
+
+  bot.action("admin_shift_day_auto_root", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      await showAutoRoot(ctx);
+    } catch (err) {
+      logError("admin_shift_day_auto_root", err);
     }
   });
 
@@ -389,7 +417,7 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
   });
 
   // --- Info screen about individual tasks ---
-  bot.action("admin_shift_individual_info", async (ctx) => {
+  bot.action("admin_shift_day_individual_info", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);

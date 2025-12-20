@@ -400,7 +400,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
         return;
       }
-
+      setCandidateFilters(ctx.from.id, { activeTab: "candidates" });
       await showCandidatesListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("admin_users_candidates", err);
@@ -826,19 +826,126 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
   // ----- СПИСОК СОТРУДНИКОВ -----
 
-  async function showWorkersListLk(ctx, currentUser, options = {}) {
+  async function showInternsListLk(ctx, currentUser, options = {}) {
+    const tgId = ctx.from.id;
+    const filters = getCandidateFilters(tgId);
+
     const res = await pool.query(
       `
-        SELECT id, full_name, position, role, staff_status
-        FROM users
-        WHERE staff_status = 'worker'
-        ORDER BY full_name
+      SELECT id, full_name, position, role, staff_status
+      FROM users
+      WHERE staff_status = 'intern'
+      ORDER BY full_name
+    `
+    );
+
+    const interns = res.rows;
+
+    let text = "🧑‍🎓 *Стажёры*\n\n";
+    text += "▶️ — ожидание стажировки\n";
+    text += "⏺️ — идёт обучение\n\n";
+    text += "Показаны только твои стажёры:\n\n";
+    text += interns.length
+      ? "Выбери стажёра:\n\n"
+      : "Пока нет ни одного стажёра.\n\n";
+
+    const rows = [];
+
+    for (const u of interns) {
+      const name = u.full_name || "Без имени";
+      const posText = u.position || "без должности";
+      rows.push([
+        Markup.button.callback(
+          `${name} — ${posText}`,
+          `admin_intern_open_${u.id}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback("Кандидаты", "admin_users_candidates"),
+      Markup.button.callback("✅ Стажёры", "admin_users_interns"),
+      Markup.button.callback("Сотрудники", "admin_users_workers"),
+    ]);
+
+    if (filters.historyExpanded) {
+      rows.push([
+        Markup.button.callback("+ добавить", "lk_cand_create_start"),
+        Markup.button.callback("+ добавить", "lk_add_intern"),
+        Markup.button.callback("+ добавить", "lk_add_worker"),
+      ]);
+
+      rows.push([
+        Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history"),
+      ]);
+
+      rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
+      rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
+      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+    } else if (filters.filtersExpanded) {
+      rows.push([
+        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
+      ]);
+
+      rows.push([
+        Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
+      ]);
+
+      // Фильтры стажёров по ТЗ пока только: 👤 личные / 👥 все
+      rows.push([
+        Markup.button.callback(
+          filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
+          "lk_cand_filter_scope_personal"
+        ),
+        Markup.button.callback(
+          filters.scope === "all" ? "✅ 👥 все" : "👥 все",
+          "lk_cand_filter_scope_all"
+        ),
+      ]);
+
+      rows.push([
+        Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
+      ]);
+
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+    } else {
+      rows.push([
+        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
+      ]);
+      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+    }
+
+    const keyboard = Markup.inlineKeyboard(rows);
+    const extra = { ...keyboard, parse_mode: "Markdown" };
+
+    const shouldEdit =
+      typeof options.edit === "boolean"
+        ? options.edit
+        : ctx.updateType === "callback_query";
+
+    await deliver(ctx, { text, extra }, { edit: shouldEdit });
+  }
+
+  async function showWorkersListLk(ctx, currentUser, options = {}) {
+    const tgId = ctx.from.id;
+    const filters = getCandidateFilters(tgId);
+
+    const res = await pool.query(
       `
+      SELECT id, full_name, position, role, staff_status
+      FROM users
+      WHERE staff_status = 'worker'
+      ORDER BY full_name
+    `
     );
 
     const workers = res.rows;
 
-    let text = "👥 *Сотрудники*\n\n";
+    // ✅ заголовок + пояснение (без ⏺️(Nдн) — оно НЕ уместно для повышения квалификации)
+    let text = "🧑‍💼 *Сотрудники*\n\n";
+    text += "🔴/🟡/🟢 — повышение квалификации (без счётчика дней)\n\n";
 
     if (!workers.length) {
       text += "Пока нет ни одного сотрудника.\n\n";
@@ -859,28 +966,68 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       ]);
     }
 
-    // Низ — те же три режима, что и у кандидатов
+    // вкладки всегда показываем (единый стиль как у кандидатов)
     rows.push([
       Markup.button.callback("Кандидаты", "admin_users_candidates"),
       Markup.button.callback("Стажёры", "admin_users_interns"),
       Markup.button.callback("✅ Сотрудники", "admin_users_workers"),
     ]);
 
-    rows.push([
-      Markup.button.callback("+ добавить", "lk_cand_create_start"),
-      Markup.button.callback("+ добавить", "lk_add_intern"),
-      Markup.button.callback("+ добавить", "lk_add_worker"),
-    ]);
+    // --- СОСТОЯНИЕ: РАСКРЫТО ("раскрыть") ---
+    if (filters.historyExpanded) {
+      rows.push([
+        Markup.button.callback("+ добавить", "lk_cand_create_start"),
+        Markup.button.callback("+ добавить", "lk_add_intern"),
+        Markup.button.callback("+ добавить", "lk_add_worker"),
+      ]);
 
-    rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+      rows.push([
+        Markup.button.callback("▴ Свернуть", "lk_cand_toggle_history"),
+      ]);
+
+      rows.push([Markup.button.callback("🔮 Общение с ИИ", "admin_ai_logs_1")]);
+
+      rows.push([Markup.button.callback("📜 история", "lk_history_menu")]);
+
+      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+
+      // --- СОСТОЯНИЕ: ФИЛЬТР РАСКРЫТ ---
+    } else if (filters.filtersExpanded) {
+      rows.push([
+        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
+      ]);
+
+      rows.push([
+        Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
+      ]);
+
+      // ВАЖНО: сами фильтры сотрудников мы добавим следующим шагом,
+      // сейчас только выравниваем нижнюю часть под общий 3-режимный паттерн.
+
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+
+      // --- СОСТОЯНИЕ: ОБЫЧНОЕ ---
+    } else {
+      rows.push([
+        Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
+      ]);
+
+      rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
+
+      rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
+    }
 
     const keyboard = Markup.inlineKeyboard(rows);
+    const extra = { ...keyboard, parse_mode: "Markdown" };
 
-    if (options.edit) {
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
-    } else {
-      await ctx.reply(text, keyboard);
-    }
+    const shouldEdit =
+      typeof options.edit === "boolean"
+        ? options.edit
+        : ctx.updateType === "callback_query";
+
+    await deliver(ctx, { text, extra }, { edit: shouldEdit });
   }
 
   // ----- КАРТОЧКА СОТРУДНИКА -----
@@ -1066,12 +1213,27 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   }
 
+  async function renderUsersTab(ctx, user, options = {}) {
+    const tgId = ctx.from.id;
+    const filters = getCandidateFilters(tgId);
+    const tab = filters.activeTab || "workers"; // по умолчанию как сейчас: вход ведёт в сотрудников
+
+    if (tab === "candidates") return showCandidatesListLk(ctx, user, options);
+    if (tab === "interns") return showInternsListLk(ctx, user, options);
+    return showWorkersListLk(ctx, user, options);
+  }
+
   // Стажёры — пока заглушка
   bot.action("admin_users_interns", async (ctx) => {
     try {
-      await ctx
-        .answerCbQuery("Экран стажёров пока в разработке")
-        .catch(() => {});
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
+        return;
+      }
+
+      setCandidateFilters(ctx.from.id, { activeTab: "interns" });
+      await showInternsListLk(ctx, user, { edit: true });
     } catch (err) {
       logError("admin_users_interns", err);
     }
@@ -1085,6 +1247,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
         return;
       }
+      setCandidateFilters(ctx.from.id, { activeTab: "workers" });
 
       await showWorkersListLk(ctx, user, { edit: true });
     } catch (err) {
@@ -1467,7 +1630,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         historyExpanded: false,
       });
 
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_toggle", err);
     }
@@ -1491,7 +1654,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         filtersExpanded: false,
       });
 
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_toggle_history", err);
     }
@@ -1516,7 +1679,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       const tgId = ctx.from.id;
       resetCandidateFilters(tgId);
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_reset", err);
     }
@@ -1533,7 +1696,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       const tgId = ctx.from.id;
       setCandidateFilters(tgId, { scope: "personal" });
-      await showCandidatesListLk(ctx, user, { edit: true });
+      await renderUsersTab(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_cand_filter_scope_personal", err);
     }
