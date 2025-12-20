@@ -235,17 +235,42 @@ async function showInternsListLk(ctx, user, options = {}) {
 
   const res = await pool.query(
     `
-    SELECT
-      c.id,
-      c.name,
-      c.age,
-      c.internship_date,
-      c.internship_time_from,
-      c.internship_time_to
-    FROM candidates c
-    WHERE ${where}
-    ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
-    `,
+  SELECT
+    c.id,
+    c.name,
+    c.age,
+    c.internship_date,
+    c.internship_time_from,
+    c.internship_time_to,
+
+    u.id AS lk_user_id,
+
+    COALESCE(fin.finished_cnt, 0) AS finished_cnt,
+    (act.id IS NOT NULL)          AS has_active
+  FROM candidates c
+  LEFT JOIN users u ON u.candidate_id = c.id
+
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS finished_cnt
+    FROM internship_sessions s
+    WHERE s.user_id = u.id
+      AND s.finished_at IS NOT NULL
+      AND s.is_canceled = FALSE
+  ) fin ON TRUE
+
+  LEFT JOIN LATERAL (
+    SELECT id
+    FROM internship_sessions s
+    WHERE s.user_id = u.id
+      AND s.finished_at IS NULL
+      AND s.is_canceled = FALSE
+    ORDER BY s.id DESC
+    LIMIT 1
+  ) act ON TRUE
+
+  WHERE ${where}
+  ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
+  `,
     params
   );
 
@@ -267,11 +292,16 @@ async function showInternsListLk(ctx, user, options = {}) {
   const rows = [];
 
   for (const c of interns) {
-    // если есть дата стажировки — значит обучение уже “в процессе”
-    const icon = c.internship_date ? "⏺️" : "▶️";
+    const icon = c.has_active ? "⏺️" : "▶️";
+
+    const dayNumber = c.has_active
+      ? Number(c.finished_cnt) + 1
+      : Number(c.finished_cnt);
+    const dayText = `${dayNumber}дн.`;
 
     const name = c.name || "Без имени";
     const ageText = c.age ? ` (${c.age})` : "";
+
     const when = formatInternshipLabel(
       c.internship_date,
       c.internship_time_from,
@@ -280,8 +310,8 @@ async function showInternsListLk(ctx, user, options = {}) {
 
     rows.push([
       Markup.button.callback(
-        `${icon} ${name}${ageText} — ${when}`,
-        `admin_intern_open_${c.id}` // ✅ передаём candidateId
+        `${icon} ${dayText} ${name}${ageText} – ${when}`,
+        `admin_intern_open_${c.id}`
       ),
     ]);
   }
@@ -326,7 +356,8 @@ async function showInternsListLk(ctx, user, options = {}) {
       Markup.button.callback("🔄 Сбросить фильтры", "lk_cand_filter_reset"),
     ]);
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-  } else {
+  } // --- СОСТОЯНИЕ: ОБЫЧНОЕ (ничего не раскрыто) ---
+  else {
     rows.push([Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history")]);
     rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
     rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
@@ -595,6 +626,66 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     } catch (err) {
       logError("admin_users_candidates", err);
     }
+  });
+
+  bot.action("lk_workers_filter_red", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    setCandidateFilters(ctx.from.id, { workerQual: "red" });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
+  });
+
+  bot.action("lk_workers_filter_yellow", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    setCandidateFilters(ctx.from.id, { workerQual: "yellow" });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
+  });
+
+  bot.action("lk_workers_filter_green", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    setCandidateFilters(ctx.from.id, { workerQual: "green" });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
+  });
+
+  bot.action("lk_workers_filter_all", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    setCandidateFilters(ctx.from.id, { workerQual: "all" });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
+  });
+
+  // заглушка "по программе"
+  bot.action("lk_workers_filter_program", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("📉 Пока в разработке.").catch(() => {});
+    } catch (_) {}
+  });
+
+  bot.action("lk_workers_filter_onshift", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const f = getCandidateFilters(ctx.from.id);
+    setCandidateFilters(ctx.from.id, { workerOnShift: !f.workerOnShift });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
+  });
+
+  bot.action("lk_workers_filter_reset", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    setCandidateFilters(ctx.from.id, {
+      workerQual: "all",
+      workerProgram: false,
+      workerOnShift: false,
+    });
+    const u = await ensureUser(ctx);
+    if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+    await showWorkersListLk(ctx, u, { edit: true });
   });
 
   // Быстрый переход "Мои собеседования"
@@ -1022,42 +1113,68 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
     let res;
     try {
+      const f = getCandidateFilters(ctx.from.id);
+
+      // фильтр квалификации
+      let qualWhere = "";
+      const params = [f.workerOnShift === true];
+      let p = 1;
+
+      if (f.workerQual && f.workerQual !== "all") {
+        params.push(f.workerQual);
+        p += 1;
+        // qualification_status — поле статуса квалификации у сотрудника:
+        // 'red' | 'yellow' | 'green'
+        qualWhere = ` AND u.qualification_status = $${p}`;
+      }
+
       res = await pool.query(
         `
-        SELECT
-          u.id,
-          u.full_name,
-          u.position,
-          u.role,
-          u.staff_status,
-          s.trade_point_id,
-          tp.title AS trade_point_title
-        FROM users u
-        LEFT JOIN LATERAL (
-          SELECT trade_point_id
-          FROM shifts
-          WHERE user_id = u.id
-            AND opened_at::date = CURRENT_DATE
-            AND status IN ('opening_in_progress','opened','closing_in_progress')
-          ORDER BY opened_at DESC
-          LIMIT 1
-        ) s ON TRUE
-        LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
-        WHERE u.staff_status = 'worker'
-          AND ($1::boolean IS FALSE OR s.trade_point_id IS NOT NULL)
-        ORDER BY u.full_name
-      `,
-        [filters.workerOnShift === true]
+   SELECT
+  u.id,
+  u.full_name,
+  c.age AS age,
+  u.position,
+
+      u.qualification_status,
+
+      s.trade_point_id,
+  COALESCE(tp.short_title, tp.title) AS trade_point_title
+FROM users u
+LEFT JOIN candidates c ON c.id = u.candidate_id
+
+    LEFT JOIN LATERAL (
+      SELECT trade_point_id
+      FROM shifts
+      WHERE user_id = u.id
+        AND opened_at::date = CURRENT_DATE
+        AND status IN ('opening_in_progress','opened','closing_in_progress')
+      ORDER BY opened_at DESC
+      LIMIT 1
+    ) s ON TRUE
+
+    LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+
+    WHERE u.staff_status = 'worker'
+      AND ($1::boolean IS FALSE OR s.trade_point_id IS NOT NULL)
+      ${qualWhere}
+    ORDER BY u.full_name
+    `,
+        params
       );
     } catch (e) {
-      // если shifts ещё не подключены — не ломаем экран
       res = await pool.query(
         `
-        SELECT id, full_name, position, role, staff_status
-        FROM users
-        WHERE staff_status = 'worker'
-        ORDER BY full_name
-      `
+    SELECT
+      u.id,
+      u.full_name,
+      c.age AS age,
+      u.position
+    FROM users u
+    LEFT JOIN candidates c ON c.id = u.candidate_id
+    WHERE u.staff_status = 'worker'
+    ORDER BY u.full_name
+  `
       );
     }
 
@@ -1065,7 +1182,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
     // ✅ заголовок + пояснение (без ⏺️(Nдн) — оно НЕ уместно для повышения квалификации)
     let text = "🧑‍💼 *Сотрудники*\n\n";
-    text += "🔴/🟡/🟢 — повышение квалификации (без счётчика дней)\n\n";
+    text += "🔴 – база не сдана\n";
+    text += "🟡 – база сдана\n";
+    text += "🟢 – всё сдано\n\n";
 
     if (!workers.length) {
       text += "Пока нет ни одного сотрудника.\n\n";
@@ -1077,7 +1196,13 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
     for (const w of workers) {
       const name = w.full_name || "Без имени";
-      const posText = w.position || "без должности";
+      const ageText = w.age ? ` (${w.age})` : "";
+
+      // по умолчанию 🟢, если статус квалификации не задан
+      let icon = "🟢";
+      if (w.qualification_status === "red") icon = "🔴";
+      if (w.qualification_status === "yellow") icon = "🟡";
+      if (w.qualification_status === "green") icon = "🟢";
 
       const onShiftTail =
         w.trade_point_id && w.trade_point_title
@@ -1086,7 +1211,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       rows.push([
         Markup.button.callback(
-          `${name} — ${posText}${onShiftTail}`,
+          `${icon} ${name}${ageText}${onShiftTail}`,
           `admin_worker_open_${w.id}`
         ),
       ]);
@@ -1129,33 +1254,54 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         Markup.button.callback("🔎 Фильтр (скрыть)", "lk_cand_filter_toggle"),
       ]);
 
-      const programLabel = filters.workerProgram
-        ? "📚 по программе ✅"
-        : "📚 по программе";
-      const onShiftLabel = filters.workerOnShift
-        ? "💼 на смене ✅"
-        : "💼 на смене";
+      // квалификация
+      rows.push([
+        Markup.button.callback(
+          filters.workerQual === "red" ? "🔴 ✅" : "🔴",
+          "lk_workers_filter_red"
+        ),
+        Markup.button.callback(
+          filters.workerQual === "yellow" ? "🟡 ✅" : "🟡",
+          "lk_workers_filter_yellow"
+        ),
+        Markup.button.callback(
+          filters.workerQual === "green" ? "🟢 ✅" : "🟢",
+          "lk_workers_filter_green"
+        ),
+        Markup.button.callback(
+          filters.workerQual === "all" ? "все ✅" : "все",
+          "lk_workers_filter_all"
+        ),
+      ]);
 
+      // заглушка по программе
       rows.push([
-        Markup.button.callback(programLabel, "lk_workers_filter_program"),
+        Markup.button.callback(
+          "📉 Отстающие по программе",
+          "lk_workers_filter_program"
+        ),
       ]);
+
+      // на смене
       rows.push([
-        Markup.button.callback(onShiftLabel, "lk_workers_filter_onshift"),
+        Markup.button.callback(
+          filters.workerOnShift ? "💼 на смене ✅" : "💼 на смене",
+          "lk_workers_filter_onshift"
+        ),
       ]);
+
+      // сброс
       rows.push([
-        Markup.button.callback("🔄 сбросить фильтр", "lk_workers_filter_reset"),
+        Markup.button.callback("сбросить фильтр", "lk_workers_filter_reset"),
       ]);
 
       rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
-
-      // --- СОСТОЯНИЕ: ОБЫЧНОЕ ---
-    } else {
+    } // --- СОСТОЯНИЕ: ОБЫЧНОЕ (ничего не раскрыто) ---
+    else {
       rows.push([
         Markup.button.callback("▾ Раскрыть", "lk_cand_toggle_history"),
       ]);
-
       rows.push([Markup.button.callback("🔎 Фильтр", "lk_cand_filter_toggle")]);
-
       rows.push([Markup.button.callback("⬅️ Назад", "lk_admin_menu")]);
     }
 
@@ -1227,8 +1373,24 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
     const rows = [];
 
-    const expanded = isWorkerCardExpanded(ctx.from.id, u.id);
+    // 1) задачи смены (заглушка)
+    rows.push([
+      Markup.button.callback(
+        "📝 задачи смены",
+        `lk_worker_shift_tasks_${u.id}`
+      ),
+    ]);
 
+    // 2) успеваемость (заглушка)
+    rows.push([
+      Markup.button.callback(
+        "📊 успеваемость",
+        `lk_worker_performance_${u.id}`
+      ),
+    ]);
+
+    // 3) открыть карточку (toggle как у стажёра)
+    const expanded = isWorkerCardExpanded(ctx.from.id, u.id);
     rows.push([
       Markup.button.callback(
         expanded ? "▾ Скрыть карточку" : "▴ Открыть карточку",
@@ -1236,24 +1398,14 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       ),
     ]);
 
-    if (expanded) {
-      rows.push([
-        Markup.button.callback(
-          "📝 задачи смены",
-          `lk_worker_shift_tasks_${u.id}`
-        ),
-      ]);
-      rows.push([
-        Markup.button.callback(
-          "📊 успеваемость",
-          `lk_worker_performance_${u.id}`
-        ),
-      ]);
-    }
+    // (пока ничего внутри expanded не добавляем — просто оставляем механику, как у стажёра)
 
+    // 4) настройки
     rows.push([
       Markup.button.callback("⚙️ Настройки", `admin_worker_settings_${u.id}`),
     ]);
+
+    // 5) назад
     rows.push([
       Markup.button.callback("⬅️ К сотрудникам", "admin_users_workers"),
     ]);
@@ -1848,23 +2000,6 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
-  bot.action("lk_workers_filter_program", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const tgId = ctx.from.id;
-      const f = getCandidateFilters(tgId);
-      setCandidateFilters(tgId, { workerProgram: !f.workerProgram });
-
-      const user = await ensureUser(ctx);
-      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
-        return;
-
-      await showWorkersListLk(ctx, user, { edit: true });
-    } catch (err) {
-      logError("lk_workers_filter_program", err);
-    }
-  });
-
   bot.action("lk_workers_filter_onshift", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1887,7 +2022,11 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const tgId = ctx.from.id;
 
-      setCandidateFilters(tgId, { workerProgram: false, workerOnShift: false });
+      setCandidateFilters(tgId, {
+        workerQual: "all",
+        workerProgram: false,
+        workerOnShift: false,
+      });
 
       const user = await ensureUser(ctx);
       if (!user || (user.role !== "admin" && user.role !== "super_admin"))

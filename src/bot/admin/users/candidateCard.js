@@ -429,6 +429,13 @@ FROM candidates c
             ),
           ]);
         }
+        // 📝 задачи смены — показываем ВСЕГДА для стажёра
+        rows.push([
+          Markup.button.callback(
+            "📝Задачи смены",
+            `lk_intern_shift_tasks_${cand.id}`
+          ),
+        ]);
       } else {
         // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
         if (isMentor) {
@@ -741,6 +748,16 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         .catch(() => {});
     } catch (err) {
       logError("lk_internship_data_stub", err);
+    }
+  });
+
+  bot.action(/^lk_intern_shift_tasks_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("📝 Задачи смены — в разработке.")
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_intern_shift_tasks", err);
     }
   });
 

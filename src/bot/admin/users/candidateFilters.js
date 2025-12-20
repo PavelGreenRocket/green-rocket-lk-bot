@@ -14,6 +14,7 @@ function getDefaultFilters() {
     historyExpanded: false, // пока почти не используем, но оставим
 
     // --- фильтры сотрудников (ЛК-бот) ---
+    workerQual: "all",
     workerProgram: false, // заглушка "по программе"
     workerOnShift: false, // 💼 на смене
   };
