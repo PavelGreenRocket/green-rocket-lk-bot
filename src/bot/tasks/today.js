@@ -214,22 +214,23 @@ function buildKeyboard(rows) {
 async function showTodayTasks(ctx, user) {
   const shift = await getActiveShiftForUser(user.id).catch(() => null);
 
-  // если хочешь строго: "задачи доступны только после открытия смены" — раскомментируй:
-  // if (!shift) {
-  //   await deliver(ctx, {
-  //     text: "Сначала открой смену, чтобы увидеть задачи.",
-  //     extra: Markup.inlineKeyboard([[Markup.button.callback("⬅️ В меню", "lk_main_menu")]])
-  //   }, { edit: true });
-  //   return;
-  // }
-
   await ensureTodayInstances(user, shift);
 
   const rows = await loadTodayInstances(user);
   const text = buildTasksText(rows);
   const keyboard = buildKeyboard(rows);
 
-  await deliver(ctx, { text, extra: keyboard }, { edit: true });
+  // ✅ если пришли из кнопки — edit
+  if (ctx.callbackQuery) {
+    await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    return;
+  }
+
+  // ✅ если пришли из сообщения (наличка/ответы) — только reply
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: keyboard.reply_markup,
+  });
 }
 
 function askForAnswerText(answerType, title) {
@@ -328,6 +329,22 @@ function registerTodayTasks(bot, ensureUser, logError) {
       }
       if (row.status === "done") {
         await ctx.answerCbQuery("Уже выполнено ✅").catch(() => {});
+        return;
+      }
+
+      // ✅ "обычная" задача (button) — выполняем сразу, без ожидания ответа
+      if (row.answer_type === "button") {
+        await pool.query(
+          `
+            UPDATE task_instances
+            SET status = 'done', done_at = NOW()
+            WHERE id = $1
+          `,
+          [row.id]
+        );
+
+        await ctx.answerCbQuery("Выполнено ✅").catch(() => {});
+        await showTodayTasks(ctx, user);
         return;
       }
 

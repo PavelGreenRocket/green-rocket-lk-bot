@@ -341,6 +341,94 @@ async function showWaitingUsersForWorkerLink(ctx) {
     });
 }
 
+async function showWaitingUsersForInternLink(ctx) {
+  const { rows } = await pool.query(
+    `
+    SELECT id, telegram_id, full_name, age, phone, created_at
+    FROM lk_waiting_users
+    WHERE status = 'new'
+    ORDER BY created_at DESC
+    `
+  );
+
+  if (!rows.length) {
+    await ctx.reply(
+      "Пока нет новых пользователей ЛК для привязки.\n" +
+        "Пусть сотрудник сначала нажмёт «Я уже сотрудник» в ЛК и появится в списке ожидания."
+    );
+    await ctx.answerCbQuery().catch(() => {});
+    return;
+  }
+
+  const buttons = rows.map((u) => {
+    const agePart = u.age ? ` (${u.age})` : "";
+    const phonePart = u.phone ? ` ${u.phone}` : "";
+    const label = `${u.full_name || "Без имени"}${agePart}${phonePart}`;
+    return [Markup.button.callback(label, `lk_add_intern_link_select_${u.id}`)];
+  });
+
+  buttons.push([Markup.button.callback("❌ Отмена", "lk_add_intern_cancel")]);
+
+  const keyboard = Markup.inlineKeyboard(buttons);
+  await ctx
+    .editMessageText(
+      "Выберите пользователя ЛК, которого добавить как *стажёра*:",
+      {
+        ...keyboard,
+        parse_mode: "Markdown",
+      }
+    )
+    .catch(async () => {
+      await ctx.reply(
+        "Выберите пользователя ЛК, которого добавить как *стажёра*:",
+        {
+          ...keyboard,
+          parse_mode: "Markdown",
+        }
+      );
+    });
+}
+
+async function finalizeInternCreate(ctx, admin, waitingId) {
+  // берём telegram_id + имя из списка ожидания
+  const wRes = await pool.query(
+    `SELECT id, telegram_id, full_name FROM lk_waiting_users WHERE id = $1 LIMIT 1`,
+    [waitingId]
+  );
+  if (!wRes.rows.length) {
+    await ctx.reply("Пользователь ожидания не найден.");
+    return;
+  }
+  const w = wRes.rows[0];
+
+  // создаём users как intern
+  const ins = await pool.query(
+    `
+    INSERT INTO users (telegram_id, full_name, role, staff_status)
+    VALUES ($1, $2, 'user', 'intern')
+    RETURNING id
+    `,
+    [w.telegram_id || null, w.full_name || null]
+  );
+  const userId = ins.rows[0].id;
+
+  // помечаем waiting user как linked
+  await pool.query(
+    `
+    UPDATE lk_waiting_users
+    SET status = 'linked',
+        linked_user_id = $2,
+        linked_at = NOW()
+    WHERE id = $1
+    `,
+    [waitingId, userId]
+  );
+
+  // возвращаем в таб стажёров
+  setCandidateFilters(ctx.from.id, { activeTab: "interns" });
+  await showInternsListLk(ctx, admin, { edit: true });
+}
+
 async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
   const st = getAddWorkerState(ctx.from.id);
   if (!st) return;
@@ -471,25 +559,54 @@ async function showInternsListLk(ctx, user, options = {}) {
 
   const res = await pool.query(
     `
+  WITH interns_union AS (
+    -- 1) "Обычные" стажёры из candidates (как было)
+    SELECT
+      c.id                  AS intern_key,   -- ключ для кнопки
+      'candidate'           AS intern_src,
+      c.id                  AS candidate_id,
+      u.id                  AS lk_user_id,
+
+      c.name,
+      c.age,
+
+      c.internship_date,
+      c.internship_time_from,
+      c.internship_time_to
+    FROM candidates c
+    LEFT JOIN users u ON u.candidate_id = c.id
+    WHERE ${where}
+
+    UNION ALL
+
+    -- 2) "Ручные" стажёры из users.staff_status='intern' (через ожидание)
+    SELECT
+      u.id                  AS intern_key,
+      'user'                AS intern_src,
+      NULL                  AS candidate_id,
+      u.id                  AS lk_user_id,
+
+      u.full_name           AS name,
+      w.age                 AS age,
+
+      NULL::date            AS internship_date,
+      NULL::text            AS internship_time_from,
+      NULL::text            AS internship_time_to
+    FROM users u
+    LEFT JOIN lk_waiting_users w ON w.linked_user_id = u.id
+    WHERE u.staff_status = 'intern'
+  )
+
   SELECT
-    c.id,
-    c.name,
-    c.age,
-    c.internship_date,
-    c.internship_time_from,
-    c.internship_time_to,
-
-    u.id AS lk_user_id,
-
+    x.*,
     COALESCE(fin.finished_cnt, 0) AS finished_cnt,
     (act.id IS NOT NULL)          AS has_active
-  FROM candidates c
-  LEFT JOIN users u ON u.candidate_id = c.id
+  FROM interns_union x
 
   LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS finished_cnt
     FROM internship_sessions s
-    WHERE s.user_id = u.id
+    WHERE s.user_id = x.lk_user_id
       AND s.finished_at IS NOT NULL
       AND s.is_canceled = FALSE
   ) fin ON TRUE
@@ -497,15 +614,14 @@ async function showInternsListLk(ctx, user, options = {}) {
   LEFT JOIN LATERAL (
     SELECT id
     FROM internship_sessions s
-    WHERE s.user_id = u.id
+    WHERE s.user_id = x.lk_user_id
       AND s.finished_at IS NULL
       AND s.is_canceled = FALSE
     ORDER BY s.id DESC
     LIMIT 1
   ) act ON TRUE
 
-  WHERE ${where}
-  ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
+  ORDER BY x.internship_date NULLS LAST, x.intern_key
   `,
     params
   );
@@ -544,10 +660,15 @@ async function showInternsListLk(ctx, user, options = {}) {
       c.internship_time_to
     );
 
+    const openCb =
+      c.intern_src === "candidate"
+        ? `admin_intern_open_${c.candidate_id}`
+        : `admin_intern_user_open_${c.lk_user_id}`;
+
     rows.push([
       Markup.button.callback(
         `${icon} ${dayText} ${name}${ageText} – ${when}`,
-        `admin_intern_open_${c.id}`
+        openCb
       ),
     ]);
   }
@@ -953,6 +1074,45 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       await askWorkerPosition(ctx);
     } catch (err) {
       logError("lk_add_worker_skip_phone", err);
+    }
+  });
+
+  bot.action("lk_add_intern", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      await showWaitingUsersForInternLink(ctx);
+    } catch (err) {
+      logError("lk_add_intern", err);
+    }
+  });
+
+  bot.action("lk_add_intern_cancel", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Отменено").catch(() => {});
+      const u = await ensureUser(ctx);
+      if (!u) return;
+      setCandidateFilters(ctx.from.id, { activeTab: "interns" });
+      await showInternsListLk(ctx, u, { edit: true });
+    } catch (err) {
+      logError("lk_add_intern_cancel", err);
+    }
+  });
+
+  bot.action(/^lk_add_intern_link_select_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const waitingId = Number(ctx.match[1]);
+      await finalizeInternCreate(ctx, admin, waitingId);
+    } catch (err) {
+      logError("lk_add_intern_link_select", err);
     }
   });
 
@@ -1978,6 +2138,23 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
       });
     } catch (err) {
       logError("admin_intern_open", err);
+    }
+  });
+
+  bot.action(/^admin_intern_user_open_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const u = await ensureUser(ctx);
+      if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
+
+      const userId = Number(ctx.match[1]);
+      // пока просто показываем карточку пользователя-сотрудника как заглушку,
+      // либо можно сделать отдельную intern-card позже.
+      await ctx.reply(
+        `Стажёр добавлен вручную. user_id=${userId}\n(карточку стажёра можно допилить следующим шагом)`
+      );
+    } catch (err) {
+      logError("admin_intern_user_open", err);
     }
   });
 
