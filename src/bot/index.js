@@ -20,7 +20,7 @@ function registerLkBot(bot, ensureUser, logError) {
   registerAiLogs(bot, ensureUser, logError);
   registerQuestions(bot, ensureUser, logError);
   registerInterviewUser(bot, ensureUser, logError);
-  registerComplaints(bot, ensureUser);
+  registerComplaints(bot, ensureUser, logError);
 
   // только новая админ-панель
   registerAdminPanel(bot, ensureUser, logError);
