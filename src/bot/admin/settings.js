@@ -7,6 +7,7 @@ const { registerAdminShiftOpeningTasks } = require("./shiftOpeningTasks");
 const { registerAdminShiftClosingTasks } = require("./shiftClosingTasks");
 const { registerAdminResponsibles } = require("./responsibles");
 
+
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
 

@@ -2,126 +2,99 @@
 const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
+const { getUserState, setUserState, clearUserState } = require("../state");
+
+const MODE = "admin_responsibles";
 
 function isAdmin(user) {
   return user && (user.role === "admin" || user.role === "super_admin");
 }
 
-function esc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+function stGet(tgId) {
+  const st = getUserState(tgId);
+  return st && st.mode === MODE ? st : null;
 }
-
-// in-memory state (как в admin/shiftTasks.js)
-const stByTg = new Map();
-function getSt(tgId) {
-  return stByTg.get(tgId) || null;
+function stSet(tgId, patch) {
+  const prev = stGet(tgId) || { mode: MODE };
+  setUserState(tgId, { ...prev, ...patch });
 }
-function setSt(tgId, patch) {
-  const prev = getSt(tgId) || {
-    step: "root", // root | pick_type | pick_point | list | pick_user
-    eventType: null, // 'uncompleted_tasks' | 'complaints'
-    pointId: null,
-  };
-  stByTg.set(tgId, { ...prev, ...patch });
-}
-function clearSt(tgId) {
-  stByTg.delete(tgId);
+function stClear(tgId) {
+  const st = stGet(tgId);
+  if (st) clearUserState(tgId);
 }
 
 async function loadPoints() {
   const r = await pool.query(
-    `
-    SELECT id, title
-    FROM trade_points
-    WHERE is_active = TRUE
-    ORDER BY id
-    `
+    `SELECT id, title FROM trade_points WHERE is_active=TRUE ORDER BY id`
   );
   return r.rows;
 }
 
-async function loadResponsibles(pointId, eventType) {
+async function loadResp(tradePointId, kind) {
   const r = await pool.query(
     `
-    SELECT
-      r.user_id,
-      u.full_name,
-      u.username,
-      u.work_phone
-    FROM trade_point_responsibles r
-    JOIN users u ON u.id = r.user_id
-    WHERE r.trade_point_id = $1
-      AND r.event_type = $2
-      AND r.is_active = TRUE
-    ORDER BY u.full_name NULLS LAST, u.id ASC
+    SELECT ra.id, ra.user_id, COALESCE(u.full_name,'Без имени') AS full_name
+    FROM responsible_assignments ra
+    JOIN users u ON u.id = ra.user_id
+    WHERE ra.trade_point_id=$1 AND ra.kind=$2 AND ra.is_active=TRUE
+    ORDER BY u.full_name NULLS LAST, ra.id
     `,
-    [Number(pointId), eventType]
+    [tradePointId, kind]
   );
   return r.rows;
 }
 
-async function loadUsersForPick(limit = 30) {
+async function loadUsersForPick(q) {
+  // ВАЖНО: без фильтров staff_status/role, чтобы "виделись все"
   const r = await pool.query(
     `
-    SELECT id, full_name, username, work_phone, role, staff_status
+    SELECT id, COALESCE(full_name,'Без имени') AS full_name
     FROM users
-    WHERE staff_status = 'employee'
-    ORDER BY full_name NULLS LAST, id ASC
-    LIMIT $1
-    `,
-    [Number(limit)]
+    ORDER BY full_name NULLS LAST, id
+    LIMIT 60
+    `
   );
   return r.rows;
 }
 
-function eventTypeTitle(eventType) {
-  if (eventType === "uncompleted_tasks") return "по невыполненным задачам";
-  if (eventType === "complaints") return "по жалобам на прошлую смену";
-  return "—";
+function kindLabel(kind) {
+  return kind === "uncompleted_tasks"
+    ? "✅ Невыполненные задачи"
+    : "📝 Жалобы на прошлую смену";
 }
 
-async function renderRoot(ctx) {
+async function showRoot(ctx) {
   const text =
     "👤 <b>Назначение ответственных</b>\n\n" +
-    "Здесь назначаются ответственные сотрудники по торговым точкам.\n" +
-    "Ответственные будут получать уведомления по выбранному типу события.\n\n" +
+    "Здесь назначаются сотрудники, которые будут получать уведомления:\n" +
+    "• если смена закрыта с невыполненными задачами\n" +
+    "• если бариста оставил замечание по прошлой смене\n\n" +
     "Выберите тип:";
-
   const kb = Markup.inlineKeyboard([
     [
-      Markup.button.callback(
-        "1) По невыполненным задачам за смену",
-        "admin_resp_type_uncompleted"
-      ),
+      {
+        text: "✅ по невыполненным задачам за смену",
+        callback_data: "admin_resp_kind_uncompleted_tasks",
+      },
     ],
     [
-      Markup.button.callback(
-        "2) По жалобам на прошлую смену",
-        "admin_resp_type_complaints"
-      ),
+      {
+        text: "📝 по жалобам на прошлую смену",
+        callback_data: "admin_resp_kind_complaints",
+      },
     ],
-    [Markup.button.callback("⬅️ Назад", "admin_shift_settings")],
+    [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
   ]);
-
   await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
-async function renderPickPoint(ctx) {
-  const st = getSt(ctx.from.id);
+async function showPickPoint(ctx, kind) {
   const points = await loadPoints();
-
-  let text = `📍 <b>Выбор точки</b>\n\n`;
-  text += `Тип: <b>${esc(eventTypeTitle(st.eventType))}</b>\n\n`;
-  text += `Выберите торговую точку:`;
-
+  const text = `${kindLabel(kind)}\n\n📍 Выберите точку:`;
   const rows = points.map((p) => [
-    Markup.button.callback(`🏬 ${p.title}`, `admin_resp_point_${p.id}`),
+    Markup.button.callback(p.title, `admin_resp_point_${kind}_${p.id}`),
   ]);
   rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
-
   await deliver(
     ctx,
     { text, extra: Markup.inlineKeyboard(rows) },
@@ -129,78 +102,72 @@ async function renderPickPoint(ctx) {
   );
 }
 
-async function renderList(ctx) {
-  const st = getSt(ctx.from.id);
-  if (!st?.pointId || !st?.eventType) return renderRoot(ctx);
-
-  const pRes = await pool.query(
-    `SELECT id, title FROM trade_points WHERE id=$1 LIMIT 1`,
-    [Number(st.pointId)]
+async function showPointCard(ctx, kind, tradePointId) {
+  const tp = await pool.query(
+    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tradePointId]
   );
-  const point = pRes.rows[0];
-  if (!point) {
-    await ctx
-      .answerCbQuery("Точка не найдена", { show_alert: true })
-      .catch(() => {});
-    return renderPickPoint(ctx);
-  }
+  const title = tp.rows[0]?.title || `#${tradePointId}`;
 
-  const list = await loadResponsibles(st.pointId, st.eventType);
+  const resp = await loadResp(tradePointId, kind);
 
-  let text = `👤 <b>Ответственные</b>\n\n`;
-  text += `• Тип: <b>${esc(eventTypeTitle(st.eventType))}</b>\n`;
-  text += `• Точка: <b>${esc(point.title)}</b>\n\n`;
+  let text = `${kindLabel(kind)}\n\n` + `📍 Точка: <b>${title}</b>\n\n`;
 
-  if (!list.length) {
-    text += `Пока никто не назначен.\n`;
+  if (!resp.length) {
+    text += "Пока нет назначенных ответственных.\n";
   } else {
-    text += `<b>Список:</b>\n`;
-    list.forEach((u, i) => {
-      const n = i + 1;
-      const uname = u.username ? ` @${u.username}` : "";
-      const phone = u.work_phone ? ` • ${u.work_phone}` : "";
-      text += `${n}. ${esc(u.full_name || "Без имени")}${esc(uname)}${esc(
-        phone
-      )}\n`;
+    text += "Ответственные:\n";
+    resp.forEach((r, i) => {
+      text += `${i + 1}. ${r.full_name}\n`;
     });
-    text += `\nНажмите на человека ниже, чтобы снять назначение.\n`;
   }
 
-  const rows = [];
-  if (list.length) {
-    const btns = list.map((u, idx) =>
-      Markup.button.callback(`${idx + 1}`, `admin_resp_remove_${u.user_id}`)
+  const kb = [];
+
+  if (resp.length) {
+    // кнопки удаления 1..N
+    const btns = resp.map((r, idx) =>
+      Markup.button.callback(
+        `${idx + 1}`,
+        `admin_resp_del_${r.id}_${kind}_${tradePointId}`
+      )
     );
-    for (let i = 0; i < btns.length; i += 5) rows.push(btns.slice(i, i + 5));
+    for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
+    kb.push([{ text: "🗑 удалить (нажмите номер)", callback_data: "noop" }]);
   }
 
-  rows.push([
-    Markup.button.callback("➕ Назначить ещё", "admin_resp_add_pick_user"),
+  kb.push([
+    {
+      text: "➕ Назначить ответственного",
+      callback_data: `admin_resp_add_${kind}_${tradePointId}`,
+    },
   ]);
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_pick_point")]);
+  kb.push([{ text: "⬅️ Назад", callback_data: `admin_resp_kind_${kind}` }]);
 
   await deliver(
     ctx,
-    { text, extra: Markup.inlineKeyboard(rows) },
+    { text, extra: Markup.inlineKeyboard(kb) },
     { edit: true }
   );
 }
 
-async function renderPickUser(ctx) {
-  const st = getSt(ctx.from.id);
-  const users = await loadUsersForPick(40);
+async function showPickUser(ctx, kind, tradePointId) {
+  stSet(ctx.from.id, { step: "pick_user", kind, tradePointId });
 
-  let text = `➕ <b>Назначить ответственного</b>\n\n`;
-  text += `Выберите пользователя (можно назначать любого сотрудника, не важно админ он или нет):\n`;
+  const users = await loadUsersForPick();
+  const text =
+    "➕ <b>Назначить ответственного</b>\n\n" +
+    "Выберите пользователя (можно назначать любого сотрудника, не важно админ он или нет):";
 
-  const rows = [];
-  users.forEach((u) => {
-    const uname = u.username ? ` @${u.username}` : "";
-    const label = `${u.full_name || "Без имени"}${uname}`;
-    rows.push([Markup.button.callback(label, `admin_resp_add_user_${u.id}`)]);
-  });
-
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_list")]);
+  const rows = users.map((u) => [
+    Markup.button.callback(u.full_name, `admin_resp_pick_${u.id}`),
+  ]);
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_resp_point_${kind}_${tradePointId}`
+    ),
+  ]);
 
   await deliver(
     ctx,
@@ -210,178 +177,122 @@ async function renderPickUser(ctx) {
 }
 
 function registerAdminResponsibles(bot, ensureUser, logError) {
-  // entry
   bot.action("admin_resp_root", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-
-      setSt(ctx.from.id, { step: "root", eventType: null, pointId: null });
-      await renderRoot(ctx);
+      stClear(ctx.from.id);
+      await showRoot(ctx);
     } catch (e) {
       logError("admin_resp_root", e);
     }
   });
 
-  bot.action("admin_resp_type_uncompleted", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-
-      setSt(ctx.from.id, {
-        step: "pick_point",
-        eventType: "uncompleted_tasks",
-        pointId: null,
-      });
-      await renderPickPoint(ctx);
-    } catch (e) {
-      logError("admin_resp_type_uncompleted", e);
-    }
-  });
-
-  bot.action("admin_resp_type_complaints", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-
-      setSt(ctx.from.id, {
-        step: "pick_point",
-        eventType: "complaints",
-        pointId: null,
-      });
-      await renderPickPoint(ctx);
-    } catch (e) {
-      logError("admin_resp_type_complaints", e);
-    }
-  });
-
-  bot.action("admin_resp_pick_point", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-      await renderPickPoint(ctx);
-    } catch (e) {
-      logError("admin_resp_pick_point", e);
-    }
-  });
-
-  bot.action(/^admin_resp_point_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-
-      const pointId = Number(ctx.match[1]);
-      const st = getSt(ctx.from.id);
-      if (!st?.eventType) {
-        setSt(ctx.from.id, { step: "root", pointId: null });
-        return renderRoot(ctx);
+  bot.action(
+    /^admin_resp_kind_(uncompleted_tasks|complaints)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+        const kind = ctx.match[1];
+        stClear(ctx.from.id);
+        await showPickPoint(ctx, kind);
+      } catch (e) {
+        logError("admin_resp_kind", e);
       }
-
-      setSt(ctx.from.id, { step: "list", pointId });
-      await renderList(ctx);
-    } catch (e) {
-      logError("admin_resp_point_pick", e);
     }
-  });
+  );
 
-  bot.action("admin_resp_list", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-      await renderList(ctx);
-    } catch (e) {
-      logError("admin_resp_list", e);
+  bot.action(
+    /^admin_resp_point_(uncompleted_tasks|complaints)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+        const kind = ctx.match[1];
+        const tpId = Number(ctx.match[2]);
+        stClear(ctx.from.id);
+        await showPointCard(ctx, kind, tpId);
+      } catch (e) {
+        logError("admin_resp_point", e);
+      }
     }
-  });
+  );
 
-  bot.action("admin_resp_add_pick_user", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-
-      const st = getSt(ctx.from.id);
-      if (!st?.pointId || !st?.eventType) return renderRoot(ctx);
-
-      setSt(ctx.from.id, { step: "pick_user" });
-      await renderPickUser(ctx);
-    } catch (e) {
-      logError("admin_resp_add_pick_user", e);
+  bot.action(
+    /^admin_resp_add_(uncompleted_tasks|complaints)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+        const kind = ctx.match[1];
+        const tpId = Number(ctx.match[2]);
+        await showPickUser(ctx, kind, tpId);
+      } catch (e) {
+        logError("admin_resp_add", e);
+      }
     }
-  });
+  );
 
-  bot.action(/^admin_resp_add_user_(\d+)$/, async (ctx) => {
+  bot.action(/^admin_resp_pick_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const admin = await ensureUser(ctx);
       if (!isAdmin(admin)) return;
 
-      const userId = Number(ctx.match[1]);
-      const st = getSt(ctx.from.id);
-      if (!st?.pointId || !st?.eventType) return renderRoot(ctx);
+      const st = stGet(ctx.from.id);
+      if (!st || st.step !== "pick_user") return;
+
+      const pickedUserId = Number(ctx.match[1]);
 
       await pool.query(
         `
-        INSERT INTO trade_point_responsibles (trade_point_id, event_type, user_id, created_by_user_id, is_active)
-        VALUES ($1, $2, $3, $4, TRUE)
-        ON CONFLICT (trade_point_id, event_type, user_id)
-        DO UPDATE SET is_active = TRUE, created_by_user_id = EXCLUDED.created_by_user_id
+        INSERT INTO responsible_assignments (trade_point_id, kind, user_id, is_active)
+        VALUES ($1,$2,$3,TRUE)
+        ON CONFLICT (trade_point_id, kind, user_id)
+        DO UPDATE SET is_active=TRUE
         `,
-        [Number(st.pointId), st.eventType, userId, admin.id]
+        [Number(st.tradePointId), st.kind, pickedUserId]
       );
 
+      stClear(ctx.from.id);
       await ctx.answerCbQuery("✅ Назначено").catch(() => {});
-      setSt(ctx.from.id, { step: "list" });
-      await renderList(ctx);
+      await showPointCard(ctx, st.kind, Number(st.tradePointId));
     } catch (e) {
-      logError("admin_resp_add_user", e);
+      logError("admin_resp_pick", e);
     }
   });
 
-  bot.action(/^admin_resp_remove_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const admin = await ensureUser(ctx);
-      if (!isAdmin(admin)) return;
+  bot.action(
+    /^admin_resp_del_(\d+)_(uncompleted_tasks|complaints)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
 
-      const removeUserId = Number(ctx.match[1]);
-      const st = getSt(ctx.from.id);
-      if (!st?.pointId || !st?.eventType) return renderRoot(ctx);
+        const id = Number(ctx.match[1]);
+        const kind = ctx.match[2];
+        const tpId = Number(ctx.match[3]);
 
-      await pool.query(
-        `
-        UPDATE trade_point_responsibles
-        SET is_active = FALSE
-        WHERE trade_point_id = $1
-          AND event_type = $2
-          AND user_id = $3
-        `,
-        [Number(st.pointId), st.eventType, removeUserId]
-      );
+        await pool.query(
+          `UPDATE responsible_assignments SET is_active=FALSE WHERE id=$1`,
+          [id]
+        );
 
-      await ctx.answerCbQuery("🗑 Удалено").catch(() => {});
-      await renderList(ctx);
-    } catch (e) {
-      logError("admin_resp_remove", e);
+        await ctx.answerCbQuery("🗑 Удалено").catch(() => {});
+        await showPointCard(ctx, kind, tpId);
+      } catch (e) {
+        logError("admin_resp_del", e);
+      }
     }
-  });
+  );
 
-  // optional: очистка стейта если надо
-  bot.action("admin_resp_clear_state", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      clearSt(ctx.from.id);
-      await renderRoot(ctx);
-    } catch (e) {
-      logError("admin_resp_clear_state", e);
-    }
-  });
+  bot.action("noop", async (ctx) => ctx.answerCbQuery().catch(() => {}));
 }
 
 module.exports = { registerAdminResponsibles };

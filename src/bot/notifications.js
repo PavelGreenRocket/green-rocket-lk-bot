@@ -1874,4 +1874,5 @@ async function countUnreadNotifications(userId) {
 module.exports = {
   registerNotifications,
   countUnreadNotifications,
+  insertNotificationAndFanout,
 };
