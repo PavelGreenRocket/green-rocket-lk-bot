@@ -506,7 +506,7 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       // я делаю точный патч после того как ты скажешь: КАКОЙ callback у твоего пикера дат
       // (в проекте он точно есть, раз ты говорил что уже реализован)
     })
-);
+  );
 
   bot.action("shift_close_to_menu", async (ctx) => {
     try {
@@ -856,7 +856,7 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
 
       const { createAlert } = require("../uncompletedAlerts"); // путь подправь по месту
 
-      await createAlert(bot, { shiftId: shift.id });
+      await createAlert(bot, { shiftId: st.shiftId });
 
       await pool.query(
         `UPDATE shift_closings SET finished_at=NOW() WHERE shift_id=$1`,

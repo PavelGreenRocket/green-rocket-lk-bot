@@ -74,7 +74,7 @@ async function getResponsibles(tradePointId) {
   const r = await pool.query(
     `
     SELECT u.id
-    FROM trade_point_responsibles r
+    FROM responsible_assignments  r
     JOIN users u ON u.id = r.user_id
     WHERE r.trade_point_id = $1
       AND r.kind = 'complaints'

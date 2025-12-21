@@ -71,10 +71,10 @@ async function hasResponsibility(userId, kind) {
   const r = await pool.query(
     `
     SELECT 1
-    FROM trade_point_responsibles
-    WHERE user_id = $1
-      AND kind = $2
-      AND is_active = true
+    FROM responsible_assignments
+WHERE user_id = $1
+  AND kind = $2
+  AND is_active = true
     LIMIT 1
     `,
     [userId, kind]
@@ -174,6 +174,7 @@ async function markAllAsReadAny(userId) {
 async function getUserHistoryPage({
   userId,
   kind,
+  category,
   page,
   pageSize = 10,
   sender,
@@ -215,7 +216,7 @@ async function getUserHistoryPage({
       AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
 ${senderWhere}
 ${categoryWhere}
-ORDER BY
+ORDER BY n.created_at DESC, n.id DESC
     LIMIT $${params.length - 1} OFFSET $${params.length}
     `,
     params
@@ -403,6 +404,7 @@ async function showUserHistory(ctx, user, { edit = true } = {}) {
   const items = await getUserHistoryPage({
     userId: user.id,
     kind,
+    category: st.category || "other",
     page,
     pageSize: 10,
     sender,
