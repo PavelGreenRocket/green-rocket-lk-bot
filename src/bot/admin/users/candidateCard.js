@@ -146,6 +146,30 @@ function buildRestoreKeyboard(candidate) {
   return Markup.inlineKeyboard(buttons);
 }
 
+async function getActiveShiftToday(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT s.id, s.trade_point_id, tp.title AS point_title
+    FROM shifts s
+    LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+    WHERE s.user_id = $1
+      AND s.opened_at::date = CURRENT_DATE
+      AND s.status IN ('opening_in_progress','opened')
+    ORDER BY s.id DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+function escHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 // ----- Основной рендер карточки -----
 async function showCandidateCardLk(ctx, candidateId, options = {}) {
   const { edit = true } = options;
@@ -429,13 +453,14 @@ FROM candidates c
             ),
           ]);
         }
-        // 📝 задачи смены — показываем ВСЕГДА для стажёра
-        rows.push([
-          Markup.button.callback(
-            "📝Задачи смены",
-            `lk_intern_shift_tasks_${cand.id}`
-          ),
-        ]);
+        if (activeShift) {
+          rows.push([
+            Markup.button.callback(
+              "📝 задачи смены",
+              `lk_intern_shift_tasks_${cand.id}`
+            ),
+          ]);
+        }
       } else {
         // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
         if (isMentor) {
@@ -752,13 +777,101 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
   });
 
   bot.action(/^lk_intern_shift_tasks_(\d+)$/, async (ctx) => {
-    try {
-      await ctx
-        .answerCbQuery("📝 Задачи смены — в разработке.")
-        .catch(() => {});
-    } catch (err) {
-      logError("lk_intern_shift_tasks", err);
+    const candId = Number(ctx.match[1]);
+    await ctx.answerCbQuery().catch(() => {});
+
+    // достаём lk_user_id стажёра (который в users)
+    const cRes = await pool.query(
+      `
+    SELECT u.id AS lk_user_id, COALESCE(u.full_name,'Без имени') AS full_name
+    FROM candidates c
+    LEFT JOIN users u ON u.candidate_id = c.id
+    WHERE c.id = $1
+    LIMIT 1
+    `,
+      [candId]
+    );
+
+    const lkUserId = cRes.rows[0]?.lk_user_id || null;
+    const fullName = cRes.rows[0]?.full_name || "Без имени";
+
+    if (!lkUserId) {
+      await ctx.editMessageText(
+        "⚠️ У стажёра нет привязанного пользователя ЛК."
+      );
+      return;
     }
+
+    const activeShift = await getActiveShiftToday(lkUserId);
+    if (!activeShift) {
+      await ctx.editMessageText(
+        "⚠️ У пользователя нет активной смены сегодня."
+      );
+      return;
+    }
+
+    // задачи на сегодня (instances)
+    const tRes = await pool.query(
+      `
+    SELECT
+      ti.id,
+      ti.status,
+      tt.title,
+      tt.answer_type,
+      last_ans.answer_text,
+      last_ans.answer_number,
+      last_ans.file_type,
+      last_ans.file_id
+    FROM task_instances ti
+    JOIN task_templates tt ON tt.id = ti.template_id
+    LEFT JOIN LATERAL (
+      SELECT a.*
+      FROM task_instance_answers a
+      WHERE a.task_instance_id = ti.id
+      ORDER BY a.created_at DESC
+      LIMIT 1
+    ) last_ans ON TRUE
+    WHERE ti.user_id = $1
+      AND ti.for_date = CURRENT_DATE
+    ORDER BY ti.id
+    `,
+      [lkUserId]
+    );
+
+    let text = `📝 <b>Задачи смены</b>\n\n`;
+    text += `👤 <b>${escHtml(fullName)}</b>\n`;
+    text += `📍 Точка: <b>${escHtml(
+      activeShift.point_title || "не указано"
+    )}</b>\n\n`;
+
+    if (!tRes.rows.length) {
+      text += `⚠️ На сегодня задач нет.\n`;
+    } else {
+      text += `<b>Список задач на сегодня:</b>\n`;
+      for (let i = 0; i < tRes.rows.length; i++) {
+        const r = tRes.rows[i];
+        const done = r.status === "done";
+        const icon = done ? "✅" : "▫️";
+        text += `${i + 1}. ${icon} ${escHtml(r.title)}\n`;
+      }
+    }
+
+    const rows = [];
+
+    // "+ создать ещё задачу" → в ваш существующий админский экран по точке
+    rows.push([
+      Markup.button.callback(
+        "➕ создать ещё задачу",
+        `admin_shift_tasks_point_${activeShift.trade_point_id}`
+      ),
+    ]);
+
+    rows.push([Markup.button.callback("⬅️ Назад", `lk_cand_open_${candId}`)]);
+
+    await ctx.editMessageText(text, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(rows),
+    });
   });
 
   // toggle "📋 Открыть карточку"

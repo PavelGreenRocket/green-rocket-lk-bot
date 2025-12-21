@@ -535,6 +535,30 @@ ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
   return res.rows;
 }
 
+async function getActiveShiftToday(userId) {
+  const { rows } = await pool.query(
+    `
+    SELECT s.id, s.trade_point_id, tp.title AS point_title
+    FROM shifts s
+    LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+    WHERE s.user_id = $1
+      AND s.opened_at::date = CURRENT_DATE
+      AND s.status IN ('opening_in_progress','opened')
+    ORDER BY s.id DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+function escHtml(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 // ----------------------------------------
 // ОТРИСОВКА СПИСКА КАНДИДАТОВ
 // ----------------------------------------
@@ -1946,13 +1970,15 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
 
     const rows = [];
 
-    // 1) задачи смены (заглушка)
-    rows.push([
-      Markup.button.callback(
-        "📝 задачи смены",
-        `lk_worker_shift_tasks_${u.id}`
-      ),
-    ]);
+    const activeShift = await getActiveShiftToday(workerId);
+    if (activeShift) {
+      rows.push([
+        Markup.button.callback(
+          "📝 задачи смены",
+          `lk_worker_shift_tasks_${workerId}`
+        ),
+      ]);
+    }
 
     // 2) успеваемость (заглушка)
     rows.push([
@@ -2223,13 +2249,69 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     }
   });
 
-  // Заглушка: задачи смены
   bot.action(/^lk_worker_shift_tasks_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
-    } catch (err) {
-      logError("lk_worker_shift_tasks", err);
+    const workerId = Number(ctx.match[1]);
+    await ctx.answerCbQuery().catch(() => {});
+
+    const uRes = await pool.query(
+      `SELECT id, COALESCE(full_name,'Без имени') AS full_name FROM users WHERE id = $1 LIMIT 1`,
+      [workerId]
+    );
+    const fullName = uRes.rows[0]?.full_name || "Без имени";
+
+    const activeShift = await getActiveShiftToday(workerId);
+    if (!activeShift) {
+      await ctx.editMessageText("⚠️ У сотрудника нет активной смены сегодня.");
+      return;
     }
+
+    const tRes = await pool.query(
+      `
+    SELECT
+      ti.id,
+      ti.status,
+      tt.title
+    FROM task_instances ti
+    JOIN task_templates tt ON tt.id = ti.template_id
+    WHERE ti.user_id = $1
+      AND ti.for_date = CURRENT_DATE
+    ORDER BY ti.id
+    `,
+      [workerId]
+    );
+
+    let text = `📝 <b>Задачи смены</b>\n\n`;
+    text += `👤 <b>${escHtml(fullName)}</b>\n`;
+    text += `📍 Точка: <b>${escHtml(
+      activeShift.point_title || "не указано"
+    )}</b>\n\n`;
+
+    if (!tRes.rows.length) {
+      text += `⚠️ На сегодня задач нет.\n`;
+    } else {
+      text += `<b>Список задач на сегодня:</b>\n`;
+      for (let i = 0; i < tRes.rows.length; i++) {
+        const r = tRes.rows[i];
+        const icon = r.status === "done" ? "✅" : "▫️";
+        text += `${i + 1}. ${icon} ${escHtml(r.title)}\n`;
+      }
+    }
+
+    const rows = [];
+    rows.push([
+      Markup.button.callback(
+        "➕ создать ещё задачу",
+        `admin_shift_tasks_point_${activeShift.trade_point_id}`
+      ),
+    ]);
+    rows.push([
+      Markup.button.callback("⬅️ Назад", `admin_worker_open_${workerId}`),
+    ]);
+
+    await ctx.editMessageText(text, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(rows),
+    });
   });
 
   // Заглушка: успеваемость
