@@ -5,6 +5,7 @@ const { registerAiSettings } = require("./aiSettings");
 const { registerAdminShiftSettings } = require("./shiftSettings");
 const { registerAdminShiftOpeningTasks } = require("./shiftOpeningTasks");
 const { registerAdminShiftClosingTasks } = require("./shiftClosingTasks");
+const { registerAdminResponsibles } = require("./responsibles");
 
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
@@ -25,6 +26,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
   registerAdminShiftSettings(bot, ensureUser, logError);
   registerAdminShiftOpeningTasks(bot, ensureUser, logError);
   registerAdminShiftClosingTasks(bot, ensureUser, logError);
+  registerAdminResponsibles(bot, ensureUser, logError);
 
   registerAiSettings(bot, ensureUser, logError);
   // -----------------------------

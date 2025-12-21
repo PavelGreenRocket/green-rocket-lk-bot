@@ -317,6 +317,12 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
             callback_data: "admin_shift_closing_root",
           },
         ],
+        [
+          {
+            text: "👤 Назначение ответственных",
+            callback_data: "admin_resp_root",
+          },
+        ],
         [{ text: "⬅️ Назад", callback_data: "admin_settings_company" }],
       ]);
 
