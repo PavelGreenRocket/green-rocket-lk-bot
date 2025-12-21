@@ -355,15 +355,16 @@ function registerTodayTasks(bot, ensureUser, logError) {
           .catch(() => {});
         return;
       }
-      if (row.status === "done") {
-        // ✅ обычная задача (button) — можно отменить выполнение
-        if (row.answer_type === "button") {
+      // ✅ "обычная" задача (button) — кликом отмечаем/снимаем выполнение
+      if (row.answer_type === "button") {
+        if (row.status === "done") {
+          // отмена выполнения
           await pool.query(
             `
-        UPDATE task_instances
-        SET status = 'open', done_at = NULL
-        WHERE id = $1
-      `,
+              UPDATE task_instances
+              SET status = 'open', done_at = NULL
+              WHERE id = $1
+            `,
             [row.id]
           );
 
@@ -371,7 +372,25 @@ function registerTodayTasks(bot, ensureUser, logError) {
           await showTodayTasks(ctx, user);
           return;
         }
+
+        // отметить выполненной
+        await pool.query(
+          `
+            UPDATE task_instances
+            SET status = 'done', done_at = NOW()
+            WHERE id = $1
+          `,
+          [row.id]
+        );
+
+        await ctx.answerCbQuery("Готово ✅").catch(() => {});
+        await showTodayTasks(ctx, user);
+        return;
       }
+
+      // Для text/number/photo/video:
+      // даже если задача уже "done", повторный клик НЕ отменяет,
+      // а просто открывает ввод, чтобы заменить ответ.
 
       // switch to await answer
       setTaskState(ctx.from.id, {
