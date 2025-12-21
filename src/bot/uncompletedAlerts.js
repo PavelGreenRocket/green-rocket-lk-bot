@@ -102,9 +102,15 @@ async function createAlert(bot, { shiftId }) {
   const responsibles = await getResponsibles(Number(shift.trade_point_id));
   if (!responsibles.length) return;
 
-  const dateRu = formatIsoDateRu(shift.for_date_iso);
+  // дата в RU
+  const d = new Date(`${shift.for_date_iso}T00:00:00Z`);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(d.getFullYear());
+  const dateRu = `${dd}.${mm}.${yyyy}`;
 
-  const cleanText =
+  // красивый текст для сообщения
+  let msgText =
     `⚠️ *Смена закрыта с невыполненными задачами*\n\n` +
     `Точка: *${shift.point_title}*\n` +
     `Дата: *${dateRu}*\n\n` +
@@ -113,21 +119,20 @@ async function createAlert(bot, { shiftId }) {
     `Username: ${
       shift.worker_username ? `@${shift.worker_username}` : "—"
     }\n\n` +
-    `Невыполнено:\n` +
-    items
-      .map((t, i) => {
-        const tag = t.schedule_type === "single" ? "разовая" : "по расписанию";
-        return `${i + 1}. ${t.title} (${tag})`;
-      })
-      .join("\n");
+    `Невыполнено:\n`;
 
-  // маркер только для БД, чтобы работала фильтрация категорий
-  const storedText = `${CAT_UNCOMPLETED}\n${cleanText}`;
+  items.forEach((t, i) => {
+    const tag = t.schedule_type === "single" ? "разовая" : "по расписанию";
+    msgText += `${i + 1}. ${t.title} (${tag})\n`;
+  });
+
+  // текст для БД (с тегом категории)
+  const dbText = `${CAT_UNCOMPLETED}\n${msgText}`;
 
   // store notification (для истории в "Пользовательские → Невыполненные задачи")
   await insertNotificationAndFanout({
     createdBy: Number(shift.user_id),
-    text: storedText,
+    text: dbText,
     recipientUserIds: responsibles.map((r) => r.id),
   });
 
@@ -146,7 +151,8 @@ async function createAlert(bot, { shiftId }) {
   // send once
   for (const r of responsibles) {
     await bot.telegram
-      .sendMessage(r.telegram_id, cleanText, extra)
+      .sendMessage(r.telegram_id, msgText, extra)
+
       .catch(() => {});
   }
 }

@@ -73,6 +73,7 @@ async function buildMainKeyboard(user) {
         WHERE user_id = $1
           AND opened_at::date = CURRENT_DATE
           AND status IN ('opening_in_progress','opened','closing_in_progress')
+          AND trade_point_id IS NOT NULL
         ORDER BY opened_at DESC
         LIMIT 1
       `,

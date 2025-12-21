@@ -485,7 +485,7 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     deleteSingleTasks,
   } = require("../../bot/uncompletedAlerts");
 
-  // удалить
+  // удалить (только разовые задачи)
   bot.action(/^lk_uncompl_del_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -496,10 +496,131 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       const n = await deleteSingleTasks(shiftId);
 
       await ctx
-        .answerCbQuery(n ? `Удалено задач: ${n}` : "Нет разовых задач")
+        .answerCbQuery(
+          n ? `Удалено разовых задач: ${n}` : "Разовых задач нет",
+          {
+            show_alert: false,
+          }
+        )
         .catch(() => {});
     } catch (e) {
       logError("lk_uncompl_del", e);
+    }
+  });
+
+  // перенести -> показать выбор дат
+  bot.action(/^lk_uncompl_move_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const shiftId = Number(ctx.match[1]);
+
+      const dates = [];
+      // ближайшие 7 дней (как “выбрать другую дату” по смыслу)
+      for (let i = 0; i < 7; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() + i);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        const iso = `${yyyy}-${mm}-${dd}`;
+        const ru = `${dd}.${mm}.${yyyy}`;
+        dates.push({ iso, ru });
+      }
+
+      const rows = dates.map((x) => [
+        Markup.button.callback(
+          x.ru,
+          `lk_uncompl_move_date_${shiftId}_${x.iso}`
+        ),
+      ]);
+      rows.push([
+        Markup.button.callback("⬅️ Назад", `lk_uncompl_back_${shiftId}`),
+      ]);
+
+      await ctx
+        .editMessageText(
+          "📅 *Перенос разовых задач*\n\nВыберите дату, на которую перенести *разовые* невыполненные задачи:",
+          { parse_mode: "Markdown", ...Markup.inlineKeyboard(rows) }
+        )
+        .catch(async () => {
+          // если нельзя edit (например, сообщение уже старое) — просто ответим новым
+          await ctx.reply(
+            "📅 *Перенос разовых задач*\n\nВыберите дату, на которую перенести *разовые* невыполненные задачи:",
+            { parse_mode: "Markdown", ...Markup.inlineKeyboard(rows) }
+          );
+        });
+    } catch (e) {
+      logError("lk_uncompl_move", e);
+    }
+  });
+
+  // выбор даты переноса
+  bot.action(
+    /^lk_uncompl_move_date_(\d+)_(\d{4}-\d{2}-\d{2})$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!user) return;
+
+        const shiftId = Number(ctx.match[1]);
+        const isoDate = ctx.match[2];
+
+        const moved = await moveSingleTasksToDate(shiftId, isoDate);
+
+        const dd = isoDate.slice(8, 10);
+        const mm = isoDate.slice(5, 7);
+        const yyyy = isoDate.slice(0, 4);
+        const ru = `${dd}.${mm}.${yyyy}`;
+
+        await ctx
+          .editMessageText(
+            moved
+              ? `✅ Перенесено разовых задач: *${moved}*\nДата: *${ru}*`
+              : "Разовых задач для переноса нет.",
+            { parse_mode: "Markdown" }
+          )
+          .catch(async () => {
+            await ctx.reply(
+              moved
+                ? `✅ Перенесено разовых задач: *${moved}*\nДата: *${ru}*`
+                : "Разовых задач для переноса нет.",
+              { parse_mode: "Markdown" }
+            );
+          });
+      } catch (e) {
+        logError("lk_uncompl_move_date", e);
+      }
+    }
+  );
+
+  // назад из выбора дат (возвращаем исходное уведомление с кнопками)
+  bot.action(/^lk_uncompl_back_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const shiftId = Number(ctx.match[1]);
+
+      await ctx
+        .editMessageReplyMarkup(
+          Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "📅 Перенести",
+                `lk_uncompl_move_${shiftId}`
+              ),
+              Markup.button.callback("🗑 Удалить", `lk_uncompl_del_${shiftId}`),
+            ],
+          ]).reply_markup
+        )
+        .catch(() => {});
+    } catch (e) {
+      logError("lk_uncompl_back", e);
     }
   });
 
@@ -535,70 +656,6 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     rows.push([Markup.button.callback("⬅️ Назад", "lk_notifications")]);
     return Markup.inlineKeyboard(rows);
   }
-
-  // перенести -> показываем выбор дат
-  bot.action(/^lk_uncompl_move_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-
-      const shiftId = Number(ctx.match[1]);
-      const startIso = await getCurrentDateStr();
-      const kb = buildMoveDateKeyboard(shiftId, startIso);
-
-      await deliver(
-        ctx,
-        {
-          text:
-            "📅 *Перенос разовых задач*\n\n" +
-            "Выберите дату, на которую перенести разовые (single) невыполненные задачи.",
-          extra: { ...kb, parse_mode: "Markdown" },
-        },
-        { edit: true }
-      );
-    } catch (e) {
-      logError("lk_uncompl_move", e);
-    }
-  });
-
-  // выбрали дату переноса
-  bot.action(
-    /^lk_uncompl_move_date_(\d+)_(\d{4}-\d{2}-\d{2})$/,
-    async (ctx) => {
-      try {
-        await ctx.answerCbQuery().catch(() => {});
-        const user = await ensureUser(ctx);
-        if (!user) return;
-
-        const shiftId = Number(ctx.match[1]);
-        const targetDate = ctx.match[2];
-
-        const n = await moveSingleTasksToDate(shiftId, targetDate);
-
-        await deliver(
-          ctx,
-          {
-            text: n
-              ? `✅ Перенесено разовых задач: *${n}*\nДата: *${targetDate}*`
-              : "Нет разовых (single) невыполненных задач для переноса.",
-            extra: Markup.inlineKeyboard([
-              [
-                Markup.button.callback(
-                  "⬅️ В меню уведомлений",
-                  "lk_notifications"
-                ),
-              ],
-              [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
-            ]),
-          },
-          { edit: true }
-        );
-      } catch (e) {
-        logError("lk_uncompl_move_date", e);
-      }
-    }
-  );
 
   bot.action("shift_close_to_menu", async (ctx) => {
     try {
