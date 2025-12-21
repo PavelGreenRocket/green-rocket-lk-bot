@@ -573,7 +573,7 @@ function buildWeekdaysPicker(mask, backCb = "admin_shift_tasks_add_period") {
       ),
     ]);
   }
-  rows.push([Markup.button.callback("⬅️ Назад", "backCb")]);
+  rows.push([Markup.button.callback("⬅️ Назад", backCb)]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -732,8 +732,11 @@ async function renderPointScreen(ctx, adminUser) {
 
   const all = await loadAssignmentsForPoint(st.pointId);
 
+  // в основном экране показываем только активные (удалённые/выключенные скрываем)
+  const allActive = all.filter((r) => r.is_active === true);
+
   // матчим на дату
-  const matched = all.filter((r) => scheduleMatchesDate(r, st.dateISO));
+  const matched = allActive.filter((r) => scheduleMatchesDate(r, st.dateISO));
 
   // сортировка: сначала разовые, потом расписание
   const singles = matched.filter((r) => r.schedule_type === "single");
@@ -1516,12 +1519,14 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
 
   bot.action("admin_shift_tasks_del_apply", async (ctx) => {
     try {
-      await ctx.answerCbQuery("Удаляю...").catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
 
       const st = getSt(ctx.from.id);
-      const ids = (st.deleteSelected || []).map(Number).filter(Boolean);
+      const ids = Array.from(new Set(st?.deleteSelected || []))
+        .map((x) => parseInt(x, 10))
+        .filter((x) => Number.isFinite(x));
+
       if (!ids.length) {
         await ctx
           .answerCbQuery("Ничего не выбрано", { show_alert: true })
@@ -1529,11 +1534,23 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         return;
       }
 
-      // мягкое удаление: выключаем
-      await pool.query(
-        `UPDATE task_assignments SET is_active = FALSE WHERE id = ANY($1::int[])`,
+      await ctx.answerCbQuery("Удаляю...").catch(() => {});
+
+      const res = await pool.query(
+        `UPDATE task_assignments
+         SET is_active = FALSE
+       WHERE id = ANY($1::int[])`,
         [ids]
       );
+
+      // Если вдруг 0 строк обновилось — покажем алёрт (значит ids не те / уже удалено)
+      if (!res.rowCount) {
+        await ctx
+          .answerCbQuery("Не удалось удалить (0 записей). Проверь IDs.", {
+            show_alert: true,
+          })
+          .catch(() => {});
+      }
 
       setSt(ctx.from.id, { mode: "view", deleteSelected: [], filter: "all" });
       await renderPointScreen(ctx, user);
