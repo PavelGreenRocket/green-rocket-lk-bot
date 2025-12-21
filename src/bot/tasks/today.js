@@ -28,8 +28,25 @@ function weekdayBit(d) {
   return 1 << (js - 1); // Mon->0 ... Sat->5
 }
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+async function dbTodayISO() {
+  const r = await pool.query(`SELECT CURRENT_DATE::text AS d`);
+  return r.rows[0]?.d || new Date().toISOString().slice(0, 10);
+}
+
+function toISODate(v) {
+  if (!v) return null;
+
+  if (typeof v === "string") return v.slice(0, 10);
+
+  // ВАЖНО: не toISOString() (UTC может сместить дату)
+  if (v instanceof Date) {
+    const y = v.getFullYear();
+    const m = String(v.getMonth() + 1).padStart(2, "0");
+    const d = String(v.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  return String(v).slice(0, 10);
 }
 
 async function getActiveShiftForUser(userId) {
@@ -50,7 +67,7 @@ async function getActiveShiftForUser(userId) {
 
 function scheduleMatchesToday(row, today, todayDateObj) {
   if (row.schedule_type === "single") {
-    return row.single_date === today;
+    return toISODate(row.single_date) === today;
   }
   if (row.schedule_type === "weekly") {
     const bit = weekdayBit(todayDateObj);
@@ -60,7 +77,11 @@ function scheduleMatchesToday(row, today, todayDateObj) {
   if (row.schedule_type === "every_x_days") {
     const x = Number(row.every_x_days || 0);
     if (!x || !row.start_date) return false;
-    const start = new Date(row.start_date);
+
+    const startISO = toISODate(row.start_date);
+    if (!startISO) return false;
+
+    const start = new Date(startISO + "T00:00:00");
     const diffMs = todayDateObj.getTime() - start.getTime();
     const diffDays = Math.floor(diffMs / (24 * 3600 * 1000));
     return diffDays >= 0 && diffDays % x === 0;
@@ -75,8 +96,7 @@ function escHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-async function ensureTodayInstances(user, shift) {
-  const today = todayISO();
+async function ensureTodayInstances(user, shift, today) {
   const todayObj = new Date(today + "T00:00:00");
 
   // targets for individual
@@ -148,8 +168,7 @@ async function ensureTodayInstances(user, shift) {
   }
 }
 
-async function loadTodayInstances(user) {
-  const today = todayISO();
+async function loadTodayInstances(user, today) {
   const res = await pool.query(
     `
       SELECT
@@ -214,9 +233,12 @@ function buildKeyboard(rows) {
 async function showTodayTasks(ctx, user) {
   const shift = await getActiveShiftForUser(user.id).catch(() => null);
 
-  await ensureTodayInstances(user, shift);
+  const today = await dbTodayISO();
 
-  const rows = await loadTodayInstances(user);
+  await ensureTodayInstances(user, shift, today);
+
+  const rows = await loadTodayInstances(user, today);
+
   const text = buildTasksText(rows);
   const keyboard = buildKeyboard(rows);
 
@@ -249,6 +271,12 @@ function askForAnswerText(answerType, title) {
 
 async function markDoneWithAnswer(taskInstanceId, payload) {
   const { answerType } = payload;
+
+  // ✅ заменяем предыдущий ответ (если был)
+  await pool.query(
+    `DELETE FROM task_instance_answers WHERE task_instance_id = $1`,
+    [taskInstanceId]
+  );
 
   // insert answer
   await pool.query(
@@ -328,24 +356,21 @@ function registerTodayTasks(bot, ensureUser, logError) {
         return;
       }
       if (row.status === "done") {
-        await ctx.answerCbQuery("Уже выполнено ✅").catch(() => {});
-        return;
-      }
+        // ✅ обычная задача (button) — можно отменить выполнение
+        if (row.answer_type === "button") {
+          await pool.query(
+            `
+        UPDATE task_instances
+        SET status = 'open', done_at = NULL
+        WHERE id = $1
+      `,
+            [row.id]
+          );
 
-      // ✅ "обычная" задача (button) — выполняем сразу, без ожидания ответа
-      if (row.answer_type === "button") {
-        await pool.query(
-          `
-            UPDATE task_instances
-            SET status = 'done', done_at = NOW()
-            WHERE id = $1
-          `,
-          [row.id]
-        );
-
-        await ctx.answerCbQuery("Выполнено ✅").catch(() => {});
-        await showTodayTasks(ctx, user);
-        return;
+          await ctx.answerCbQuery("Отменено ↩️").catch(() => {});
+          await showTodayTasks(ctx, user);
+          return;
+        }
       }
 
       // switch to await answer
@@ -355,13 +380,17 @@ function registerTodayTasks(bot, ensureUser, logError) {
         answerType: row.answer_type,
       });
 
-      const text = askForAnswerText(row.answer_type, row.title);
+      const text =
+        askForAnswerText(row.answer_type, row.title) +
+        "\n\n<i>Можно отправить новый ответ — он заменит предыдущий.</i>";
+
       const keyboard = Markup.inlineKeyboard([
         [{ text: "⬅️ Назад к задачам", callback_data: "lk_tasks_today" }],
         [{ text: "❌ Отмена", callback_data: "lk_task_answer_cancel" }],
       ]);
 
       await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      return;
     } catch (err) {
       logError("lk_task_open", err);
     }

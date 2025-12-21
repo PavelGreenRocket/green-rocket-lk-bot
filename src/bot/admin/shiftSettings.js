@@ -308,7 +308,7 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
         [
           {
             text: "📋 Задачи в течение дня",
-            callback_data: "admin_shift_day_root",
+            callback_data: "admin_shift_tasks",
           },
         ],
         [
@@ -332,7 +332,18 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-      await showDayRoot(ctx);
+
+      // старый раздел убран → перенаправляем в новый "Задачи смены"
+      const text =
+        "📋 <b>Задачи в течение дня</b>\n\n" +
+        "Этот раздел перенесён.\n" +
+        "Открываю новый экран «Задачи смены».";
+      const kb = Markup.inlineKeyboard([
+        [{ text: "📋 Задачи смены", callback_data: "admin_shift_tasks" }],
+        [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
     } catch (err) {
       logError("admin_shift_day_root", err);
     }
