@@ -480,6 +480,34 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     }
   });
 
+  const {
+    moveSingleTasksToDate,
+    deleteSingleTasks,
+  } = require("../../bot/uncompletedAlerts");
+
+  // удалить
+  bot.action(
+    /^lk_uncompl_del_(\d+)$/,
+    ensureUser(async (ctx) => {
+      const shiftId = Number(ctx.match[1]);
+      const n = await deleteSingleTasks(shiftId);
+      await ctx
+        .answerCbQuery(n ? `Удалено задач: ${n}` : "Нет разовых задач")
+        .catch(() => {});
+    })
+  );
+
+  // перенести -> открываем выбор дат (используем тот же UI что “Выбрать другую дату”)
+  bot.action(
+    /^lk_uncompl_move_(\d+)$/,
+    ensureUser(async (ctx) => {
+      const shiftId = Number(ctx.match[1]);
+      // тут надо переиспользовать уже существующий экран выбора даты из админки
+      // я делаю точный патч после того как ты скажешь: КАКОЙ callback у твоего пикера дат
+      // (в проекте он точно есть, раз ты говорил что уже реализован)
+    })
+);
+
   bot.action("shift_close_to_menu", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -825,6 +853,11 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
         `UPDATE shifts SET status='closed', closed_at=NOW() WHERE id=$1 AND user_id=$2`,
         [st.shiftId, user.id]
       );
+
+      const { createAlert } = require("../uncompletedAlerts"); // путь подправь по месту
+
+      await createAlert(bot, { shiftId: shift.id });
+
       await pool.query(
         `UPDATE shift_closings SET finished_at=NOW() WHERE shift_id=$1`,
         [st.shiftId]

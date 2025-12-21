@@ -89,6 +89,12 @@ async function buildMainKeyboard(user) {
       Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle"),
     ]);
     buttons.push([Markup.button.callback("📋 Задачи", "lk_tasks_today")]);
+    buttons.push([
+      Markup.button.callback(
+        "💬 Замечание по прошлой смене",
+        "lk_prev_shift_complaints"
+      ),
+    ]);
   } else {
     buttons.push([
       Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle"),

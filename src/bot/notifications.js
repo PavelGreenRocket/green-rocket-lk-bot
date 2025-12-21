@@ -42,6 +42,65 @@ function isSystemKind(kind) {
   return kind === "system";
 }
 
+// --- categories inside "user" notifications
+const CAT_UNCOMPLETED = "[[uncompleted_tasks]]";
+const CAT_COMPLAINTS = "[[complaints]]";
+
+function categoryWhereSql(category, params) {
+  // category:
+  // - "other"
+  // - "uncompleted"
+  // - "complaints"
+  if (category === "uncompleted") {
+    params.push(`%${CAT_UNCOMPLETED}%`);
+    return `AND n.text LIKE $${params.length}`;
+  }
+  if (category === "complaints") {
+    params.push(`%${CAT_COMPLAINTS}%`);
+    return `AND n.text LIKE $${params.length}`;
+  }
+
+  // other: everything except our tagged categories
+  params.push(`%${CAT_UNCOMPLETED}%`, `%${CAT_COMPLAINTS}%`);
+  return `AND n.text NOT LIKE $${params.length - 1} AND n.text NOT LIKE $${
+    params.length
+  }`;
+}
+
+async function hasResponsibility(userId, kind) {
+  const r = await pool.query(
+    `
+    SELECT 1
+    FROM trade_point_responsibles
+    WHERE user_id = $1
+      AND kind = $2
+      AND is_active = true
+    LIMIT 1
+    `,
+    [userId, kind]
+  );
+  return !!r.rows[0];
+}
+
+async function getUnreadCountUserCategory(userId, category) {
+  const params = [userId, false]; // sys=false => user-kind
+  const catWhere = categoryWhereSql(category, params);
+
+  const r = await pool.query(
+    `
+    SELECT COUNT(*)::int AS cnt
+    FROM user_notifications un
+    JOIN notifications n ON n.id = un.notification_id
+    WHERE un.user_id = $1
+      AND COALESCE(un.is_read, false) = false
+      AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
+      ${catWhere}
+    `,
+    params
+  );
+  return Number(r.rows[0]?.cnt || 0);
+}
+
 // --------------------
 // DB queries
 // --------------------
@@ -131,6 +190,12 @@ async function getUserHistoryPage({
     senderWhere = `AND n.created_by = $${params.length}`;
   }
 
+  let categoryWhere = "";
+  if (!sys && kind === "user") {
+    // apply only for user-kind
+    categoryWhere = categoryWhereSql(category || "other", params);
+  }
+
   params.push(pageSize, offset);
 
   const r = await pool.query(
@@ -148,8 +213,9 @@ async function getUserHistoryPage({
     LEFT JOIN users u ON u.id = n.created_by
     WHERE un.user_id = $1
       AND (CASE WHEN n.created_by IS NULL THEN true ELSE false END) = $2
-      ${senderWhere}
-    ORDER BY n.created_at DESC, n.id DESC
+${senderWhere}
+${categoryWhere}
+ORDER BY
     LIMIT $${params.length - 1} OFFSET $${params.length}
     `,
     params
@@ -190,12 +256,13 @@ async function getAdminsList(limit = 30) {
 // USER history state (filter toggle / sender / page / kind)
 // --------------------
 
-const userHistoryState = new Map(); // tgId -> { kind, page, sender, filterExpanded }
+const userHistoryState = new Map(); // tgId -> { kind, category, page, sender, filterExpanded }
 
 function getHistState(tgId) {
   return (
     userHistoryState.get(tgId) || {
       kind: "user",
+      category: "other", // other|uncompleted|complaints (for kind="user")
       page: 0,
       sender: "all",
       filterExpanded: false,
@@ -238,7 +305,7 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
     [
       Markup.button.callback(
         `📜 Пользовательские (${unreadUser})`,
-        "lk_notif_hist_user_1"
+        "lk_notif_user_menu"
       ),
     ],
     [
@@ -273,6 +340,52 @@ function senderLabel(kind, sender, adminsMap) {
   const a = adminsMap.get(Number(sender));
   if (!a) return `id=${sender}`;
   return `${a.full_name}${a.position ? `, ${posLabel(a.position)}` : ""}`;
+}
+
+async function showUserCategoryMenu(ctx, user, { edit = true } = {}) {
+  const otherCnt = await getUnreadCountUserCategory(user.id, "other");
+  const canUncompleted = await hasResponsibility(user.id, "uncompleted_tasks");
+  const canComplaints = await hasResponsibility(user.id, "complaints");
+
+  const rows = [
+    [
+      Markup.button.callback(
+        `🗂 Другие (${otherCnt})`,
+        "lk_notif_user_cat_other"
+      ),
+    ],
+  ];
+
+  if (canUncompleted) {
+    const c = await getUnreadCountUserCategory(user.id, "uncompleted");
+    rows.push([
+      Markup.button.callback(
+        `✅ Невыполненные задачи (${c})`,
+        "lk_notif_user_cat_uncompleted"
+      ),
+    ]);
+  }
+
+  if (canComplaints) {
+    const c = await getUnreadCountUserCategory(user.id, "complaints");
+    rows.push([
+      Markup.button.callback(
+        `📝 Замечания по смене (${c})`,
+        "lk_notif_user_cat_complaints"
+      ),
+    ]);
+  }
+
+  rows.push([Markup.button.callback("⬅️ Назад", "lk_notifications")]);
+
+  await deliver(
+    ctx,
+    {
+      text: "📜 *Пользовательские уведомления*\n\n" + "Выбери категорию:",
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "Markdown" },
+    },
+    { edit }
+  );
 }
 
 async function showUserHistory(ctx, user, { edit = true } = {}) {
@@ -1098,6 +1211,55 @@ function registerNotifications(bot, ensureUser, logError) {
       logError("lk_notif_admin_hist_filter_toggle", err);
     }
   });
+
+  bot.action(
+    "lk_notif_user_menu",
+    ensureUser(async (ctx, user) => {
+      await showUserCategoryMenu(ctx, user, { edit: true });
+    })
+  );
+
+  bot.action(
+    "lk_notif_user_cat_other",
+    ensureUser(async (ctx, user) => {
+      setHistState(ctx.from.id, {
+        kind: "user",
+        category: "other",
+        page: 0,
+        sender: "all",
+        filterExpanded: false,
+      });
+      await showUserHistory(ctx, user, { edit: true });
+    })
+  );
+
+  bot.action(
+    "lk_notif_user_cat_uncompleted",
+    ensureUser(async (ctx, user) => {
+      setHistState(ctx.from.id, {
+        kind: "user",
+        category: "uncompleted",
+        page: 0,
+        sender: "all",
+        filterExpanded: false,
+      });
+      await showUserHistory(ctx, user, { edit: true });
+    })
+  );
+
+  bot.action(
+    "lk_notif_user_cat_complaints",
+    ensureUser(async (ctx, user) => {
+      setHistState(ctx.from.id, {
+        kind: "user",
+        category: "complaints",
+        page: 0,
+        sender: "all",
+        filterExpanded: false,
+      });
+      await showUserHistory(ctx, user, { edit: true });
+    })
+  );
 
   bot.action(/^lk_notif_admin_hist_open_(\d+)$/, async (ctx) => {
     try {
