@@ -5,6 +5,14 @@ const { insertNotificationAndFanout } = require("./notifications");
 
 const CAT_UNCOMPLETED = "[[uncompleted_tasks]]";
 
+function formatIsoDateRu(iso) {
+  // iso: 'YYYY-MM-DD'
+  if (!iso || typeof iso !== "string" || iso.length < 10)
+    return String(iso || "—");
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return `${d}.${m}.${y}`;
+}
+
 async function getResponsibles(tradePointId) {
   const r = await pool.query(
     `
@@ -73,7 +81,7 @@ async function createAlert(bot, { shiftId }) {
       s.id,
       s.user_id,
       s.trade_point_id,
-      (s.opened_at AT TIME ZONE 'UTC')::date AS for_date,
+      to_char((s.opened_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS for_date_iso,
       u.full_name AS worker_name,
       u.work_phone AS worker_phone,
       u.username AS worker_username,
@@ -94,35 +102,36 @@ async function createAlert(bot, { shiftId }) {
   const responsibles = await getResponsibles(Number(shift.trade_point_id));
   if (!responsibles.length) return;
 
-  // 2) text
-  let text =
-    `⚠️ ${CAT_UNCOMPLETED}\n` +
-    `*Смена закрыта с невыполненными задачами*\n\n` +
+  const dateRu = formatIsoDateRu(shift.for_date_iso);
+
+  const cleanText =
+    `⚠️ *Смена закрыта с невыполненными задачами*\n\n` +
     `Точка: *${shift.point_title}*\n` +
-    `Дата: *${String(shift.for_date)}*\n\n` +
+    `Дата: *${dateRu}*\n\n` +
     `Сотрудник: *${shift.worker_name || "—"}*\n` +
     `Тел: ${shift.worker_phone || "—"}\n` +
     `Username: ${
       shift.worker_username ? `@${shift.worker_username}` : "—"
     }\n\n` +
-    `Невыполнено:\n`;
+    `Невыполнено:\n` +
+    items
+      .map((t, i) => {
+        const tag = t.schedule_type === "single" ? "разовая" : "по расписанию";
+        return `${i + 1}. ${t.title} (${tag})`;
+      })
+      .join("\n");
 
-  items.forEach((t, i) => {
-    const tag = t.schedule_type === "single" ? "разовая" : "по расписанию";
-    text += `${i + 1}. ${t.title} (${tag})\n`;
-  });
+  // маркер только для БД, чтобы работала фильтрация категорий
+  const storedText = `${CAT_UNCOMPLETED}\n${cleanText}`;
 
-  // 3) store as notification (for "Пользовательские → Невыполненные задачи")
+  // store notification (для истории в "Пользовательские → Невыполненные задачи")
   await insertNotificationAndFanout({
-    createdBy: null, // "system-like", but still in Пользовательские мы фильтруем по тексту; оставляем NULL? нельзя — тогда уйдёт в "system".
-    // поэтому делаем createdBy = 1? нет. Правильнее: createdBy = some admin? нет.
-    // здесь делаем "user-kind": created_by НЕ NULL. Используем отправителя = сотрудник, закрывший смену.
     createdBy: Number(shift.user_id),
-    text,
+    text: storedText,
     recipientUserIds: responsibles.map((r) => r.id),
   });
 
-  // 4) push message with buttons (optional, но у тебя это просили)
+  // keyboard for Telegram push
   const kb = [];
   if (singleIds.length) {
     kb.push([
@@ -134,8 +143,11 @@ async function createAlert(bot, { shiftId }) {
     ? { ...Markup.inlineKeyboard(kb), parse_mode: "Markdown" }
     : { parse_mode: "Markdown" };
 
+  // send once
   for (const r of responsibles) {
-    await bot.telegram.sendMessage(r.telegram_id, text, extra).catch(() => {});
+    await bot.telegram
+      .sendMessage(r.telegram_id, cleanText, extra)
+      .catch(() => {});
   }
 }
 

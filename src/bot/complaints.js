@@ -24,37 +24,26 @@ async function getComplaintsSchema() {
 
   const cols = new Set(r.rows.map((x) => x.column_name));
 
+  const pick = (candidates) => candidates.find((c) => cols.has(c)) || null;
+
   const schema = {
-    textCol: cols.has("text")
-      ? "text"
-      : cols.has("complaint_text")
-      ? "complaint_text"
-      : null,
-    photoCol: cols.has("photo_file_id") ? "photo_file_id" : null,
+    // текст замечания
+    textCol: pick(["complaint_text", "text", "message", "body", "content"]),
+
+    // фото (одно)
+    photoCol: pick(["photo_file_id", "photo_id", "file_id"]),
 
     // на что ссылается "предыдущая смена"
-    prevShiftCol: cols.has("prev_shift_id")
-      ? "prev_shift_id"
-      : cols.has("about_shift_id")
-      ? "about_shift_id"
-      : null,
+    prevShiftCol: pick(["prev_shift_id", "about_shift_id"]),
 
     // текущая смена (если есть)
-    currentShiftCol: cols.has("current_shift_id")
-      ? "current_shift_id"
-      : cols.has("shift_id")
-      ? "shift_id"
-      : null,
+    currentShiftCol: pick(["current_shift_id", "shift_id"]),
 
-    tradePointCol: cols.has("trade_point_id") ? "trade_point_id" : null,
-    fromUserCol: cols.has("from_user_id") ? "from_user_id" : null,
+    tradePointCol: pick(["trade_point_id"]),
+    fromUserCol: pick(["from_user_id"]),
 
     // кто был на прошлой смене (если есть)
-    prevShiftUserCol: cols.has("prev_shift_user_id")
-      ? "prev_shift_user_id"
-      : cols.has("to_user_id")
-      ? "to_user_id"
-      : null,
+    prevShiftUserCol: pick(["prev_shift_user_id", "to_user_id"]),
   };
 
   if (!schema.textCol) {
@@ -75,6 +64,11 @@ async function getComplaintsSchema() {
 
   _complSchema = schema;
   return schema;
+}
+
+function qi(name) {
+  // безопасное экранирование идентификаторов
+  return `"${String(name).replace(/"/g, '""')}"`;
 }
 
 async function getActiveShift(userId) {
@@ -113,17 +107,17 @@ async function listMyComplaints(userId, prevShiftId) {
   const s = await getComplaintsSchema();
 
   const sql = `
-    SELECT
-      id,
-      ${s.textCol} AS text,
-      ${s.photoCol ? s.photoCol : "NULL"} AS photo_file_id,
-      created_at
-    FROM shift_complaints
-    WHERE ${s.fromUserCol} = $1
-      AND ${s.prevShiftCol} IS NOT DISTINCT FROM $2
-    ORDER BY created_at DESC
-    LIMIT 20
-  `;
+  SELECT
+    id,
+    ${qi(s.textCol)} AS text,
+    ${s.photoCol ? qi(s.photoCol) : "NULL"} AS photo_file_id,
+    created_at
+  FROM shift_complaints
+  WHERE ${qi(s.fromUserCol)} = $1
+    AND ${qi(s.prevShiftCol)} IS NOT DISTINCT FROM $2
+  ORDER BY created_at DESC
+  LIMIT 20
+`;
 
   const r = await pool.query(sql, [userId, prevShiftId]);
   return r.rows;
@@ -277,7 +271,9 @@ async function saveComplaintAndNotify(ctx, user, { text, photoFileId }) {
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(",");
 
   await pool.query(
-    `INSERT INTO shift_complaints (${cols.join(",")}) VALUES (${placeholders})`,
+    `INSERT INTO shift_complaints (${cols
+      .map(qi)
+      .join(",")}) VALUES (${placeholders})`,
     vals
   );
 

@@ -486,26 +486,118 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
   } = require("../../bot/uncompletedAlerts");
 
   // удалить
-  bot.action(
-    /^lk_uncompl_del_(\d+)$/,
-    ensureUser(async (ctx) => {
+  bot.action(/^lk_uncompl_del_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
       const shiftId = Number(ctx.match[1]);
       const n = await deleteSingleTasks(shiftId);
+
       await ctx
         .answerCbQuery(n ? `Удалено задач: ${n}` : "Нет разовых задач")
         .catch(() => {});
-    })
-  );
+    } catch (e) {
+      logError("lk_uncompl_del", e);
+    }
+  });
 
-  // перенести -> открываем выбор дат (используем тот же UI что “Выбрать другую дату”)
-  bot.action(
-    /^lk_uncompl_move_(\d+)$/,
-    ensureUser(async (ctx) => {
+  async function getCurrentDateStr() {
+    const r = await pool.query(`SELECT CURRENT_DATE::text AS d`);
+    return r.rows[0]?.d; // 'YYYY-MM-DD'
+  }
+
+  function addDays(isoDate, days) {
+    const [y, m, d] = isoDate.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    const yy = dt.getUTCFullYear();
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(dt.getUTCDate()).padStart(2, "0");
+    return `${yy}-${mm}-${dd}`;
+  }
+
+  function buildMoveDateKeyboard(shiftId, startIso) {
+    const days = [];
+    for (let i = 0; i < 14; i++) days.push(addDays(startIso, i));
+
+    const rows = [];
+    for (let i = 0; i < days.length; i += 3) {
+      rows.push(
+        days
+          .slice(i, i + 3)
+          .map((d) =>
+            Markup.button.callback(d, `lk_uncompl_move_date_${shiftId}_${d}`)
+          )
+      );
+    }
+    rows.push([Markup.button.callback("⬅️ Назад", "lk_notifications")]);
+    return Markup.inlineKeyboard(rows);
+  }
+
+  // перенести -> показываем выбор дат
+  bot.action(/^lk_uncompl_move_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
       const shiftId = Number(ctx.match[1]);
-      // тут надо переиспользовать уже существующий экран выбора даты из админки
-      // я делаю точный патч после того как ты скажешь: КАКОЙ callback у твоего пикера дат
-      // (в проекте он точно есть, раз ты говорил что уже реализован)
-    })
+      const startIso = await getCurrentDateStr();
+      const kb = buildMoveDateKeyboard(shiftId, startIso);
+
+      await deliver(
+        ctx,
+        {
+          text:
+            "📅 *Перенос разовых задач*\n\n" +
+            "Выберите дату, на которую перенести разовые (single) невыполненные задачи.",
+          extra: { ...kb, parse_mode: "Markdown" },
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("lk_uncompl_move", e);
+    }
+  });
+
+  // выбрали дату переноса
+  bot.action(
+    /^lk_uncompl_move_date_(\d+)_(\d{4}-\d{2}-\d{2})$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!user) return;
+
+        const shiftId = Number(ctx.match[1]);
+        const targetDate = ctx.match[2];
+
+        const n = await moveSingleTasksToDate(shiftId, targetDate);
+
+        await deliver(
+          ctx,
+          {
+            text: n
+              ? `✅ Перенесено разовых задач: *${n}*\nДата: *${targetDate}*`
+              : "Нет разовых (single) невыполненных задач для переноса.",
+            extra: Markup.inlineKeyboard([
+              [
+                Markup.button.callback(
+                  "⬅️ В меню уведомлений",
+                  "lk_notifications"
+                ),
+              ],
+              [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
+            ]),
+          },
+          { edit: true }
+        );
+      } catch (e) {
+        logError("lk_uncompl_move_date", e);
+      }
+    }
   );
 
   bot.action("shift_close_to_menu", async (ctx) => {
