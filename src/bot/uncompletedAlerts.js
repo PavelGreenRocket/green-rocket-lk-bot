@@ -50,7 +50,7 @@ async function getOpenTasksForShift(shiftId) {
     JOIN task_instances ti
       ON ti.user_id = s.user_id
      AND ti.trade_point_id = s.trade_point_id
-     AND ti.for_date = (s.opened_at AT TIME ZONE 'UTC')::date
+     AND ti.for_date = CURRENT_DATE
     JOIN task_templates tt ON tt.id = ti.template_id
     LEFT JOIN task_schedules ts ON ts.assignment_id = ti.assignment_id
     WHERE s.id = $1
@@ -141,9 +141,16 @@ async function createAlert(bot, { shiftId }) {
   if (singleIds.length) {
     kb.push([
       Markup.button.callback("📅 Перенести", `lk_uncompl_move_${shiftId}`),
-      Markup.button.callback("🗑 Удалить", `lk_uncompl_del_${shiftId}`),
+      Markup.button.callback(
+        "🧩 Удалить часть",
+        `lk_uncompl_delpart_${shiftId}`
+      ),
+    ]);
+    kb.push([
+      Markup.button.callback("🗑 Удалить все", `lk_uncompl_del_${shiftId}`),
     ]);
   }
+
   const extra = kb.length
     ? { ...Markup.inlineKeyboard(kb), parse_mode: "Markdown" }
     : { parse_mode: "Markdown" };
@@ -168,44 +175,89 @@ async function moveSingleTasksToDate(shiftId, targetDate) {
       return 0;
     }
 
-    // load rows to clone
-    const rows = await client.query(
+    // исходная дата (на которой сейчас висят эти разовые задачи)
+    const info = await client.query(
       `
-      SELECT assignment_id, template_id, user_id, trade_point_id, time_mode, deadline_at, status
+      SELECT DISTINCT for_date::text AS for_date_iso
       FROM task_instances
       WHERE id = ANY($1::bigint[])
       `,
       [singleIds]
     );
+    const fromDate = info.rows?.[0]?.for_date_iso;
+    if (!fromDate) {
+      await client.query("COMMIT");
+      return 0;
+    }
 
-    for (const t of rows.rows) {
+    // 1) удаляем те инстансы, которые при переносе конфликтуют с уже существующими на targetDate
+    await client.query(
+      `
+      DELETE FROM task_instances ti
+      USING task_instances existing
+      WHERE ti.id = ANY($1::bigint[])
+        AND existing.assignment_id = ti.assignment_id
+        AND existing.user_id = ti.user_id
+        AND existing.for_date = $2::date
+      `,
+      [singleIds, targetDate]
+    );
+
+    // 2) переносим оставшиеся (которые не конфликтуют)
+    const upd = await client.query(
+      `
+      UPDATE task_instances
+      SET for_date = $2::date
+      WHERE id = ANY($1::bigint[])
+      `,
+      [singleIds, targetDate]
+    );
+
+    // 3) переносим single schedule, чтобы генератор НЕ создавал их снова на старую дату
+    const asg = await client.query(
+      `
+      SELECT DISTINCT assignment_id
+      FROM task_instances
+      WHERE for_date = $1::date
+        AND id = ANY($2::bigint[])
+      `,
+      [targetDate, singleIds]
+    );
+    const assignmentIds = asg.rows.map((r) => r.assignment_id);
+
+    // ⚠️ assignmentIds может быть пустым, если все перенесённые были удалены из-за конфликтов.
+    // В этом случае всё равно переносим schedule по "исходным assignment_id" с исходных инстансов:
+    const asgAll = await client.query(
+      `
+      SELECT DISTINCT assignment_id
+      FROM task_instances
+      WHERE id = ANY($1::bigint[])
+      `,
+      [singleIds]
+    );
+    const assignmentIdsAll = asgAll.rows.map((r) => r.assignment_id);
+
+    const idsToMove = assignmentIdsAll.length
+      ? assignmentIdsAll
+      : assignmentIds;
+
+    if (idsToMove.length) {
       await client.query(
         `
-        INSERT INTO task_instances
-          (assignment_id, template_id, user_id, trade_point_id, for_date, time_mode, deadline_at, status, created_at, done_at)
-        VALUES
-          ($1,$2,$3,$4,$5,$6,$7,'open',NOW(),NULL)
-        ON CONFLICT (assignment_id, user_id, for_date) DO NOTHING
+        UPDATE task_schedules
+        SET single_date = $2::date
+        WHERE assignment_id = ANY($1::bigint[])
+          AND schedule_type = 'single'
+          AND single_date = $3::date
         `,
-        [
-          t.assignment_id,
-          t.template_id,
-          t.user_id,
-          t.trade_point_id,
-          targetDate,
-          t.time_mode,
-          t.deadline_at,
-        ]
+        [idsToMove, targetDate, fromDate]
       );
     }
 
-    await client.query(
-      `DELETE FROM task_instances WHERE id = ANY($1::bigint[])`,
-      [singleIds]
-    );
-
     await client.query("COMMIT");
-    return singleIds.length;
+
+    // сколько реально уехало = rowCount UPDATE (удалённые из-за конфликтов считаем как “перенос не нужен”)
+    return Number(upd.rowCount || 0);
   } catch (e) {
     await client.query("ROLLBACK");
     throw e;

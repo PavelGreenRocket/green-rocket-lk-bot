@@ -508,6 +508,197 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     }
   });
 
+  async function fetchUncompletedForShift(shiftId) {
+    const s = await pool.query(
+      `
+    SELECT
+      s.id,
+      s.trade_point_id,
+      tp.title AS point_title,
+      u.full_name AS worker_name,
+      u.work_phone AS worker_phone,
+      u.username AS worker_username
+    FROM shifts s
+    JOIN users u ON u.id = s.user_id
+    JOIN trade_points tp ON tp.id = s.trade_point_id
+    WHERE s.id = $1
+    `,
+      [shiftId]
+    );
+    const shift = s.rows[0];
+    if (!shift) return null;
+
+    const t = await pool.query(
+      `
+    SELECT
+      ti.id,
+      tt.title,
+      COALESCE(ts.schedule_type, 'single') AS schedule_type
+    FROM task_instances ti
+    JOIN task_templates tt ON tt.id = ti.template_id
+    LEFT JOIN task_schedules ts ON ts.assignment_id = ti.assignment_id
+    WHERE ti.user_id = (SELECT user_id FROM shifts WHERE id = $1)
+      AND ti.trade_point_id = (SELECT trade_point_id FROM shifts WHERE id = $1)
+      AND ti.for_date = CURRENT_DATE
+      AND ti.status = 'open'
+    ORDER BY ti.id
+    `,
+      [shiftId]
+    );
+
+    const items = t.rows.map((r) => ({
+      id: Number(r.id),
+      title: r.title,
+      schedule_type: r.schedule_type,
+    }));
+
+    return { shift, items };
+  }
+
+  function buildUncomplText(shift, items) {
+    const lines = [];
+    lines.push("⚠️ *Смена закрыта с невыполненными задачами*");
+    lines.push("");
+    lines.push(`Точка: *${shift.point_title}*`);
+    lines.push(`Дата: *${new Date().toLocaleDateString("ru-RU")}*`);
+    lines.push("");
+    lines.push(`Сотрудник: *${shift.worker_name || "—"}*`);
+    lines.push(`Тел: ${shift.worker_phone || "—"}`);
+    lines.push(
+      `Username: ${shift.worker_username ? `@${shift.worker_username}` : "—"}`
+    );
+    lines.push("");
+    lines.push("Невыполнено:");
+    if (!items.length) lines.push("—");
+    items.forEach((t, i) => {
+      const tag = t.schedule_type === "single" ? "разовая" : "по расписанию";
+      lines.push(`${i + 1}. ${t.title} (${tag})`);
+    });
+    return lines.join("\n");
+  }
+
+  bot.action(/^lk_uncompl_delpart_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const shiftId = Number(ctx.match[1]);
+      const data = await fetchUncompletedForShift(shiftId);
+      if (!data) return;
+
+      // показываем только разовые задачи
+      const singles = data.items.filter((x) => x.schedule_type === "single");
+
+      const rows = [];
+      singles.forEach((t, idx) => {
+        rows.push([
+          Markup.button.callback(
+            `${idx + 1}`,
+            `lk_uncompl_delone_${shiftId}_${t.id}`
+          ),
+        ]);
+      });
+      rows.push([
+        Markup.button.callback(
+          "✅ Готово",
+          `lk_uncompl_delpart_done_${shiftId}`
+        ),
+      ]);
+
+      const text = buildUncomplText(data.shift, data.items);
+
+      await ctx.editMessageText(
+        "🧩 *Удалить часть задач*\n\nНажимай номер — задача будет удалена.\n\n" +
+          text,
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard(rows) }
+      );
+    } catch (e) {
+      logError("lk_uncompl_delpart", e);
+    }
+  });
+
+  bot.action(/^lk_uncompl_delone_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const shiftId = Number(ctx.match[1]);
+      const taskId = Number(ctx.match[2]);
+
+      await pool.query(`DELETE FROM task_instances WHERE id = $1`, [taskId]);
+
+      const data = await fetchUncompletedForShift(shiftId);
+      if (!data) return;
+
+      const singles = data.items.filter((x) => x.schedule_type === "single");
+
+      const rows = [];
+      singles.forEach((t, idx) => {
+        rows.push([
+          Markup.button.callback(
+            `${idx + 1}`,
+            `lk_uncompl_delone_${shiftId}_${t.id}`
+          ),
+        ]);
+      });
+      rows.push([
+        Markup.button.callback(
+          "✅ Готово",
+          `lk_uncompl_delpart_done_${shiftId}`
+        ),
+      ]);
+
+      const text = buildUncomplText(data.shift, data.items);
+
+      await ctx.editMessageText(
+        "🧩 *Удалить часть задач*\n\nНажимай номер — задача будет удалена.\n\n" +
+          text,
+        { parse_mode: "Markdown", ...Markup.inlineKeyboard(rows) }
+      );
+    } catch (e) {
+      logError("lk_uncompl_delone", e);
+    }
+  });
+
+  bot.action(/^lk_uncompl_delpart_done_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const shiftId = Number(ctx.match[1]);
+      const data = await fetchUncompletedForShift(shiftId);
+      if (!data) return;
+
+      const singles = data.items.filter((x) => x.schedule_type === "single");
+
+      const rows = [];
+      if (singles.length) {
+        rows.push([
+          Markup.button.callback("📅 Перенести", `lk_uncompl_move_${shiftId}`),
+          Markup.button.callback(
+            "🧩 Удалить часть",
+            `lk_uncompl_delpart_${shiftId}`
+          ),
+        ]);
+        rows.push([
+          Markup.button.callback("🗑 Удалить все", `lk_uncompl_del_${shiftId}`),
+        ]);
+      }
+
+      const text = buildUncomplText(data.shift, data.items);
+
+      await ctx.editMessageText(text, {
+        parse_mode: "Markdown",
+        ...(rows.length ? Markup.inlineKeyboard(rows) : {}),
+      });
+    } catch (e) {
+      logError("lk_uncompl_delpart_done", e);
+    }
+  });
+
   // перенести -> показать выбор дат
   bot.action(/^lk_uncompl_move_(\d+)$/, async (ctx) => {
     try {
