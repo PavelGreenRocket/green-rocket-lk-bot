@@ -46,6 +46,72 @@ function isSystemKind(kind) {
 const CAT_UNCOMPLETED = "[[uncompleted_tasks]]";
 const CAT_COMPLAINTS = "[[complaints]]";
 
+const CAT_PHOTO_PREFIX = "[[photo:";
+
+function extractPhotoAndClean(rawText) {
+  let text = String(rawText || "");
+
+  // photo marker: [[photo:FILE_ID]]
+  let photoFileId = null;
+  const m = text.match(/\[\[photo:([^\]]+)\]\]/);
+  if (m && m[1]) photoFileId = m[1].trim();
+
+  // remove service markers from visible text
+  text = text
+    .replace(/\[\[photo:[^\]]+\]\]/g, "")
+    .replace(CAT_UNCOMPLETED, "")
+    .replace(CAT_COMPLAINTS, "");
+
+  // also remove ugly "[complaints]" / "[uncompleted_tasks]" if где-то осталось
+  text = text.replace(/\[[a-z_]+\]/gi, "");
+
+  return { text: text.trim(), photoFileId };
+}
+async function getUnreadAnyAtOffset(userId, offset) {
+  const r = await pool.query(
+    `
+    SELECT
+      n.id,
+      n.text,
+      n.created_at,
+      n.created_by,
+      u.full_name AS sender_name,
+      u.position  AS sender_position
+    FROM user_notifications un
+    JOIN notifications n ON n.id = un.notification_id
+    LEFT JOIN users u ON u.id = n.created_by
+    WHERE un.user_id = $1
+      AND COALESCE(un.is_read, false) = false
+    ORDER BY n.created_at DESC, n.id DESC
+    LIMIT 1 OFFSET $2
+    `,
+    [userId, Math.max(0, Number(offset || 0))]
+  );
+  return r.rows[0] || null;
+}
+
+async function markOneAsRead(userId, notificationId) {
+  await pool.query(
+    `
+    UPDATE user_notifications
+    SET is_read = true, read_at = NOW()
+    WHERE user_id = $1
+      AND notification_id = $2
+      AND COALESCE(is_read,false) = false
+    `,
+    [userId, notificationId]
+  );
+}
+
+const unreadBrowseState = new Map(); // tgId -> offset (0 = newest unread)
+
+function getUnreadOffset(tgId) {
+  return Number(unreadBrowseState.get(tgId) || 0);
+}
+function setUnreadOffset(tgId, offset) {
+  unreadBrowseState.set(tgId, Math.max(0, Number(offset || 0)));
+}
+
 function categoryWhereSql(category, params) {
   // category:
   // - "other"
@@ -277,50 +343,77 @@ function setHistState(tgId, patch) {
 // --------------------
 // USER screens
 // --------------------
-
 async function showUserHub(ctx, user, { edit = true } = {}) {
+  const tgId = ctx.from.id;
+
   const unreadTotal = await getUnreadCount(user.id);
-  const unreadUser = await getUnreadCountByKind(user.id, "user");
-  const unreadSystem = await getUnreadCountByKind(user.id, "system");
-  const latest = await getLatestUnreadAny(user.id);
+  if (unreadTotal <= 0) {
+    const text = "🔔 *Уведомления*\n\nСейчас нет новых уведомлений.";
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback("📚 История", "lk_notif_history_menu")],
+      [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
+    ]);
+
+    await deliver(
+      ctx,
+      { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+      { edit }
+    );
+    return;
+  }
+
+  // clamp offset
+  let offset = getUnreadOffset(tgId);
+  if (offset > unreadTotal - 1) offset = unreadTotal - 1;
+  setUnreadOffset(tgId, offset);
+
+  const n = await getUnreadAnyAtOffset(user.id, offset);
+  if (!n) {
+    setUnreadOffset(tgId, 0);
+    return showUserHub(ctx, user, { edit });
+  }
+
+  const { text: cleanBody, photoFileId } = extractPhotoAndClean(n.text);
 
   let text = "🔔 *Уведомления*\n\n";
 
-  if (!latest) {
-    text += "Сейчас нет новых уведомлений.";
+  if (n.created_by == null) {
+    text += `*Системное уведомление*\n`;
   } else {
-    // заголовок содержит тип и “от кого” для пользовательского
-    if (latest.created_by == null) {
-      text += `*Системное уведомление*\n`;
-    } else {
-      const fromName = latest.sender_name || "Неизвестно";
-      const fromPos = posLabel(latest.sender_position);
-      text += `*Пользовательское уведомление*\n`;
-      text += `От: ${fromName}, ${fromPos}\n`;
-    }
-    text += `Дата: ${formatDtRu(latest.created_at)}\n\n`;
-    text += safeTrim(latest.text, 3500);
+    const fromName = n.sender_name || "Неизвестно";
+    const fromPos = posLabel(n.sender_position);
+    text += `*Пользовательское уведомление*\n`;
+    text += `От: ${fromName}, ${fromPos}\n`;
   }
 
-  const rows = [
-    [
-      Markup.button.callback(
-        `📜 Пользовательские (${unreadUser})`,
-        "lk_notif_user_menu"
-      ),
-    ],
-    [
-      Markup.button.callback(
-        `📜 Системные (${unreadSystem})`,
-        "lk_notif_hist_system_1"
-      ),
-    ],
+  text += `Дата: ${formatDtRu(n.created_at)}\n`;
+  text += `Сообщение: ${offset + 1} / ${unreadTotal}\n\n`;
+  text += safeTrim(cleanBody, 3500);
+
+  const leftDisabled = offset <= 0;
+  const rightDisabled = offset >= unreadTotal - 1;
+
+  const navRow = [
+    Markup.button.callback(
+      leftDisabled ? " " : "⬅️",
+      leftDisabled ? "noop" : "lk_notif_unread_prev"
+    ),
+    Markup.button.callback(
+      rightDisabled ? " " : "➡️",
+      rightDisabled ? "noop" : "lk_notif_unread_next"
+    ),
   ];
 
-  if (unreadTotal > 0) {
-    rows.push([Markup.button.callback("✅ Прочитал", "lk_notif_read_all")]);
+  const rows = [navRow];
+
+  if (photoFileId) {
+    rows.push([
+      Markup.button.callback("📷 Посмотреть фото", "lk_notif_unread_photo"),
+    ]);
   }
 
+  rows.push([Markup.button.callback("✅ Прочитано", "lk_notif_unread_read")]);
+  rows.push([Markup.button.callback("📚 История", "lk_notif_history_menu")]);
   rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
   const keyboard = Markup.inlineKeyboard(rows);
@@ -328,6 +421,23 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit }
+  );
+}
+
+async function showHistoryRoot(ctx, user, { edit = true } = {}) {
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("📜 Пользовательские", "lk_notif_user_menu")],
+    [Markup.button.callback("📜 Системные", "lk_notif_hist_system_1")],
+    [Markup.button.callback("⬅️ Назад", "lk_notifications")],
+  ]);
+
+  await deliver(
+    ctx,
+    {
+      text: "📚 *История уведомлений*\n\nВыбери раздел:",
+      extra: { ...keyboard, parse_mode: "Markdown" },
+    },
     { edit }
   );
 }
@@ -1214,12 +1324,101 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(
-    "lk_notif_user_menu",
-    ensureUser(async (ctx, user) => {
+  bot.action("lk_notif_history_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await showHistoryRoot(ctx, user, { edit: true });
+    } catch (e) {
+      logError?.("lk_notif_history_menu", e);
+    }
+  });
+
+  bot.action("lk_notif_unread_prev", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      const tgId = ctx.from.id;
+      setUnreadOffset(tgId, getUnreadOffset(tgId) - 1);
+      await showUserHub(ctx, user, { edit: true });
+    } catch (e) {
+      logError?.("lk_notif_unread_prev", e);
+    }
+  });
+
+  bot.action("lk_notif_unread_next", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      const tgId = ctx.from.id;
+      setUnreadOffset(tgId, getUnreadOffset(tgId) + 1);
+      await showUserHub(ctx, user, { edit: true });
+    } catch (e) {
+      logError?.("lk_notif_unread_next", e);
+    }
+  });
+
+  bot.action("lk_notif_unread_read", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const tgId = ctx.from.id;
+      const offset = getUnreadOffset(tgId);
+      const n = await getUnreadAnyAtOffset(user.id, offset);
+      if (n) await markOneAsRead(user.id, Number(n.id));
+
+      // после прочтения — показываем следующее непрочитанное (на том же offset),
+      // если его нет — откатимся левее
+      const cnt = await getUnreadCount(user.id);
+      if (cnt <= 0) setUnreadOffset(tgId, 0);
+      else if (offset > cnt - 1) setUnreadOffset(tgId, cnt - 1);
+
+      await showUserHub(ctx, user, { edit: true });
+    } catch (e) {
+      logError?.("lk_notif_unread_read", e);
+    }
+  });
+
+  bot.action("lk_notif_unread_photo", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const tgId = ctx.from.id;
+      const offset = getUnreadOffset(tgId);
+      const n = await getUnreadAnyAtOffset(user.id, offset);
+      if (!n) return;
+
+      const { photoFileId } = extractPhotoAndClean(n.text);
+      if (!photoFileId) {
+        await ctx.reply("Фото не найдено в этом уведомлении.");
+        return;
+      }
+
+      await ctx
+        .replyWithPhoto(photoFileId)
+        .catch(() => ctx.reply("Не удалось показать фото."));
+    } catch (e) {
+      logError?.("lk_notif_unread_photo", e);
+    }
+  });
+
+  bot.action("lk_notif_user_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
       await showUserCategoryMenu(ctx, user, { edit: true });
-    })
-  );
+    } catch (e) {
+      logError?.("lk_notif_user_menu", e);
+    }
+  });
 
   bot.action(
     "lk_notif_user_cat_other",
@@ -1280,6 +1479,7 @@ function registerNotifications(bot, ensureUser, logError) {
   // USER hub
   bot.action("lk_notifications", async (ctx) => {
     try {
+      setUnreadOffset(ctx.from.id, 0);
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;

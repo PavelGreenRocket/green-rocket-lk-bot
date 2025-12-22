@@ -281,6 +281,8 @@ async function saveComplaintAndNotify(ctx, user, { text, photoFileId }) {
   const fromU = await getUserInfo(user.id);
   const prevU = prevShiftUserId ? await getUserInfo(prevShiftUserId) : null;
 
+  const photoMarker = photoFileId ? `\n\n[[photo:${photoFileId}]]` : "";
+
   const notifText =
     `📝 ${CAT_COMPLAINTS}\n` +
     `*Замечание по прошлой смене*\n\n` +
@@ -294,7 +296,8 @@ async function saveComplaintAndNotify(ctx, user, { text, photoFileId }) {
           prevU.work_phone || "—"
         }\nUsername: ${prevU.username ? `@${prevU.username}` : "—"}\n\n`
       : "") +
-    `Текст:\n${text}`;
+    `Текст:\n${text}` +
+    photoMarker;
 
   const respIds = await getResponsibles(tradePointId);
   if (respIds.length) {
