@@ -1420,9 +1420,13 @@ function registerNotifications(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(
-    "lk_notif_user_cat_other",
-    ensureUser(async (ctx, user) => {
+  // --- USER: categories inside "Пользовательские"
+  bot.action("lk_notif_user_cat_other", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
       setHistState(ctx.from.id, {
         kind: "user",
         category: "other",
@@ -1430,13 +1434,19 @@ function registerNotifications(bot, ensureUser, logError) {
         sender: "all",
         filterExpanded: false,
       });
-      await showUserHistory(ctx, user, { edit: true });
-    })
-  );
 
-  bot.action(
-    "lk_notif_user_cat_uncompleted",
-    ensureUser(async (ctx, user) => {
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (e) {
+      console.error("[lk_notif_user_cat_other] error:", e);
+    }
+  });
+
+  bot.action("lk_notif_user_cat_uncompleted", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
       setHistState(ctx.from.id, {
         kind: "user",
         category: "uncompleted",
@@ -1444,13 +1454,19 @@ function registerNotifications(bot, ensureUser, logError) {
         sender: "all",
         filterExpanded: false,
       });
-      await showUserHistory(ctx, user, { edit: true });
-    })
-  );
 
-  bot.action(
-    "lk_notif_user_cat_complaints",
-    ensureUser(async (ctx, user) => {
+      await showUserHistory(ctx, user, { edit: true });
+    } catch (e) {
+      console.error("[lk_notif_user_cat_uncompleted] error:", e);
+    }
+  });
+
+  bot.action("lk_notif_user_cat_complaints", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
       setHistState(ctx.from.id, {
         kind: "user",
         category: "complaints",
@@ -1458,9 +1474,12 @@ function registerNotifications(bot, ensureUser, logError) {
         sender: "all",
         filterExpanded: false,
       });
+
       await showUserHistory(ctx, user, { edit: true });
-    })
-  );
+    } catch (e) {
+      console.error("[lk_notif_user_cat_complaints] error:", e);
+    }
+  });
 
   bot.action(/^lk_notif_admin_hist_open_(\d+)$/, async (ctx) => {
     try {

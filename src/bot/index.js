@@ -8,6 +8,7 @@ const { registerMore } = require("./more");
 const { registerInterviewUser } = require("./interviewUser");
 const { registerAiLogs } = require("./admin/aiLogs");
 const { registerComplaints } = require("./complaints");
+const { registerHandover } = require("./handover");
 
 // админ-панель
 const { registerAdminPanel } = require("./admin");
@@ -21,6 +22,7 @@ function registerLkBot(bot, ensureUser, logError) {
   registerQuestions(bot, ensureUser, logError);
   registerInterviewUser(bot, ensureUser, logError);
   registerComplaints(bot, ensureUser, logError);
+  registerHandover(bot, ensureUser, logError);
 
   // только новая админ-панель
   registerAdminPanel(bot, ensureUser, logError);

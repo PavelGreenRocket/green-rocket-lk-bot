@@ -5,6 +5,8 @@ const { deliver } = require("../../utils/renderHelpers");
 const { getUserState, setUserState, clearUserState } = require("../state");
 const { toast, alert } = require("../../utils/toast");
 const { showTodayTasks } = require("../tasks/today");
+const { showHandoverAfterOpenIfAny } = require("../handover");
+
 const MODE = "shift_open";
 
 function getShiftState(tgId) {
@@ -370,7 +372,12 @@ function registerShiftFlow(bot, ensureUser, logError) {
         clearShiftState(ctx.from.id);
 
         // ✅ сразу показываем задачи на сегодня
-        await showTodayTasks(ctx, user);
+        const shown = await showHandoverAfterOpenIfAny(
+          ctx,
+          st.tradePointId,
+          st.shiftId
+        );
+        if (!shown) await showTodayTasks(ctx, user);
         return;
       }
 
@@ -448,7 +455,12 @@ function registerShiftFlow(bot, ensureUser, logError) {
         clearShiftState(ctx.from.id);
 
         // ✅ сразу показываем экран задач на сегодня
-        await showTodayTasks(ctx, user);
+        const shown = await showHandoverAfterOpenIfAny(
+          ctx,
+          st.tradePointId,
+          st.shiftId
+        );
+        if (!shown) await showTodayTasks(ctx, user);
         return;
       }
       const newSt = { ...st, idx: nextIdx };
@@ -497,7 +509,12 @@ function registerShiftFlow(bot, ensureUser, logError) {
         clearShiftState(ctx.from.id);
 
         // ✅ сразу показываем экран задач на сегодня
-        await showTodayTasks(ctx, user);
+        const shown = await showHandoverAfterOpenIfAny(
+          ctx,
+          st.tradePointId,
+          st.shiftId
+        );
+        if (!shown) await showTodayTasks(ctx, user);
         return;
       }
 
@@ -553,7 +570,12 @@ function registerShiftFlow(bot, ensureUser, logError) {
         );
         clearShiftState(ctx.from.id);
 
-        await showTodayTasks(ctx, user);
+        const shown = await showHandoverAfterOpenIfAny(
+          ctx,
+          st.tradePointId,
+          st.shiftId
+        );
+        if (!shown) await showTodayTasks(ctx, user);
         return;
       }
 

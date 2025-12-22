@@ -436,17 +436,6 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
-  // Заглушка под "Комментарий для следующей смены" (пока просто уведомление)
-  bot.action("lk_next_shift_comment", async (ctx) => {
-    try {
-      await ctx
-        .answerCbQuery("Скоро добавим 🙂", { show_alert: true })
-        .catch(() => {});
-    } catch (err) {
-      logError("lk_next_shift_comment", err);
-    }
-  });
-
   // Академия закрыта (кандидат)
   bot.action("lk_academy_locked", async (ctx) => {
     try {

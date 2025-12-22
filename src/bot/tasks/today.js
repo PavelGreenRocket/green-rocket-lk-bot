@@ -2,6 +2,8 @@
 const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
+const { hasForCurrentShift } = require("../handover");
+
 const { getUserState, setUserState, clearUserState } = require("../state");
 
 const MODE = "lk_task_answer";
@@ -211,7 +213,7 @@ function buildTasksText(rows) {
   return text;
 }
 
-function buildKeyboard(rows) {
+function buildKeyboard(rows, hasComments) {
   const kb = [];
 
   if (rows.length) {
@@ -224,6 +226,12 @@ function buildKeyboard(rows) {
 
     // по 5 кнопок в ряд, чтобы не было гигантской простыни
     for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
+  }
+
+  if (hasComments) {
+    kb.push([
+      Markup.button.callback("📝 Комментарии для вас", "lk_handover_view"),
+    ]);
   }
 
   kb.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
@@ -240,7 +248,15 @@ async function showTodayTasks(ctx, user) {
   const rows = await loadTodayInstances(user, today);
 
   const text = buildTasksText(rows);
-  const keyboard = buildKeyboard(rows);
+
+  const hasComments =
+    !!shift?.trade_point_id &&
+    !!shift?.id &&
+    (await hasForCurrentShift(shift.trade_point_id, shift.id).catch(
+      () => false
+    ));
+
+  const keyboard = buildKeyboard(rows, hasComments);
 
   // ✅ если пришли из кнопки — edit
   if (ctx.callbackQuery) {
