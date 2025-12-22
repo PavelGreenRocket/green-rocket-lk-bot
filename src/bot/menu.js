@@ -6,6 +6,105 @@ const { countUnreadNotifications } = require("./notifications");
 const { showInterviewDetails } = require("./interviewUser");
 const { showInternshipDetails } = require("./internshipUser");
 
+async function getActiveShift(userId) {
+  const sres = await pool.query(
+    `
+    SELECT s.id, s.trade_point_id, tp.title AS point_title, s.status, s.opened_at
+    FROM shifts s
+    LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+    WHERE s.user_id = $1
+      AND opened_at::date = CURRENT_DATE
+      AND status IN ('opening_in_progress','opened','closing_in_progress')
+      AND trade_point_id IS NOT NULL
+    ORDER BY opened_at DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+  return sres.rows[0] || null;
+}
+
+async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
+  const activeShift = await getActiveShift(user.id);
+
+  const baseText = await buildStatusText(user);
+
+  let shiftBlock = "\n\n<b>Смена</b>\n";
+  if (activeShift) {
+    shiftBlock += `🟢 Активна (<b>${activeShift.point_title || "—"}</b>)\n`;
+  } else {
+    shiftBlock += `⚪️ Не открыта\n`;
+  }
+
+  const rows = [];
+
+  if (activeShift) {
+    rows.push([Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle")]);
+    rows.push([Markup.button.callback("📋 Задачи смены", "lk_tasks_today")]);
+    rows.push([
+      Markup.button.callback(
+        "💬 Замечание по прошлой смене",
+        "lk_prev_shift_complaints"
+      ),
+    ]);
+
+    // заранее под будущую кнопку (пока заглушка)
+    rows.push([
+      Markup.button.callback(
+        "📝 Комментарий для следующей смены",
+        "lk_next_shift_comment"
+      ),
+    ]);
+  } else {
+    rows.push([Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle")]);
+  }
+
+  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+
+  await deliver(
+    ctx,
+    {
+      text: `${baseText}${shiftBlock}\n\nВыберите действие:`,
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
+async function showToolsMenu(ctx, user, { edit = true } = {}) {
+  const staffStatus = user.staff_status || "worker";
+  const role = user.role || "user";
+
+  const rows = [];
+
+  // Академия
+  if (staffStatus === "candidate") {
+    rows.push([
+      Markup.button.callback("📚 Академия бариста", "lk_academy_locked"),
+    ]);
+  } else {
+    const academyUrl = "https://t.me/barista_academy_GR_bot";
+    rows.push([Markup.button.url("📚 Академия бариста", academyUrl)]);
+  }
+
+  // Склад
+  rows.push([Markup.button.callback("📦 Склад", "lk_warehouse_locked")]);
+
+  // ИИ
+  rows.push([Markup.button.callback("🔮 Задать вопрос ИИ", "lk_ai_question")]);
+
+  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+
+  await deliver(
+    ctx,
+    {
+      text: "📦 <b>Рабочие инструменты</b>\n\nВыберите раздел:",
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
 async function buildMainKeyboard(user) {
   const staffStatus = user.staff_status || "worker";
   const role = user.role || "user";
@@ -85,46 +184,20 @@ async function buildMainKeyboard(user) {
     activeShift = null;
   }
 
-  if (activeShift) {
-    buttons.push([
-      Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle"),
-    ]);
-    buttons.push([Markup.button.callback("📋 Задачи", "lk_tasks_today")]);
-    buttons.push([
-      Markup.button.callback(
-        "💬 Замечание по прошлой смене",
-        "lk_prev_shift_complaints"
-      ),
-    ]);
-  } else {
-    buttons.push([
-      Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle"),
-    ]);
-  }
+  buttons.push([
+    Markup.button.callback("👤 Профиль / Смена", "lk_profile_shift"),
+  ]);
 
-  // 2) Академия бариста
-  if (staffStatus === "candidate") {
-    buttons.push([
-      Markup.button.callback("📚 Академия бариста", "lk_academy_locked"),
-    ]);
-  } else {
-    const academyUrl = "https://t.me/barista_academy_GR_bot";
-    buttons.push([Markup.button.url("📚 Академия бариста", academyUrl)]);
-  }
-
-  // 3) Склад
-  buttons.push([Markup.button.callback("📦 Склад", "lk_warehouse_locked")]);
+  // 📦 Рабочие инструменты (Академия/Склад/ИИ)
+  buttons.push([
+    Markup.button.callback("📦 Рабочие инструменты", "lk_tools_menu"),
+  ]);
 
   // 4) Уведомления (+ бейдж)
   const unread = await countUnreadNotifications(user.id);
   const notifLabel =
     unread > 0 ? `🔔 Уведомления (${unread})` : "🔔 Уведомления";
   buttons.push([Markup.button.callback(notifLabel, "lk_notifications")]);
-
-  // 5) ИИ
-  buttons.push([
-    Markup.button.callback("🔮 Задать вопрос ИИ", "lk_ai_question"),
-  ]);
 
   // 6) Кнопка "Собеседования (N) ❗" — только для admin / super_admin,
   //    и только если есть запланированные собеседования
@@ -258,15 +331,22 @@ async function buildStatusText(user) {
     positionLine = `<b>Должность:</b> ${posLabel}\n`;
   }
 
-  return (
-    `<b>Имя:</b> ${name}\n` +
-    `${statusLine}\n` +
-    (roleLine || "") +
-    (positionLine || "") +
-    "\nЛичный кабинет активен.\n" +
-    "Здесь ты сможешь отмечать смены, получать уведомления,\n" +
-    "переходить в обучение и пользоваться другими функциями."
-  );
+  let text = `<b>Имя:</b> ${name}\n`;
+
+  if (role === "super_admin") {
+    text += `${statusLine}\n`;
+    if (roleLine) {
+      text += roleLine;
+    }
+  }
+
+  if (positionLine) {
+    text += `${positionLine}\n`;
+  }
+
+  text += "Личный кабинет активен";
+
+  return text;
 }
 
 function registerMenu(bot, ensureUser, logError) {
@@ -312,6 +392,17 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
+  bot.action("lk_tools_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await showToolsMenu(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_tools_menu", e);
+    }
+  });
+
   // Кнопка "Назад в меню"
   bot.action("lk_main_menu", async (ctx) => {
     try {
@@ -330,6 +421,29 @@ function registerMenu(bot, ensureUser, logError) {
       );
     } catch (err) {
       logError("lk_main_menu", err);
+    }
+  });
+
+  // 👤 Профиль / Смена
+  bot.action("lk_profile_shift", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await showProfileShiftScreen(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_profile_shift", err);
+    }
+  });
+
+  // Заглушка под "Комментарий для следующей смены" (пока просто уведомление)
+  bot.action("lk_next_shift_comment", async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Скоро добавим 🙂", { show_alert: true })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_next_shift_comment", err);
     }
   });
 
