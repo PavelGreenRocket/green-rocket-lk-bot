@@ -4,6 +4,7 @@ const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { getUserState, setUserState, clearUserState } = require("../state");
 const { toast } = require("../../utils/toast");
+const { buildStatusText, buildMainKeyboard } = require("../menu");
 
 const MODE = "shift_close";
 
@@ -192,7 +193,7 @@ function closeKb() {
   return Markup.inlineKeyboard([
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-    [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
+    [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
   ]);
 }
 
@@ -243,7 +244,7 @@ async function showYesNo(ctx, user, title, stepKey, idx, total) {
     [{ text: "❌ Нет", callback_data: `shift_close_no_${stepKey}` }],
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-    [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
+    [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
   ]);
 
   await deliver(ctx, { text, extra: kb }, { edit: true });
@@ -286,32 +287,73 @@ async function showEditMenu(ctx) {
   await deliver(ctx, { text: "📝 Что изменить?", extra: kb }, { edit: true });
 }
 
-async function showRegulatedQuestion(ctx, st) {
-  const q = st.queue[st.qIdx];
-  const text = formatQ(st.qIdx + 1, st.queue.length, q);
-  const kb = Markup.inlineKeyboard([
-    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-    [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
-  ]);
-
-  if (ctx.callbackQuery) {
-    await deliver(ctx, { text, extra: kb }, { edit: true });
-  } else {
-    await ctx.reply(text, {
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
+async function showRegulatedQuestion(ctx, user, qIdx, { edit = true } = {}) {
+  const st = getSt(ctx.from.id);
+  if (!st?.queue?.length) {
+    return showFinishScreen(ctx, user, { edit });
   }
-}
 
-async function showFinishScreen(ctx, shiftId, userId) {
-  const hasOpen = await hasOpenTodayTasks(userId);
+  const q = st.queue[qIdx];
+  if (!q) return showFinishScreen(ctx, user, { edit });
+
+  const row = await getClosingRow(st.shiftId);
+
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+  const dateStr = new Date().toLocaleDateString("ru-RU");
+  const head = buildClosingSummary(tpTitle, dateStr, row);
+
+  const total = 5 + st.queue.length; // 5 дефолтных + N админских
+  const stepN = 5 + qIdx + 1; // 6..N
+
+  const emoji =
+    q.answerType === "photo"
+      ? "📷"
+      : q.answerType === "video"
+      ? "🎥"
+      : q.answerType === "number"
+      ? "🔢"
+      : "📝";
+
+  const hint =
+    q.answerType === "photo"
+      ? "Пришлите фото."
+      : q.answerType === "video"
+      ? "Пришлите видео."
+      : q.answerType === "number"
+      ? "Введите число."
+      : "Введите текст.";
 
   const text =
-    "🛑 <b>Закрытие смены</b>\n\n" +
-    (hasOpen
-      ? "⚠️ Есть невыполненные задачи на сегодня.\n\nЗакрыть смену всё равно?"
-      : "Всё заполнено. Закрыть смену?");
+    `🛑 <b>${stepN}/${total}</b>\n` +
+    `${head}\n\n` +
+    `${emoji} <b>${q.title}</b>\n\n` +
+    `${hint}`;
+
+  const kb = Markup.inlineKeyboard([
+    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+    [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
+  ]);
+
+  await deliver(ctx, { text, extra: kb }, { edit });
+}
+
+async function showFinishScreen(ctx, user, { edit = true } = {}) {
+  const st = getSt(ctx.from.id);
+  if (!st?.shiftId) return;
+
+  const row = await getClosingRow(st.shiftId);
+
+  const tpTitle = await getTradePointTitle(st.tradePointId);
+  const dateStr = new Date().toLocaleDateString("ru-RU");
+  const head = buildClosingSummary(tpTitle, dateStr, row);
+
+  const hasOpen = await hasOpenTodayTasks(user.id);
+
+  const prompt = hasOpen
+    ? "⚠️ Есть невыполненные задачи на сегодня.\n\n Закрыть смену всё равно?"
+    : "Всё заполнено. Закрыть смену?";
+
+  const text = `🛑 <b>5/5 (всё заполнено)</b> \n${head}\n\n${prompt}`;
 
   const kb = Markup.inlineKeyboard([
     [{ text: "🛑 Закрыть смену", callback_data: "shift_close_finish" }],
@@ -319,7 +361,7 @@ async function showFinishScreen(ctx, shiftId, userId) {
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
   ]);
 
-  await deliver(ctx, { text, extra: kb }, { edit: true });
+  await deliver(ctx, { text, extra: kb }, { edit });
 }
 
 // ---------- main start/continue ----------
@@ -447,23 +489,26 @@ async function showByStep(ctx, user, step) {
   }
 
   if (step === "regulated") {
-    // подгружаем очереди, если нет
+    // подгружаем очередь, если ещё не подгружена
     let stNow = getSt(ctx.from.id);
+
     if (!stNow.queue) {
       const queue = await loadClosingQuestionsForUser(user, stNow.tradePointId);
       stNow = { ...stNow, queue, qIdx: 0, step: "regulated" };
       setSt(ctx.from.id, stNow);
-
-      if (!queue.length) {
-        // сразу финал
-        return showFinishScreen(ctx, stNow.shiftId, user.id);
-      }
     }
-    return showRegulatedQuestion(ctx, stNow);
+
+    // если вопросов нет — финал в том же формате (5/5 + summary + кнопки)
+    if (!stNow.queue || stNow.queue.length === 0) {
+      return showFinishScreen(ctx, user, { edit: true });
+    }
+
+    // показываем текущий вопрос из очереди
+    return showRegulatedQuestion(ctx, user, stNow.qIdx || 0, { edit: true });
   }
 
   // финал
-  return showFinishScreen(ctx, st.shiftId, user.id);
+  return showFinishScreen(ctx, user, { edit: true });
 }
 
 // ---------- registration ----------
@@ -857,9 +902,9 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       await deliver(
         ctx,
         {
-          text: "Ок. Можно продолжить закрытие смены позже.",
+          text: "Ок. Можно продолжить позже.",
           extra: Markup.inlineKeyboard([
-            [{ text: "⬅️ В меню", callback_data: "lk_main_menu" }],
+            [{ text: "⬅️ К смене", callback_data: "lk_profile_shift" }],
           ]),
         },
         { edit: true }
@@ -1091,12 +1136,13 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       if (nextIdx >= st.queue.length) {
         // регулируемые закончились -> финал
         setSt(ctx.from.id, { ...st, step: "finish" });
-        await showFinishScreen(ctx, st.shiftId, user.id);
+        await showFinishScreen(ctx, user, { edit: true });
+
         return;
       }
 
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, { ...st, qIdx: nextIdx });
+      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
     } catch (e) {
       logError("shift_close_regulated_text", e);
       await ctx.reply("❌ Ошибка сохранения ответа.");
@@ -1130,11 +1176,12 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       const nextIdx = st.qIdx + 1;
       if (nextIdx >= st.queue.length) {
         setSt(ctx.from.id, { ...st, step: "finish" });
-        await showFinishScreen(ctx, st.shiftId, user.id);
+        await showFinishScreen(ctx, user, { edit: true });
+
         return;
       }
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, { ...st, qIdx: nextIdx });
+      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
     } catch (e) {
       logError("shift_close_regulated_photo", e);
       await ctx.reply("❌ Ошибка сохранения фото.");
@@ -1167,11 +1214,12 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       const nextIdx = st.qIdx + 1;
       if (nextIdx >= st.queue.length) {
         setSt(ctx.from.id, { ...st, step: "finish" });
-        await showFinishScreen(ctx, st.shiftId, user.id);
+        await showFinishScreen(ctx, user, { edit: true });
+
         return;
       }
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, { ...st, qIdx: nextIdx });
+      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
     } catch (e) {
       logError("shift_close_regulated_video", e);
       await ctx.reply("❌ Ошибка сохранения видео.");
@@ -1188,35 +1236,31 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       const st = getSt(ctx.from.id);
       if (!st?.shiftId) return;
 
-      // закрываем смену
+      // 1) добиваем состояние (если надо) и закрываем смену
       await pool.query(
-        `UPDATE shifts SET status='closed', closed_at=NOW() WHERE id=$1 AND user_id=$2`,
-        [st.shiftId, user.id]
-      );
-
-      const { createAlert } = require("../uncompletedAlerts"); // путь подправь по месту
-
-      await createAlert(bot, { shiftId: st.shiftId });
-
-      await pool.query(
-        `UPDATE shift_closings SET finished_at=NOW() WHERE shift_id=$1`,
-        [st.shiftId]
+        `
+        UPDATE shifts
+        SET status = 'closed',
+            closed_at = NOW()
+        WHERE id = $1
+      `,
+        [Number(st.shiftId)]
       );
 
       clrSt(ctx.from.id);
-      await toast(ctx, "Смена закрыта ✅");
+
+      // 2) сразу в главное меню (без промежуточного "Смена закрыта ✅")
+      const text = await buildStatusText(user);
+      const keyboard = await buildMainKeyboard(user);
+
       await deliver(
         ctx,
-        {
-          text: "🛑 Смена закрыта ✅",
-          extra: Markup.inlineKeyboard([
-            [{ text: "⬅️ В меню", callback_data: "lk_main_menu" }],
-          ]),
-        },
+        { text, extra: { ...(keyboard || {}), parse_mode: "HTML" } },
         { edit: true }
       );
-    } catch (e) {
-      logError("shift_close_finish", e);
+    } catch (err) {
+      logError("shift_close_finish", err);
+      await ctx.reply("❌ Не удалось закрыть смену. Попробуйте ещё раз.");
     }
   });
 }

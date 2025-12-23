@@ -1,4 +1,3 @@
-//src\index.js
 require("dotenv").config();
 const { Telegraf } = require("telegraf");
 const pool = require("./db/pool");
@@ -39,7 +38,7 @@ async function ensureUser(ctx) {
   );
 
   if (res.rows.length) {
-    return res.rows[0]; // уже полноценный пользователь ЛК
+    return res.rows[0];
   }
 
   // 2. Пользователь пока не в users — смотрим, есть ли он в таблице ожидания
@@ -55,7 +54,6 @@ async function ensureUser(ctx) {
   );
 
   if (waitRes.rows.length) {
-    // Мы уже взяли у человека данные, просто напоминаем, что он "в очереди"
     await ctx.reply(
       "Привет! 👋\n\n" +
         "Мы уже записали ваши контакты и ждём, когда вас пригласят " +
@@ -65,12 +63,12 @@ async function ensureUser(ctx) {
     return null;
   }
 
-  // 3. Совсем новый человек — запускаем онбординг (опрос имя/возраст/телефон)
+  // 3. Совсем новый человек — запускаем онбординг
   await startWaitingOnboarding(ctx);
   return null;
 }
 
-// Универсальный показ главного меню (его ты уже используешь в notifications)
+// Универсальный показ главного меню
 async function showMainMenu(ctx) {
   const user = await ensureUser(ctx);
   if (!user) return;
@@ -88,16 +86,37 @@ async function showMainMenu(ctx) {
   );
 }
 
-// Регистрация всех хендлеров ЛК-бота
+// Регистрация всех хендлеров
 registerWaitingOnboarding(bot, logError);
-
 registerLkBot(bot, ensureUser, logError);
 registerInternshipUser(bot, ensureUser, logError, showMainMenu);
-// Запускаем
-bot.launch().then(() => {
+
+// Глобальная обработка ошибок telegraf
+bot.catch((err, ctx) => {
+  console.error("❌ Telegraf error for update", ctx?.updateType, err);
+});
+
+async function main() {
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+
+  const me = await bot.telegram.getMe();
+  console.log("🤖 Running as:", me.username);
+
+  bot.use((ctx, next) => {
+    console.log("📩 update:", ctx.updateType, ctx.message?.text);
+    return next();
+  });
+
+  await bot.launch({ dropPendingUpdates: true });
   console.log("✅ ЛК-бот запущен");
+}
+
+main().catch((err) => {
+  console.error("❌ startup failed:", err);
+  process.exit(1);
 });
 
 // Красивое завершение
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
+0;

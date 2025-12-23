@@ -1,4 +1,3 @@
-// src/bot/complaints.js
 const { Markup } = require("telegraf");
 const pool = require("../db/pool");
 const { deliver } = require("../utils/renderHelpers");
@@ -162,7 +161,7 @@ async function showComplaintsRoot(ctx, user, { edit = true } = {}) {
       {
         text: "💬 Замечания по прошлой смене доступны только при активной смене.",
         extra: Markup.inlineKeyboard([
-          [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
+          [Markup.button.callback("⬅️ К смене", "lk_profile_shift")],
         ]),
       },
       { edit }
@@ -200,7 +199,7 @@ async function showComplaintsRoot(ctx, user, { edit = true } = {}) {
         "lk_prev_shift_compl_add"
       ),
     ],
-    [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
+    [Markup.button.callback("⬅️ К смене", "lk_profile_shift")],
   ];
 
   await deliver(

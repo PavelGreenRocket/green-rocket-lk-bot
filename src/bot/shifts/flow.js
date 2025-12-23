@@ -66,10 +66,16 @@ async function showPickPoint(ctx) {
   );
 }
 
-async function showAskCash(ctx) {
+async function showAskCash(ctx, user) {
   const st = getShiftState(ctx.from.id) || {};
   const tpTitle = await getTradePointTitle(st.tradePointId);
-  const total = openingTotal(0);
+
+  // чтобы шаги считались правильно (если есть вопросы после наличных)
+  const previewQueue = await loadShiftQuestionsForUser(
+    user,
+    st.tradePointId
+  ).catch(() => []);
+  const total = openingTotal(previewQueue.length);
 
   const head = openingHeader(tpTitle, null);
 
@@ -286,7 +292,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
         {
           text: "Ок, открытие смены отменено.",
           extra: Markup.inlineKeyboard([
-            [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
+            [Markup.button.callback("⬅️ К смене", "lk_profile_shift")],
           ]),
         },
         { edit: true }
@@ -333,7 +339,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
         tradePointId: pointId,
       });
 
-      await showAskCash(ctx);
+      await showAskCash(ctx, user);
     } catch (err) {
       logError("shift_open_point", err);
     }
@@ -517,17 +523,9 @@ function registerShiftFlow(bot, ensureUser, logError) {
         if (!shown) await showTodayTasks(ctx, user);
         return;
       }
-
-      setShiftState(ctx.from.id, { ...st, idx: nextIdx });
-      await ctx.reply(
-        formatQuestionText(nextIdx + 1, st.queue.length, st.queue[nextIdx]),
-        {
-          parse_mode: "HTML",
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
-          ]).reply_markup,
-        }
-      );
+      const newSt = { ...st, idx: nextIdx };
+      setShiftState(ctx.from.id, newSt);
+      await showShiftQuestion(ctx, newSt);
     } catch (err) {
       logError("shift_survey_photo", err);
       await ctx.reply("❌ Ошибка при сохранении фото. Попробуйте ещё раз.");
@@ -579,16 +577,9 @@ function registerShiftFlow(bot, ensureUser, logError) {
         return;
       }
 
-      setShiftState(ctx.from.id, { ...st, idx: nextIdx });
-      await ctx.reply(
-        formatQuestionText(nextIdx + 1, st.queue.length, st.queue[nextIdx]),
-        {
-          parse_mode: "HTML",
-          reply_markup: Markup.inlineKeyboard([
-            [{ text: "❌ Отмена", callback_data: "shift_open_cancel" }],
-          ]).reply_markup,
-        }
-      );
+      const newSt = { ...st, idx: nextIdx };
+      setShiftState(ctx.from.id, newSt);
+      await showShiftQuestion(ctx, newSt);
     } catch (err) {
       logError("shift_survey_video", err);
       await ctx.reply("❌ Ошибка при сохранении видео. Попробуйте ещё раз.");
