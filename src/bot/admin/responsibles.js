@@ -73,16 +73,23 @@ async function showRoot(ctx) {
   const kb = Markup.inlineKeyboard([
     [
       {
-        text: "✅ по невыполненным задачам за смену",
+        text: "📝 по невыполненным задачам за смену",
         callback_data: "admin_resp_kind_uncompleted_tasks",
       },
     ],
     [
       {
-        text: "📝 по жалобам на прошлую смену",
+        text: "💬 по жалобам на прошлую смену",
         callback_data: "admin_resp_kind_complaints",
       },
     ],
+    [
+      {
+        text: "💰 доступ к инкассации",
+        callback_data: "admin_cash_access_root",
+      },
+    ],
+
     [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
   ]);
   await deliver(ctx, { text, extra: kb }, { edit: true });

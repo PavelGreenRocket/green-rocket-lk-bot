@@ -60,13 +60,20 @@ async function ensureClosingRow(shiftId) {
     [shiftId]
   );
 }
-
 async function getClosingRow(shiftId) {
-  const res = await pool.query(
-    `SELECT * FROM shift_closings WHERE shift_id=$1`,
+  const r = await pool.query(
+    `
+    SELECT
+      sc.*,
+      u.full_name AS cash_collection_by_name,
+      u.username  AS cash_collection_by_username
+    FROM shift_closings sc
+    LEFT JOIN users u ON u.id = sc.cash_collection_by_user_id
+    WHERE sc.shift_id = $1
+    `,
     [shiftId]
   );
-  return res.rows[0] || null;
+  return r.rows[0] || null;
 }
 
 // дневные задачи: есть ли открытые task_instances на сегодня?
@@ -160,35 +167,34 @@ async function getTradePointTitle(tradePointId) {
   );
   return r.rows[0]?.title || `#${tradePointId}`;
 }
-
 function buildClosingSummary(tpTitle, dateStr, row) {
   const lines = [];
-  lines.push(`<b>${tpTitle}</b>`);
-  lines.push(`${dateStr}`);
+  lines.push(tpTitle);
+  lines.push(dateStr);
+  lines.push(`Сумма продаж: <b>${fmtMoney(row.sales_total)}</b>`);
+  lines.push(`Наличными: <b>${fmtMoney(row.sales_cash)}</b>`);
+  lines.push(`Наличные в кассе: <b>${fmtMoney(row.cash_in_drawer)}</b>`);
 
-  const s1 = fmtMoney(row?.sales_total);
-  if (s1) lines.push(`Сумма продаж: <b>${s1}</b>`);
-
-  const s2 = fmtMoney(row?.sales_cash);
-  if (s2) lines.push(`Наличными: <b>${s2}</b>`);
-
-  const s3 = fmtMoney(row?.cash_in_drawer);
-  if (s3) lines.push(`Наличные в кассе: <b>${s3}</b>`);
-
-  if (row?.was_cash_collection === true) {
-    const s4 = fmtMoney(row?.cash_collection_amount);
-    lines.push(`Инкассация: <b>Да</b>${s4 ? ` (${s4})` : ""}`);
-  } else if (row?.was_cash_collection === false) {
+  if (row.was_cash_collection) {
+    const amount = fmtMoney(row.cash_collection_amount);
+    const by =
+      row.cash_collection_by_name ||
+      (row.cash_collection_by_username
+        ? "@" + row.cash_collection_by_username
+        : null);
+    lines.push(`Инкассация: <b>${amount}</b>${by ? ` (${by})` : ""}`);
+  } else if (row.was_cash_collection === false) {
     lines.push(`Инкассация: <b>Нет</b>`);
+  } else {
+    lines.push(`Инкассация: <b>-</b>`);
   }
 
-  if (row?.checks_count !== null && row?.checks_count !== undefined) {
+  if (row.checks_count != null) {
     lines.push(`Чеков: <b>${row.checks_count}</b>`);
   }
 
   return lines.join("\n");
 }
-
 function closeKb() {
   return Markup.inlineKeyboard([
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
@@ -224,30 +230,35 @@ async function showTextStep(
 
   await deliver(ctx, { text, extra: closeKb() }, { edit: true });
 }
-
 async function showYesNo(ctx, user, title, stepKey, idx, total) {
   setSt(ctx.from.id, { step: stepKey });
 
   const st = getSt(ctx.from.id);
-  const row = await getClosingRow(st.shiftId);
-
   const tpTitle = await getTradePointTitle(st.tradePointId);
   const dateStr = new Date().toLocaleDateString("ru-RU");
-
+  const row = await getClosingRow(st.shiftId);
   const head = buildClosingSummary(tpTitle, dateStr, row);
 
-  const text =
-    `🛑 <b>${idx}/${total}</b>\n` + `${head}\n\n` + `<b>${title}</b>`;
+  const text = `🛑 <b>${idx}/${total}</b>\n${head}\n\n${title}`;
 
-  const kb = Markup.inlineKeyboard([
-    [{ text: "✅ Да", callback_data: `shift_close_yes_${stepKey}` }],
-    [{ text: "❌ Нет", callback_data: `shift_close_no_${stepKey}` }],
+  const kbRows = [
+    [
+      { text: "✅ Да", callback_data: `shift_close_yes_${stepKey}` },
+      { text: "❌ Нет", callback_data: `shift_close_no_${stepKey}` },
+    ],
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
     [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
-  ]);
+  ];
 
-  await deliver(ctx, { text, extra: kb }, { edit: true });
+  return deliver(
+    ctx,
+    {
+      text,
+      extra: Markup.inlineKeyboard(kbRows),
+    },
+    { edit: true }
+  );
 }
 
 async function showEditMenu(ctx) {
@@ -287,81 +298,73 @@ async function showEditMenu(ctx) {
   await deliver(ctx, { text: "📝 Что изменить?", extra: kb }, { edit: true });
 }
 
-async function showRegulatedQuestion(ctx, user, qIdx, { edit = true } = {}) {
-  const st = getSt(ctx.from.id);
-  if (!st?.queue?.length) {
+async function showRegulatedQuestion(ctx, user, st, { edit = true } = {}) {
+  const queue = st.queue || [];
+  const qIdx = Number.isInteger(st.qIdx) ? st.qIdx : 0;
+  const q = queue[qIdx];
+
+  if (!q) {
     return showFinishScreen(ctx, user, { edit });
   }
 
-  const q = st.queue[qIdx];
-  if (!q) return showFinishScreen(ctx, user, { edit });
-
-  const row = await getClosingRow(st.shiftId);
+  const TOTAL = 5 + queue.length;
+  const idx = 5 + qIdx + 1;
 
   const tpTitle = await getTradePointTitle(st.tradePointId);
   const dateStr = new Date().toLocaleDateString("ru-RU");
+  const row = await getClosingRow(st.shiftId);
   const head = buildClosingSummary(tpTitle, dateStr, row);
 
-  const total = 5 + st.queue.length; // 5 дефолтных + N админских
-  const stepN = 5 + qIdx + 1; // 6..N
-
   const emoji =
-    q.answerType === "photo"
+    q.answerType === "number"
+      ? "🔢"
+      : q.answerType === "photo"
       ? "📷"
       : q.answerType === "video"
       ? "🎥"
-      : q.answerType === "number"
-      ? "🔢"
       : "📝";
 
   const hint =
-    q.answerType === "photo"
-      ? "Пришлите фото."
-      : q.answerType === "video"
-      ? "Пришлите видео."
-      : q.answerType === "number"
+    q.answerType === "number"
       ? "Введите число."
+      : q.answerType === "photo"
+      ? "Отправьте фото."
+      : q.answerType === "video"
+      ? "Отправьте видео."
       : "Введите текст.";
 
-  const text =
-    `🛑 <b>${stepN}/${total}</b>\n` +
-    `${head}\n\n` +
-    `${emoji} <b>${q.title}</b>\n\n` +
-    `${hint}`;
+  const text = `🛑 <b>${idx}/${TOTAL}</b>\n${head}\n\n${emoji} <b>${q.title}</b>\n\n${hint}`;
 
-  const kb = Markup.inlineKeyboard([
-    [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-    [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
-  ]);
-
-  await deliver(ctx, { text, extra: kb }, { edit });
+  return deliver(ctx, { text, extra: closeKb() }, { edit });
 }
 
 async function showFinishScreen(ctx, user, { edit = true } = {}) {
   const st = getSt(ctx.from.id);
-  if (!st?.shiftId) return;
+  if (!st) return;
 
-  const row = await getClosingRow(st.shiftId);
+  const queueLen = Array.isArray(st.queue) ? st.queue.length : 0;
+  const TOTAL = 5 + queueLen;
 
   const tpTitle = await getTradePointTitle(st.tradePointId);
   const dateStr = new Date().toLocaleDateString("ru-RU");
+  const row = await getClosingRow(st.shiftId);
   const head = buildClosingSummary(tpTitle, dateStr, row);
 
   const hasOpen = await hasOpenTodayTasks(user.id);
-
-  const prompt = hasOpen
-    ? "⚠️ Есть невыполненные задачи на сегодня.\n\n Закрыть смену всё равно?"
+  const question = hasOpen
+    ? "⚠️ Внимание: у вас есть незакрытые задачи за сегодня.\n\nВсё заполнено. Закрыть смену всё равно?"
     : "Всё заполнено. Закрыть смену?";
-
-  const text = `🛑 <b>5/5 (всё заполнено)</b> \n${head}\n\n${prompt}`;
 
   const kb = Markup.inlineKeyboard([
     [{ text: "🛑 Закрыть смену", callback_data: "shift_close_finish" }],
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
+    [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
   ]);
 
-  await deliver(ctx, { text, extra: kb }, { edit });
+  const text = `🛑 <b>${TOTAL}/${TOTAL}</b>\n${head}\n\n${question}`;
+
+  return deliver(ctx, { text, extra: kb }, { edit });
 }
 
 // ---------- main start/continue ----------
@@ -393,45 +396,66 @@ async function startOrContinueClosing(ctx, user) {
   await showByStep(ctx, user, row?.step || "sales_total");
   return true;
 }
-
 async function showByStep(ctx, user, step) {
-  const st = getSt(ctx.from.id);
-  const shiftId = st.shiftId;
+  let st = getSt(ctx.from.id);
+  if (!st) return;
 
-  // читаем актуальную строку закрытия
-  const row = await getClosingRow(shiftId);
-  const TOTAL = 5;
+  // Подгружаем доп. вопросы заранее, чтобы:
+  // 1) считать корректный TOTAL (5 + N)
+  // 2) иметь список для шага regulated
+  if (!Array.isArray(st.queue)) {
+    let queue = [];
+    try {
+      queue = await loadClosingQuestionsForUser(user, st.tradePointId);
+    } catch (e) {
+      queue = [];
+    }
+    st = { ...st, queue };
+    setSt(ctx.from.id, st);
+  }
 
+  const TOTAL = 5 + (st.queue?.length || 0);
+
+  // 1) сумма продаж
   if (step === "sales_total") {
     return showTextStep(
       ctx,
       user,
-      "Введите общую сумму продаж за день",
+      "Введите сумму продаж за день",
       "sales_total",
       1,
-      TOTAL
+      TOTAL,
+      "Введите числом:"
     );
   }
+
+  // 2) наличные
   if (step === "sales_cash") {
     return showTextStep(
       ctx,
       user,
-      "Введите сумму продаж за наличные",
+      "Введите сумму наличных продаж",
       "sales_cash",
       2,
-      TOTAL
+      TOTAL,
+      "Введите числом:"
     );
   }
+
+  // 3) наличные в кассе
   if (step === "cash_in_drawer") {
     return showTextStep(
       ctx,
       user,
-      "Сколько наличных в кассе? (ПЕРЕСЧИТАТЬ!)",
+      "Введите сумму наличных в кассе",
       "cash_in_drawer",
       3,
-      TOTAL
+      TOTAL,
+      "Введите числом:"
     );
   }
+
+  // 4) была инкассация?
   if (step === "was_cash_collection") {
     return showYesNo(
       ctx,
@@ -442,45 +466,110 @@ async function showByStep(ctx, user, step) {
       TOTAL
     );
   }
+
+  // 4) сумма инкассации
   if (step === "cash_collection_amount") {
-    // это подпункт 4, по UX оставляем 4/5
     return showTextStep(
       ctx,
       user,
       "Введите сумму инкассации",
       "cash_collection_amount",
       4,
-      TOTAL
+      TOTAL,
+      "Введите числом:"
     );
   }
+
+  // 4) кто инкассировал
   if (step === "cash_collection_by") {
     setSt(ctx.from.id, { step: "cash_collection_by" });
 
-    const st = getSt(ctx.from.id);
-    const row = await getClosingRow(st.shiftId);
-
     const tpTitle = await getTradePointTitle(st.tradePointId);
     const dateStr = new Date().toLocaleDateString("ru-RU");
+    const row = await getClosingRow(st.shiftId);
     const head = buildClosingSummary(tpTitle, dateStr, row);
 
-    const text = `🛑 <b>4/5</b>\n` + `${head}\n\n` + `<b>Кто инкассировал?</b>`;
+    // Берём назначенных через trade_point_responsibles (event_type = cash_collection_access)
+    // Если ничего не назначено — показываем fallback "Я".
+    const PAGE = 10;
+    const page = Number.isInteger(st.cashByPage) ? st.cashByPage : 0;
+    const offset = page * PAGE;
 
-    // пока минимально: "Я" (как и было), позже расширим списком разрешённых
-    const kb = Markup.inlineKeyboard([
-      [{ text: "🙋 Я", callback_data: "shift_close_cash_by_me" }],
-      [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
-      [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
-      [{ text: "⬅️ В меню", callback_data: "shift_close_to_menu" }],
+    let collectors = [];
+    let hasMore = false;
+
+    try {
+      const r = await pool.query(
+        `
+        SELECT u.id, u.full_name, u.username, u.work_phone
+        FROM trade_point_responsibles tpr
+        JOIN users u ON u.id = tpr.user_id
+        WHERE tpr.trade_point_id = $1
+          AND tpr.event_type = 'cash_collection_access'
+          AND tpr.is_active = true
+        ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
+        LIMIT $2 OFFSET $3
+        `,
+        [st.tradePointId, PAGE + 1, offset]
+      );
+      collectors = r.rows.slice(0, PAGE);
+      hasMore = r.rows.length > PAGE;
+    } catch (e) {
+      collectors = [];
+      hasMore = false;
+    }
+
+    const kbRows = [];
+
+    // "Я" всегда доступен
+    kbRows.push([{ text: "🙋 Я", callback_data: "shift_close_cash_by_me" }]);
+
+    for (const u of collectors) {
+      const label =
+        u.full_name || (u.username ? "@" + u.username : `ID ${u.id}`);
+      kbRows.push([
+        {
+          text: label,
+          callback_data: `shift_close_cash_by_${u.id}`,
+        },
+      ]);
+    }
+
+    if (page > 0 || hasMore) {
+      kbRows.push([
+        ...(page > 0
+          ? [{ text: "⬅️", callback_data: "shift_close_cash_by_prev" }]
+          : []),
+        ...(hasMore
+          ? [{ text: "➡️", callback_data: "shift_close_cash_by_next" }]
+          : []),
+      ]);
+    }
+
+    kbRows.push([
+      { text: "📝 Изменить", callback_data: "shift_close_edit_menu" },
     ]);
+    kbRows.push([{ text: "❌ Отмена", callback_data: "shift_close_cancel" }]);
+    kbRows.push([{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }]);
 
-    return deliver(ctx, { text, extra: kb }, { edit: true });
+    const text = `🛑 <b>4/${TOTAL}</b>\n${head}\n\nКто инкассировал?`;
+
+    return deliver(
+      ctx,
+      {
+        text,
+        extra: Markup.inlineKeyboard(kbRows),
+      },
+      { edit: true }
+    );
   }
 
+  // 5) количество чеков
   if (step === "checks_count") {
     return showTextStep(
       ctx,
       user,
-      "Введите количество чеков за день",
+      "Введите количество чеков",
       "checks_count",
       5,
       TOTAL,
@@ -488,27 +577,51 @@ async function showByStep(ctx, user, step) {
     );
   }
 
+  // доп. вопросы (shift_questions)
   if (step === "regulated") {
-    // подгружаем очередь, если ещё не подгружена
-    let stNow = getSt(ctx.from.id);
+    const queue = Array.isArray(st.queue) ? st.queue : [];
 
-    if (!stNow.queue) {
-      const queue = await loadClosingQuestionsForUser(user, stNow.tradePointId);
-      stNow = { ...stNow, queue, qIdx: 0, step: "regulated" };
-      setSt(ctx.from.id, stNow);
-    }
-
-    // если вопросов нет — финал в том же формате (5/5 + summary + кнопки)
-    if (!stNow.queue || stNow.queue.length === 0) {
+    // если нет вопросов — сразу финал
+    if (!queue.length) {
       return showFinishScreen(ctx, user, { edit: true });
     }
 
-    // показываем текущий вопрос из очереди
-    return showRegulatedQuestion(ctx, user, stNow.qIdx || 0, { edit: true });
+    let qIdx = Number.isInteger(st.qIdx) ? st.qIdx : null;
+
+    // восстановление позиции (если бот перезапускали и локальный state пуст)
+    if (qIdx === null) {
+      try {
+        const ans = await pool.query(
+          `SELECT shift_question_id FROM shift_answers WHERE shift_id = $1`,
+          [st.shiftId]
+        );
+        const answered = new Set(
+          ans.rows.map((r) => Number(r.shift_question_id))
+        );
+        let i = 0;
+        while (i < queue.length && answered.has(Number(queue[i].questionId)))
+          i++;
+        qIdx = i;
+      } catch (e) {
+        qIdx = 0;
+      }
+    }
+
+    if (qIdx >= queue.length) {
+      setSt(ctx.from.id, { qIdx: queue.length });
+      return showFinishScreen(ctx, user, { edit: true });
+    }
+
+    st = { ...st, step: "regulated", qIdx };
+    setSt(ctx.from.id, st);
+
+    return showRegulatedQuestion(ctx, user, st, { edit: true });
   }
 
-  // финал
-  return showFinishScreen(ctx, user, { edit: true });
+  // финал (подтверждение)
+  if (step === "finish") {
+    return showFinishScreen(ctx, user, { edit: true });
+  }
 }
 
 // ---------- registration ----------
@@ -923,6 +1036,24 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     }
   });
 
+  bot.action("shift_close_edit_menu_regulated", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.shiftId) return;
+
+      // Переходим к доп. вопросам
+      setSt(ctx.from.id, { step: "regulated", qIdx: 0 });
+
+      await showByStep(ctx, user, "regulated");
+    } catch (e) {
+      logError("shift_close_edit_menu_regulated", e);
+    }
+  });
+
   bot.action(/^shift_close_jump_(.+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1088,6 +1219,69 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
     }
   });
 
+  bot.action(/^shift_close_cash_by_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const chosenId = Number(ctx.match[1]);
+
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.shiftId) return;
+
+      await pool.query(
+        `UPDATE shift_closings
+         SET cash_collection_by_user_id = $1,
+             step = 'checks_count'
+         WHERE shift_id = $2`,
+        [chosenId, st.shiftId]
+      );
+
+      setSt(ctx.from.id, { step: "checks_count", cashByPage: 0 });
+
+      await showByStep(ctx, user, "checks_count");
+    } catch (e) {
+      logError("shift_close_cash_by_id", e);
+    }
+  });
+
+  bot.action("shift_close_cash_by_prev", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.shiftId) return;
+
+      const page = Number.isInteger(st.cashByPage) ? st.cashByPage : 0;
+      setSt(ctx.from.id, { cashByPage: Math.max(0, page - 1) });
+
+      await showByStep(ctx, user, "cash_collection_by");
+    } catch (e) {
+      logError("shift_close_cash_by_prev", e);
+    }
+  });
+
+  bot.action("shift_close_cash_by_next", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.shiftId) return;
+
+      const page = Number.isInteger(st.cashByPage) ? st.cashByPage : 0;
+      setSt(ctx.from.id, { cashByPage: page + 1 });
+
+      await showByStep(ctx, user, "cash_collection_by");
+    } catch (e) {
+      logError("shift_close_cash_by_next", e);
+    }
+  });
+
   // --- regulated answers (text/number/photo/video) ---
   bot.on("text", async (ctx, next) => {
     const st = getSt(ctx.from.id);
@@ -1137,12 +1331,16 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
         // регулируемые закончились -> финал
         setSt(ctx.from.id, { ...st, step: "finish" });
         await showFinishScreen(ctx, user, { edit: true });
-
         return;
       }
 
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
+      await showRegulatedQuestion(
+        ctx,
+        user,
+        { ...st, qIdx: nextIdx },
+        { edit: true }
+      );
     } catch (e) {
       logError("shift_close_regulated_text", e);
       await ctx.reply("❌ Ошибка сохранения ответа.");
@@ -1177,11 +1375,15 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       if (nextIdx >= st.queue.length) {
         setSt(ctx.from.id, { ...st, step: "finish" });
         await showFinishScreen(ctx, user, { edit: true });
-
         return;
       }
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
+      await showRegulatedQuestion(
+        ctx,
+        user,
+        { ...st, qIdx: nextIdx },
+        { edit: true }
+      );
     } catch (e) {
       logError("shift_close_regulated_photo", e);
       await ctx.reply("❌ Ошибка сохранения фото.");
@@ -1215,11 +1417,15 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       if (nextIdx >= st.queue.length) {
         setSt(ctx.from.id, { ...st, step: "finish" });
         await showFinishScreen(ctx, user, { edit: true });
-
         return;
       }
       setSt(ctx.from.id, { ...st, qIdx: nextIdx });
-      await showRegulatedQuestion(ctx, user, nextIdx, { edit: true });
+      await showRegulatedQuestion(
+        ctx,
+        user,
+        { ...st, qIdx: nextIdx },
+        { edit: true }
+      );
     } catch (e) {
       logError("shift_close_regulated_video", e);
       await ctx.reply("❌ Ошибка сохранения видео.");
