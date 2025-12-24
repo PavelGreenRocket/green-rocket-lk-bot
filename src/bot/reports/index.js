@@ -1,8 +1,16 @@
+// src/bot/reports/index.js
 const { Markup } = require("telegraf");
-const pool = require("../db");
-const { deliver, toast } = require("../utils");
 
-const PAGE_SIZE = 10;
+const pool = require("../../db/pool");
+const { deliver } = require("../../utils/renderHelpers");
+const { toast, alert } = require("../../utils/toast");
+
+// Picker pages (users/points) — по 10, как и было
+const PAGE_SIZE_PICKER = 10;
+
+// Reports list page sizes
+const LIST_LIMIT_CASH = 10;
+const LIST_LIMIT_ANALYTICS = 20;
 
 // ───────────────────────────────────────────────────────────────
 // In-memory state (per Telegram user). Survives within process only.
@@ -22,6 +30,208 @@ function clrSt(tgId) {
 
 function isAdmin(user) {
   return user?.role === "admin" || user?.role === "super_admin";
+}
+
+function defaultFormatFor(user) {
+  // По умолчанию: у сотрудников кассовый, у админов "анализ 1"
+  return isAdmin(user) ? "analysis1" : "cash";
+}
+
+function fmtMoneyRub(v) {
+  const n = Number(v);
+  if (v == null || Number.isNaN(n)) return "-";
+  return `${new Intl.NumberFormat("ru-RU").format(n)} ₽`;
+}
+
+function userLabelCash(row, { admin }) {
+  const name = row.full_name || "—";
+  // username — только для админа
+  if (admin && row.username) return `${name} (@${row.username})`;
+  // если нет username — показываем телефон
+  if (row.work_phone) return `${name} (${row.work_phone})`;
+  return name;
+}
+
+function renderCashCard(row, { admin }) {
+  const lines = [];
+
+  lines.push(`<b>Сотрудник:</b> ${userLabelCash(row, { admin })}`);
+
+  const date = fmtDateShort(row.opened_at);
+  const dow = fmtDowShort(row.opened_at);
+  lines.push(`<b>Дата:</b> ${date} (${dow})`);
+
+  const tp = row.trade_point_title || `Точка #${row.trade_point_id}`;
+  if (admin) {
+    const from = fmtTime(row.opened_at);
+    const to = row.closed_at ? fmtTime(row.closed_at) : "-";
+    lines.push(`<b>${tp}:</b> (${from} → ${to})`);
+  } else {
+    lines.push(`<b>${tp}</b>`);
+  }
+
+  lines.push("");
+
+  lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
+  lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
+  lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)}`);
+
+  lines.push("");
+
+  lines.push(`<b>Чеков:</b> ${row.checks_count ?? "-"}`);
+
+  if (row.was_cash_collection) {
+    lines.push(`<b>Инкассация:</b> ${fmtMoneyRub(row.cash_collection_amount)}`);
+  } else if (row.was_cash_collection === false) {
+    lines.push(`<b>Инкассация:</b> НЕТ`);
+  } else {
+    lines.push(`<b>Инкассация:</b> -`);
+  }
+
+  lines.push("──────────────");
+  return lines.join("\n");
+}
+
+function renderAnalysisTable(rows, { elements, filters }) {
+  const set = new Set(Array.isArray(elements) ? elements : []);
+
+  // Фиксированные колонки по умолчанию:
+  // Дата | ДН | Продажи | Чек | ВП
+  // Остальные метрики (если включат через "По элементам") можно добавить позже.
+  const pointIds = Array.isArray(filters?.pointIds) ? filters.pointIds : [];
+  const showTp = pointIds.length !== 1; // если выбрана ровно 1 точка — колонку скрываем
+
+  const cols = [
+    { key: "date", title: "Дата", w: 8 },
+    { key: "dow", title: "ДН", w: 2 },
+  ];
+
+  if (showTp) cols.push({ key: "tp", title: "точ", w: 3 });
+
+  cols.push(
+    { key: "sales_total", title: "Продажи", w: 8 },
+    { key: "checks_count", title: "Чек", w: 3 },
+    { key: "gp", title: "ВП", w: 3 }
+  );
+
+  // Если позже захочешь включать доп. колонки через elements — вот тут добавлять.
+  // Сейчас по задаче "всё остальное выключено по умолчанию", поэтому ничего не добавляем.
+
+  const cut = (v, w) => {
+    const s = String(v ?? "");
+    return s.length > w ? s.slice(0, w - 1) + "…" : s.padEnd(w, " ");
+  };
+
+  const makeMap = (r) => ({
+    date: fmtDateShort(r.opened_at),
+    dow: fmtDowShort(r.opened_at),
+    tp: r.trade_point_title || `#${r.trade_point_id}`, // влезет в 3 символа через cut()
+    sales_total: fmtMoney(r.sales_total),
+    checks_count: r.checks_count ?? "-",
+    gp: "-", // Валовая прибыль — пока заглушка
+  });
+
+  const header = cols.map((c) => cut(c.title, c.w)).join(" | ");
+
+  const body = rows
+    .map((r) => {
+      const map = makeMap(r);
+      return cols.map((c) => cut(map[c.key], c.w)).join(" | ");
+    })
+    .join("\n");
+
+  return `<pre>${header}\n${body}</pre>`;
+}
+
+function renderAnalysisTable2(rows, { filters }) {
+  // Группируем по точке (short name уже в trade_points.title)
+  const byTp = new Map();
+
+  for (const r of rows) {
+    const tp = r.trade_point_title || `#${r.trade_point_id}`;
+    const cur = byTp.get(tp) || { tp, sales: 0, checks: 0 };
+    cur.sales += Number(r.sales_total) || 0;
+    cur.checks += Number(r.checks_count) || 0;
+    byTp.set(tp, cur);
+  }
+
+  const list = [...byTp.values()].sort((a, b) =>
+    a.tp.localeCompare(b.tp, "ru")
+  );
+
+  const cols = [
+    { key: "tp", title: "Точ" },
+    { key: "to", title: "ТО" },
+    { key: "gp", title: "ВП" },
+    { key: "np", title: "ЧП" },
+    { key: "avg", title: "ср. чек" },
+  ];
+
+  const fmtAvg = (n) => {
+    const x = Number(n);
+    if (!x || Number.isNaN(x)) return "-";
+    // 1 знак после запятой, как в скрине "31,7"
+    return x.toFixed(1).replace(".", ",");
+  };
+
+  const makeRow = (x) => {
+    const avg = x.checks ? x.sales / x.checks : 0;
+    const map = {
+      tp: x.tp,
+      to: fmtMoney(x.sales),
+      gp: "-",
+      np: "-",
+      avg: fmtAvg(avg),
+    };
+    return cols.map((c) => String(map[c.key] ?? "")).join(" | ");
+  };
+
+  // если хочешь ровные колонки — используем padding как в renderAnalysisTable
+  const tableRaw = [cols.map((c) => c.title).join(" | "), ...list.map(makeRow)];
+
+  // простая выравнивалка по ширинам
+  const split = tableRaw.map((line) => line.split(" | "));
+  const widths = [];
+  for (const parts of split) {
+    parts.forEach((p, i) => {
+      widths[i] = Math.max(widths[i] || 0, (p || "").length);
+    });
+  }
+  const pad = (s, w) => s + " ".repeat(Math.max(0, w - s.length));
+  const aligned = split
+    .map((parts) => parts.map((p, i) => pad(p || "", widths[i])).join(" | "))
+    .join("\n");
+
+  return `<pre>${aligned}</pre>`;
+}
+
+function renderFormatKeyboard(st) {
+  const cur = st.format || "cash";
+  const mark = (v) => (cur === v ? "✅ " : "");
+
+  const buttons = [
+    [
+      Markup.button.callback(
+        `${mark("cash")}Кассовый`,
+        "lk_reports_format_set_cash"
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `${mark("analysis1")}Для анализа 1`,
+        "lk_reports_format_set_analysis1"
+      ),
+    ],
+    [
+      Markup.button.callback(
+        `${mark("analysis2")}Для анализа 2`,
+        "lk_reports_format_set_analysis2"
+      ),
+    ],
+    [Markup.button.callback("⬅️ Назад", "lk_reports_format_close")],
+  ];
+
+  return Markup.inlineKeyboard(buttons);
 }
 
 function fmtMoney(v) {
@@ -116,12 +326,26 @@ function buildReportsWhere(filters) {
     i += 1;
   }
 
+  const dateFrom = filters?.dateFrom; // 'YYYY-MM-DD'
+  const dateTo = filters?.dateTo; // 'YYYY-MM-DD'
+
+  if (dateFrom) {
+    values.push(dateFrom);
+    where.push(`s.opened_at >= $${i}::date`);
+    i += 1;
+  }
+  if (dateTo) {
+    values.push(dateTo);
+    where.push(`s.opened_at < ($${i}::date + INTERVAL '1 day')`);
+    i += 1;
+  }
+
   return { whereSql: where.join(" AND "), values, nextIdx: i };
 }
 
-async function loadReportsPage({ page, filters }) {
-  const offset = Math.max(0, page) * PAGE_SIZE;
-  const limit = PAGE_SIZE;
+async function loadReportsPage({ page, filters, limit }) {
+  const safeLimit = Math.max(1, Number(limit) || LIST_LIMIT_CASH);
+  const offset = Math.max(0, page) * safeLimit;
 
   const { whereSql, values, nextIdx } = buildReportsWhere(filters);
 
@@ -199,25 +423,25 @@ async function loadReportsPage({ page, filters }) {
     LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
   `;
 
-  const params = [...values, limit + 1, offset];
+  const params = [...values, safeLimit + 1, offset];
 
   try {
     const r = await pool.query(sqlWithDelete, params);
-    const rows = r.rows.slice(0, limit);
-    const hasMore = r.rows.length > limit;
+    const rows = r.rows.slice(0, safeLimit);
+    const hasMore = r.rows.length > safeLimit;
     return { rows, hasMore };
   } catch (e) {
     // fallback до миграции
     const r = await pool.query(sqlNoDelete, params);
-    const rows = r.rows.slice(0, limit);
-    const hasMore = r.rows.length > limit;
+    const rows = r.rows.slice(0, safeLimit);
+    const hasMore = r.rows.length > safeLimit;
     return { rows, hasMore };
   }
 }
 
 async function loadUsersPage({ page, search }) {
-  const offset = Math.max(0, page) * PAGE_SIZE;
-  const limit = PAGE_SIZE;
+  const offset = Math.max(0, page) * PAGE_SIZE_PICKER;
+  const limit = PAGE_SIZE_PICKER;
 
   const s = String(search || "").trim();
   const isId = /^\d+$/.test(s);
@@ -256,8 +480,8 @@ async function loadUsersPage({ page, search }) {
 }
 
 async function loadTradePointsPage({ page }) {
-  const offset = Math.max(0, page) * PAGE_SIZE;
-  const limit = PAGE_SIZE;
+  const offset = Math.max(0, page) * PAGE_SIZE_PICKER;
+  const limit = PAGE_SIZE_PICKER;
 
   const r = await pool.query(
     `
@@ -368,15 +592,9 @@ function formatReportCard(row, idx, { admin, elements, selectedMark = "" }) {
 }
 
 function defaultElementsFor(user) {
-  const base = [
-    "sales_total",
-    "sales_cash",
-    "cash_in_drawer",
-    "cash_collection",
-    "checks_count",
-  ];
-  if (isAdmin(user)) return [...base, "time"];
-  return base;
+  // По умолчанию включены только базовые метрики
+  // (остальное пользователь может включить через "По элементам")
+  return ["sales_total", "checks_count"];
 }
 
 function buildFiltersSummary(filters) {
@@ -401,63 +619,218 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   const st = getSt(ctx.from.id) || {};
   const page = Number.isInteger(st.page) ? st.page : 0;
-  const filters = admin ? st.filters || {} : { workerIds: [user.id] };
+  const filters = admin ? { ...(st.filters || {}) } : { workerIds: [user.id] };
+
+  // Подключаем период
+  if (st.periodFrom) filters.dateFrom = st.periodFrom;
+  if (st.periodTo) filters.dateTo = st.periodTo;
+
   const elements = st.elements || defaultElementsFor(user);
+  const format = st.format || defaultFormatFor(user);
+  const isAnalysis = ["analysis", "analysis1", "analysis2"].includes(format);
+  const limit = isAnalysis ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
 
   // housekeeping (best-effort)
   await purgeOldDeletedReports();
 
-  const { rows, hasMore } = await loadReportsPage({ page, filters });
+  const { rows, hasMore } = await loadReportsPage({ page, filters, limit });
 
-  const header = "📊 <b>Отчёты</b>";
-  const filterLine = admin ? buildFiltersSummary(filters) : "";
-  const body = rows.length
-    ? rows
-        .map((r, i) =>
-          formatReportCard(r, i + 1 + page * PAGE_SIZE, {
-            admin,
-            elements,
-          })
+  const inDateUi = Boolean(st.dateUi); // открыт выбор периода
+  const filterOpened = !inDateUi && admin && Boolean(st.filterOpened);
+
+  const formatLabel = isAnalysis ? "для анализа" : "стандарт";
+
+  // label точек для заголовка аналитики
+  let pointsLabel = "Все";
+  try {
+    const f = filters || {};
+    if (Array.isArray(f.pointIds) && f.pointIds.length) {
+      const r = await pool.query(
+        `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
+        [f.pointIds]
+      );
+      const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
+      if (titles.length) pointsLabel = titles.join(", ");
+    }
+  } catch (_) {
+    // молча оставляем "Все"
+  }
+
+  const header = admin
+    ? format === "cash"
+      ? ` <b>Отчёты (стандарт)</b>`
+      : ` <b>(${pointsLabel}) АНАЛИТИКА ЗА ПЕРИОД</b>`
+    : "";
+
+  // Фильтры показываем ТОЛЬКО когда фильтр раскрыт
+  let filterBlock = null;
+
+  if (filterOpened) {
+    const lines = [];
+    const f = filters || {};
+
+    // 1) Точки (показываем реальные названия)
+    if (Array.isArray(f.pointIds) && f.pointIds.length) {
+      try {
+        const r = await pool.query(
+          `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
+          [f.pointIds]
+        );
+        const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
+        if (titles.length) lines.push(titles.join(", "));
+      } catch (_) {
+        // если вдруг не получилось — не ломаем экран
+        lines.push("Точки");
+      }
+    }
+
+    // 2) Элементы (то, что сейчас выбрано)
+    const el = Array.isArray(st.elements) ? st.elements : [];
+    const names = [];
+    if (el.includes("sales_total")) names.push("Продажи");
+    if (el.includes("checks_count")) names.push("Чек");
+    if (el.includes("sales_cash")) names.push("Нал");
+    if (el.includes("cash_in_drawer")) names.push("В кассе");
+    if (el.includes("cash_collection")) names.push("Инкассация");
+    if (names.length) lines.push(names.join(", "));
+
+    filterBlock = lines.length
+      ? "Фильтры:\n" + lines.map((x, i) => `${i + 1}. ${x}`).join("\n")
+      : "Фильтры: Нет";
+  }
+
+  const hideTable = Boolean(st.hideTable);
+
+  let body = "Пока нет закрытых смен.";
+  if (rows.length) {
+    const isAnalysis = format === "analysis1" || format === "analysis2";
+
+    const rowsForUi = isAnalysis
+      ? [...rows].sort(
+          (a, b) =>
+            new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
         )
-        .join("\n\n")
-    : "Пока нет закрытых смен.";
+      : rows;
 
-  const text = [header, filterLine, "", body].filter(Boolean).join("\n");
+    body = isAnalysis
+      ? format === "analysis2"
+        ? renderAnalysisTable2(rowsForUi, { filters })
+        : renderAnalysisTable(rowsForUi, { elements, filters })
+      : rowsForUi.map((r) => renderCashCard(r, { admin })).join("\n\n");
+  }
+
+  // Сводка показывается ТОЛЬКО когда фильтр закрыт (и только для формата анализа)
+  let summaryBlock = null;
+
+  if (!filterOpened && isAnalysis && rows.length) {
+    const dates = rows
+      .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
+      .filter(Boolean);
+
+    const dayStart = (d) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const minD = new Date(Math.min(...dates.map((d) => dayStart(d).getTime())));
+    const maxD = new Date(Math.max(...dates.map((d) => dayStart(d).getTime())));
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
+
+    const sumSales = rows.reduce(
+      (acc, r) => acc + (Number(r.sales_total) || 0),
+      0
+    );
+    const sumChecks = rows.reduce(
+      (acc, r) => acc + (Number(r.checks_count) || 0),
+      0
+    );
+
+    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub1 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }).format(n)} ₽`;
+
+    const periodFrom = fmtDateShort(minD);
+    const periodTo = fmtDateShort(maxD);
+
+    // 4) Среднее кол-во чеков в день = сумма чеков / дни
+    const avgChecksPerDay = sumChecks ? sumChecks / days : 0;
+
+    // 3) Средний чек = продажи / чеки, округление до десятых
+    const avgCheck = sumChecks ? sumSales / sumChecks : 0;
+
+    // 5) Средние продажи в день = продажи / дни
+    const avgSalesPerDay = sumSales ? sumSales / days : 0;
+
+    summaryBlock = [
+      `📊 ${periodFrom} — ${periodTo} (${days} дн)`,
+
+      "",
+      `<u><b>Финансы</b></u>`,
+      `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
+      `• <b>Валовая прибыль:</b> —`,
+      `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
+      "",
+      `<u><b>Поведение гостей</b></u>`,
+      `• <b>Кол-во чеков за период:</b> ${fmtMoney(sumChecks)}`,
+      `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
+      `• <b>Среднее кол-во чеков в день:</b> ${
+        avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
+      }`,
+    ].join("\n");
+  }
+
+  const text = [header, filterBlock, summaryBlock, "", body]
+    .filter(Boolean)
+    .join("\n");
 
   const buttons = [];
 
   // top controls
   if (admin) {
-    const filterOpened = Boolean(st.filterOpened);
-    buttons.push([
-      Markup.button.callback(
-        filterOpened ? "▴ Фильтр" : "▾ Фильтр",
-        "lk_reports_filter_toggle"
-      ),
-      Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
-    ]);
+    if (!filterOpened) {
+      // закрыт: показываем фильтр + настройки
+      buttons.push([
+        Markup.button.callback("🔍 Фильтр", "lk_reports_filter_toggle"),
+        Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
+      ]);
+    } else {
+      // открыт: настройки скрываем, показываем только "скрыть фильтр"
+      buttons.push([
+        Markup.button.callback(
+          "🔍 Фильтр (скрыть)",
+          "lk_reports_filter_toggle"
+        ),
+      ]);
+    }
   } else {
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_last"),
+      Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
     ]);
   }
 
   // expanded filter menu
   if (admin && st.filterOpened) {
+    // 2) Выбрать дату
+    buttons.push([
+      Markup.button.callback("📅 Выбрать дату", "lk_reports_filter_date"),
+    ]);
+
+    // 3) По сотрудникам | по точке
     buttons.push([
       Markup.button.callback("👥 По сотрудникам", "lk_reports_filter_workers"),
       Markup.button.callback("🏬 По точке", "lk_reports_filter_points"),
     ]);
+
+    // 4) По дням недели | По элементам
     buttons.push([
       Markup.button.callback("📆 По дням недели", "lk_reports_filter_weekdays"),
-      Markup.button.callback("▾ По элементам", "lk_reports_filter_elements"),
+      Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
     ]);
-    buttons.push([
-      Markup.button.callback("📅 Выбрать дату", "lk_reports_filter_date"),
-    ]);
-    buttons.push([
-      Markup.button.callback("ℹ️ Доп. информация", "lk_reports_filter_info"),
-    ]);
+
+    // 5) Сбросить фильтр
     buttons.push([
       Markup.button.callback("🧹 Сбросить фильтр", "lk_reports_filter_clear"),
     ]);
@@ -466,16 +839,97 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   if (hasMore) {
     buttons.push([Markup.button.callback("➡️ ещё", "lk_reports_more")]);
   }
-  buttons.push([Markup.button.callback("⬅️ К смене", "lk_profile_shift")]);
+  if (admin) {
+    buttons.push([
+      Markup.button.callback("⬅️ К смене", "lk_profile_shift"),
+      Markup.button.callback("🎛 Формат", "lk_reports_format_open"),
+    ]);
+  } else {
+    buttons.push([Markup.button.callback("⬅️ К смене", "lk_profile_shift")]);
+  }
+
+  const st2 = getSt(ctx.from.id) || {};
+
+  // Если открыт выбор даты — показываем его клавиатуру (main или pick)
+
+  let kb = null;
+
+  if (st2.dateUi?.mode === "main") {
+    kb = renderDateMainKeyboard(st2);
+  } else if (st2.dateUi?.mode === "pick") {
+    kb = renderPickKeyboard(st2.dateUi);
+  } else if (st2.formatUi?.mode === "menu") {
+    kb = renderFormatKeyboard(st2);
+  } else {
+    kb = Markup.inlineKeyboard(buttons);
+  }
 
   return deliver(
     ctx,
     {
       text,
-      extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
+      extra: { ...(kb || {}), parse_mode: "HTML" },
     },
     { edit }
   );
+}
+
+async function loadPeriodSettings(userId) {
+  const r = await pool.query(
+    `SELECT preset, date_from, date_to
+     FROM report_period_settings
+     WHERE user_id = $1`,
+    [userId]
+  );
+  return r.rows[0] || null;
+}
+
+async function savePeriodSettings(userId, preset, dateFrom, dateTo) {
+  await pool.query(
+    `INSERT INTO report_period_settings(user_id, preset, date_from, date_to)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE
+     SET preset = EXCLUDED.preset,
+         date_from = EXCLUDED.date_from,
+         date_to = EXCLUDED.date_to,
+         updated_at = now()`,
+    [userId, preset, dateFrom, dateTo]
+  );
+}
+
+function todayLocalDate() {
+  // Берём "сегодня" как календарную дату (без времени)
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+function toPgDate(d) {
+  // d = Date (00:00)
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function clampToToday(d) {
+  const t = todayLocalDate();
+  return d > t ? t : d;
+}
+
+function swapIfFromAfterTo(from, to) {
+  return from > to ? [to, from] : [from, to];
+}
+
+function startOfWeekMonday(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = x.getDay(); // 0 Sun..6 Sat
+  const diff = day === 0 ? 6 : day - 1; // Monday=0
+  x.setDate(x.getDate() - diff);
+  return x;
+}
+
+function startOfMonth(d) {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
 }
 
 async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
@@ -558,9 +1012,103 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
 
   const { rows, hasMore } = await loadTradePointsPage({ page });
 
-  const title = "🏬 <b>Фильтр по точкам</b>";
-  const info = `Выбрано: <b>${selected.size}</b>\n`;
-  const text = `${title}\n${info}`;
+  // вместо отдельного экрана фильтра — показываем АНАЛИЗ (как в списке отчётов)
+  const pageList = Number.isInteger((getSt(ctx.from.id) || {}).page)
+    ? (getSt(ctx.from.id) || {}).page
+    : 0;
+  const st2 = getSt(ctx.from.id) || {};
+  const admin2 = isAdmin(user);
+  const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
+  const format2 = st2.format || defaultFormatFor(user);
+  const elements2 = st2.elements || defaultElementsFor(user);
+  const limit2 =
+    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+
+  const { rows: listRows } = await loadReportsPage({
+    page: pageList,
+    filters: filters2,
+    limit: limit2,
+  });
+
+  // формируем summaryBlock (копия логики showReportsList)
+  let summaryBlock2 = null;
+  if (format2 === "analysis" && listRows.length) {
+    const dates = listRows
+      .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
+      .filter(Boolean);
+
+    const dayStart = (d) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const minD = new Date(Math.min(...dates.map((d) => dayStart(d).getTime())));
+    const maxD = new Date(Math.max(...dates.map((d) => dayStart(d).getTime())));
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
+
+    const sumSales = listRows.reduce(
+      (acc, r) => acc + (Number(r.sales_total) || 0),
+      0
+    );
+    const sumChecks = listRows.reduce(
+      (acc, r) => acc + (Number(r.checks_count) || 0),
+      0
+    );
+
+    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub1 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }).format(n)} ₽`;
+
+    const periodFrom = fmtDateShort(minD);
+    const periodTo = fmtDateShort(maxD);
+
+    const avgChecksPerDay = sumChecks ? sumChecks / days : 0;
+    const avgCheck = sumChecks ? sumSales / sumChecks : 0;
+    const avgSalesPerDay = sumSales ? sumSales / days : 0;
+
+    summaryBlock2 = [
+      `📊 ${periodFrom} — ${periodTo} (${days} дн)`,
+
+      "",
+      `<b>Финансы</b>`,
+      `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
+      `• <b>Валовая прибыль:</b> —`,
+      `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
+      "",
+      `<b>Поведение гостей</b>`,
+      `• Кол-во чеков за период: ${fmtMoney(sumChecks)}`,
+      `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
+      `• <b>Среднее кол-во чеков в день:</b> ${
+        avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
+      }`,
+    ].join("\n");
+  }
+
+  let body2 = "Пока нет закрытых смен.";
+  if (listRows.length) {
+    const rowsForUi =
+      format2 === "analysis1" || format2 === "analysis2"
+        ? [...listRows].sort(
+            (a, b) =>
+              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
+          )
+        : listRows;
+
+    body2 =
+      format2 === "analysis1" || format2 === "analysis2"
+    
+        ? renderAnalysisTable(rowsForUi, {
+            elements: elements2,
+            filters: filters2,
+          })
+        : rowsForUi
+            .map((r) => renderCashCard(r, { admin: admin2 }))
+            .join("\n\n");
+  }
+
+  const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
 
   const buttons = [];
 
@@ -606,8 +1154,44 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
     Array.isArray(filters.weekdays) ? filters.weekdays : []
   );
 
-  const title = "📆 <b>Фильтр по дням недели</b>\n";
-  const text = title;
+  // показываем АНАЛИЗ (как на экране отчёта), а не отдельный экран "фильтр"
+  const st2 = getSt(ctx.from.id) || {};
+  const admin2 = isAdmin(user);
+  const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
+  const format2 = st2.format || defaultFormatFor(user);
+  const elements2 = st2.elements || defaultElementsFor(user);
+  const limit2 =
+    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+
+  const { rows: listRows } = await loadReportsPage({
+    page: 0,
+    filters: filters2,
+    limit: limit2,
+  });
+
+  let summaryBlock2 = null;
+  let body2 = "Пока нет закрытых смен.";
+  if (listRows.length) {
+    const rowsForUi =
+      format2 === "analysis1" || format2 === "analysis2"
+        ? [...listRows].sort(
+            (a, b) =>
+              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
+          )
+        : listRows;
+
+    body2 =
+      format2 === "analysis1" || format2 === "analysis2"
+        ? renderAnalysisTable(rowsForUi, {
+            elements: elements2,
+            filters: filters2,
+          })
+        : rowsForUi
+            .map((r) => renderCashCard(r, { admin: admin2 }))
+            .join("\n\n");
+  }
+
+  const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
 
   const btn = (isoDow, label) => {
     const mark = selected.has(isoDow) ? "✅" : "☑️";
@@ -642,8 +1226,44 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
     : defaultElementsFor(user);
   const set = new Set(elements);
 
-  const title = "▾ <b>Элементы отчёта</b>\n";
-  const text = title;
+  // показываем АНАЛИЗ (как на экране отчёта), а не отдельный экран "фильтр"
+  const st2 = getSt(ctx.from.id) || {};
+  const admin2 = isAdmin(user);
+  const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
+  const format2 = st2.format || defaultFormatFor(user);
+  const elements2 = st2.elements || defaultElementsFor(user);
+  const limit2 =
+    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+
+  const { rows: listRows } = await loadReportsPage({
+    page: 0,
+    filters: filters2,
+    limit: limit2,
+  });
+
+  let summaryBlock2 = null;
+  let body2 = "Пока нет закрытых смен.";
+  if (listRows.length) {
+    const rowsForUi =
+      format2 === "analysis1" || format2 === "analysis2"
+        ? [...listRows].sort(
+            (a, b) =>
+              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
+          )
+        : listRows;
+
+    body2 =
+      format2 === "analysis1" || format2 === "analysis2"
+        ? renderAnalysisTable(rowsForUi, {
+            elements: elements2,
+            filters: filters2,
+          })
+        : rowsForUi
+            .map((r) => renderCashCard(r, { admin: admin2 }))
+            .join("\n\n");
+  }
+
+  const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
 
   const items = [
     ["sales_total", "Сумма продаж"],
@@ -677,13 +1297,35 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
 
 async function showSettings(ctx, user, { edit = true } = {}) {
   setSt(ctx.from.id, { view: "settings" });
-  const text = "⚙️ <b>Настройки отчётов</b>";
 
-  const buttons = [
-    [Markup.button.callback("🗑 Удалить отчёты", "lk_reports_delete_mode")],
-    [Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_pick")],
-    [Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")],
-  ];
+  const st = getSt(ctx.from.id) || {};
+  const format = st.format || defaultFormatFor(user);
+  const fmtLabel =
+    format === "analysis"
+      ? "🧾 Формат отчёта: для анализа"
+      : "🧾 Формат отчёта: кассовый";
+
+  const text = "⚙️ <b>Настройки отчётов</b>\n\nВыберите действие:";
+
+  const buttons = [];
+
+  // Доступно всем
+  buttons.push([Markup.button.callback(fmtLabel, "lk_reports_format_toggle")]);
+  buttons.push([
+    Markup.button.callback("ℹ️ Доп. информация", "lk_reports_info"),
+  ]);
+
+  // Только админские действия
+  if (isAdmin(user)) {
+    buttons.push([
+      Markup.button.callback("🗑 Удалить отчёты", "lk_reports_delete_mode"),
+    ]);
+    buttons.push([
+      Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_pick"),
+    ]);
+  }
+
+  buttons.push([Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")]);
 
   return deliver(
     ctx,
@@ -709,7 +1351,7 @@ async function showDeleteMode(ctx, user, { edit = true } = {}) {
     ? rows
         .map((r, i) => {
           const mark = selected.has(r.shift_id) ? "❌ " : "";
-          return formatReportCard(r, i + 1 + page * PAGE_SIZE, {
+          return formatReportCard(r, i + 1 + page * LIST_LIMIT_CASH, {
             admin: true,
             elements: defaultElementsFor(user),
             selectedMark: mark,
@@ -799,7 +1441,7 @@ async function showEditPick(ctx, user, { edit = true } = {}) {
   const body = rows.length
     ? rows
         .map((r, i) =>
-          formatReportCard(r, i + 1 + page * PAGE_SIZE, {
+          formatReportCard(r, i + 1 + page * LIST_LIMIT_CASH, {
             admin: true,
             elements: defaultElementsFor(user),
           })
@@ -1027,10 +1669,395 @@ async function askEditTime(ctx, user, { edit = true } = {}) {
   );
 }
 
+function monthNameRu(m) {
+  const names = [
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+  ];
+  return names[m] || "";
+}
+
+function renderDateMainKeyboard(st) {
+  const from = st.periodFrom; // 'YYYY-MM-DD'
+  const to = st.periodTo;
+
+  const f = from.split("-"); // [yyyy, mm, dd]
+  const t = to.split("-");
+
+  const fd = f[2],
+    fm = f[1],
+    fy = String(f[0]).slice(-2);
+  const td = t[2],
+    tm = t[1],
+    ty = String(t[0]).slice(-2);
+
+  const preset = st.periodPreset || "month";
+  const hideTable = Boolean(st.hideTable);
+
+  // месяц для заголовка берём из periodFrom
+  const curMonthIdx = Number(fm) - 1; // 0..11
+  const monthTitle = monthNameRu(curMonthIdx);
+
+  const btn = (text, data) => Markup.button.callback(text, data);
+
+  // 1) Месяц: ← февраль →
+  const rowMonth = [
+    btn("←", "date_month:prev"),
+    btn(monthTitle, "noop"),
+    btn("→", "date_month:next"),
+  ];
+
+  // 2) Конструктор дат (точки на дд. и мм.)
+  const rowDates = [
+    btn(`${fd}.`, "date_part:from:d"),
+    btn(`${fm}.`, "date_part:from:m"),
+    btn(`${fy}`, "date_part:from:y"),
+    btn("—", "noop"),
+    btn(`${td}.`, "date_part:to:d"),
+    btn(`${tm}.`, "date_part:to:m"),
+    btn(`${ty}`, "date_part:to:y"),
+  ];
+
+  // 3) неделя/месяц
+  const rowWeekMonth = [
+    btn(preset === "week" ? "✅ эта неделя" : "эта неделя", "date_preset:week"),
+    btn(
+      preset === "month" ? "✅ этот месяц" : "этот месяц",
+      "date_preset:month"
+    ),
+  ];
+
+  // 4) вчера/сегодня
+  const rowYesterdayToday = [
+    btn(preset === "yesterday" ? "✅ вчера" : "вчера", "date_preset:yesterday"),
+    btn(preset === "today" ? "✅ сегодня" : "сегодня", "date_preset:today"),
+  ];
+
+  // 5) назад/скрыть таб
+  const rowBottom = [
+    btn("⬅️ назад", "date_back"),
+    btn(hideTable ? "Показать таб" : "Скрыть таб", "date_table:toggle"),
+  ];
+
+  return Markup.inlineKeyboard([
+    rowMonth,
+    rowDates,
+    rowWeekMonth,
+    rowYesterdayToday,
+    rowBottom,
+  ]);
+}
+
+async function showDateMenu(ctx, user, { edit = true } = {}) {
+  const st = getSt(ctx.from.id) || {};
+  setSt(ctx.from.id, { dateUi: { mode: "main" } });
+
+  const text =
+    "📅 <b>Выбор периода</b>\n\nНажми на день/месяц/год чтобы изменить дату.";
+  return deliver(
+    ctx,
+    {
+      text,
+      extra: { ...(renderDateMainKeyboard(st) || {}), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
+function renderPickKeyboard({ side, part, page = 0 }) {
+  const btn = (text, data) => Markup.button.callback(text, data);
+
+  const rows = [];
+  if (part === "d") {
+    const start = page === 0 ? 1 : 17;
+    const end = page === 0 ? 16 : 31;
+    let cur = [];
+    for (let i = start; i <= end; i++) {
+      cur.push(btn(String(i).padStart(2, "0"), `date_pick:${side}:d:${i}`));
+      if (cur.length === 4) {
+        rows.push(cur);
+        cur = [];
+      }
+    }
+    if (cur.length) rows.push(cur);
+
+    rows.push([
+      btn("⬅️", `date_pick_page:${side}:d:0`),
+      btn("➡️", `date_pick_page:${side}:d:1`),
+    ]);
+  }
+
+  if (part === "m") {
+    let cur = [];
+    for (let i = 1; i <= 12; i++) {
+      cur.push(btn(String(i).padStart(2, "0"), `date_pick:${side}:m:${i}`));
+      if (cur.length === 4) {
+        rows.push(cur);
+        cur = [];
+      }
+    }
+    if (cur.length) rows.push(cur);
+  }
+
+  if (part === "y") {
+    const y = todayLocalDate().getFullYear();
+    const years = [y - 1, y, y + 1];
+    rows.push(
+      years.map((yy) => btn(String(yy).slice(-2), `date_pick:${side}:y:${yy}`))
+    );
+  }
+
+  rows.push([btn("⬅️ Назад", "date_open")]);
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
+  const label = part === "d" ? "день" : part === "m" ? "месяц" : "год";
+  const text = `📅 <b>Выбери ${label}</b>`;
+  return deliver(
+    ctx,
+    {
+      text,
+      extra: {
+        ...(renderPickKeyboard({ side, part, page }) || {}),
+        parse_mode: "HTML",
+      },
+    },
+    { edit }
+  );
+}
+
 // ───────────────────────────────────────────────────────────────
 // Register
 // ───────────────────────────────────────────────────────────────
 function registerReports(bot, ensureUser, logError) {
+  bot.action("noop", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+  });
+
+  bot.action("date_open", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!user) return;
+    setSt(ctx.from.id, { dateUi: { mode: "main" } });
+    await showReportsList(ctx, user, { edit: true });
+  });
+
+  bot.action("date_back", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!user) return;
+    setSt(ctx.from.id, { dateUi: null });
+    await showReportsList(ctx, user, { edit: true });
+  });
+
+  bot.action(/^date_part:(from|to):(d|m|y)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const [, side, part] = ctx.match;
+      setSt(ctx.from.id, { dateUi: { mode: "pick", side, part, page: 0 } });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_part", e);
+    }
+  });
+
+  bot.action(/^date_pick_page:(from|to):d:(0|1)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const [, side, page] = ctx.match;
+      const st = getSt(ctx.from.id) || {};
+      const prev = st.dateUi || { mode: "pick", side, part: "d", page: 0 };
+
+      setSt(ctx.from.id, {
+        dateUi: {
+          ...prev,
+          mode: "pick",
+          side,
+          part: "d",
+          page: Number(page),
+        },
+      });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_pick_page", e);
+    }
+  });
+
+  bot.action(/^date_pick:(from|to):(d|m|y):(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!user) return;
+
+    const [, side, part, rawVal] = ctx.match;
+    const st = getSt(ctx.from.id) || {};
+    const from = (st.periodFrom || toPgDate(startOfMonth(todayLocalDate())))
+      .split("-")
+      .map(Number);
+    const to = (st.periodTo || toPgDate(todayLocalDate()))
+      .split("-")
+      .map(Number);
+
+    // from/to = [yyyy, mm, dd]
+    const pick = (arr) => {
+      if (part === "y") arr[0] = Number(rawVal); // full year
+      if (part === "m") arr[1] = Number(rawVal);
+      if (part === "d") arr[2] = Number(rawVal);
+    };
+
+    if (side === "from") pick(from);
+    else pick(to);
+
+    // normalize invalid day (31 in April etc)
+    const normalize = (yyyy, mm, dd) => {
+      const maxDay = new Date(yyyy, mm, 0).getDate(); // mm is 1..12
+      return [yyyy, mm, Math.min(dd, maxDay)];
+    };
+
+    let [fy, fm, fd] = normalize(from[0], from[1], from[2]);
+    let [ty, tm, td] = normalize(to[0], to[1], to[2]);
+
+    let dFrom = new Date(fy, fm - 1, fd);
+    let dTo = new Date(ty, tm - 1, td);
+
+    dTo = clampToToday(dTo);
+    [dFrom, dTo] = swapIfFromAfterTo(dFrom, dTo);
+
+    const preset = "custom";
+
+    setSt(ctx.from.id, {
+      periodPreset: preset,
+      periodFrom: toPgDate(dFrom),
+      periodTo: toPgDate(dTo),
+    });
+
+    await savePeriodSettings(user.id, preset, toPgDate(dFrom), toPgDate(dTo));
+
+    // Возвращаемся в основное меню конструктора (или сразу в отчёт — решишь)
+    setSt(ctx.from.id, { dateUi: { mode: "main" } });
+    await showReportsList(ctx, user, { edit: true });
+  });
+
+  bot.action(/^date_preset:(yesterday|today|week|month)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!user) return;
+
+    const [, p] = ctx.match;
+    const t = todayLocalDate();
+
+    let from = t;
+    let to = t;
+
+    if (p === "yesterday") {
+      from = new Date(t);
+      from.setDate(from.getDate() - 1);
+      to = new Date(from);
+    } else if (p === "today") {
+      from = t;
+      to = t;
+    } else if (p === "week") {
+      from = startOfWeekMonday(t);
+      to = t;
+    } else if (p === "month") {
+      from = startOfMonth(t);
+      to = t;
+    }
+
+    setSt(ctx.from.id, {
+      periodPreset: p,
+      periodFrom: toPgDate(from),
+      periodTo: toPgDate(to),
+      monthOffset: 0,
+    });
+
+    await savePeriodSettings(user.id, p, toPgDate(from), toPgDate(to));
+
+    setSt(ctx.from.id, { dateUi: { mode: "main" } });
+    await showReportsList(ctx, user, { edit: true });
+  });
+  // Листание месяцев: ← / →
+  bot.action(/^date_month:(prev|next)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const [, dir] = ctx.match;
+      const st = getSt(ctx.from.id) || {};
+
+      const t = todayLocalDate();
+      const base = new Date(t.getFullYear(), t.getMonth(), 1);
+
+      // offset 0 = текущий месяц
+      let off = Number.isInteger(st.monthOffset) ? st.monthOffset : 0;
+
+      if (dir === "prev") off -= 1;
+      if (dir === "next") off += 1;
+
+      // запрет будущих месяцев (off > 0)
+      if (off > 0) off = 0;
+
+      const m = new Date(base);
+      m.setMonth(m.getMonth() + off);
+
+      const from = new Date(m.getFullYear(), m.getMonth(), 1);
+      const to = new Date(m.getFullYear(), m.getMonth() + 1, 0); // последний день месяца
+      const toClamped = clampToToday(to);
+      const [f2, t2] = swapIfFromAfterTo(from, toClamped);
+
+      setSt(ctx.from.id, {
+        monthOffset: off,
+        periodPreset: "month",
+        periodFrom: toPgDate(f2),
+        periodTo: toPgDate(t2),
+        dateUi: { mode: "main" },
+      });
+
+      await savePeriodSettings(user.id, "month", toPgDate(f2), toPgDate(t2));
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_month_nav", e);
+    }
+  });
+
+  // Скрыть/показать таблицу (в режиме анализа)
+  bot.action("date_table:toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      setSt(ctx.from.id, {
+        hideTable: !st.hideTable,
+        dateUi: { mode: "main" },
+      });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_table_toggle", e);
+    }
+  });
+
   // Entry
   bot.action("lk_reports", async (ctx) => {
     try {
@@ -1038,21 +2065,102 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user) return;
 
+      // Period from DB (default: current month..today)
+      const dbPeriod = await loadPeriodSettings(user.id);
+
+      const t = todayLocalDate();
+      let preset = "month";
+      let from = startOfMonth(t);
+      let to = t;
+
+      if (dbPeriod?.date_from && dbPeriod?.date_to) {
+        preset = dbPeriod.preset || "month";
+        from = new Date(dbPeriod.date_from);
+        to = new Date(dbPeriod.date_to);
+      }
+
+      to = clampToToday(to);
+      [from, to] = swapIfFromAfterTo(from, to);
+
       setSt(ctx.from.id, {
         page: 0,
         filterOpened: false,
         filters: { workerIds: [], pointIds: [], weekdays: [] },
         elements: defaultElementsFor(user),
+        format: defaultFormatFor(user),
         pickerPage: 0,
         pickerSearch: "",
         delSelected: [],
         editShiftId: null,
         await: null,
+        periodPreset: preset,
+        periodFrom: toPgDate(from),
+        periodTo: toPgDate(to),
       });
 
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports", e);
+    }
+  });
+
+  bot.action("lk_reports_format_open", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return; // только админ/суперадмин
+      setSt(ctx.from.id, { formatUi: { mode: "menu" } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_open", e);
+    }
+  });
+
+  bot.action("lk_reports_format_close", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setSt(ctx.from.id, { formatUi: null });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_close", e);
+    }
+  });
+
+  bot.action("lk_reports_format_set_cash", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+      setSt(ctx.from.id, { format: "cash", page: 0, formatUi: null });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_set_cash", e);
+    }
+  });
+
+  bot.action("lk_reports_format_set_analysis1", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+      setSt(ctx.from.id, { format: "analysis1", page: 0, formatUi: null });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_set_analysis1", e);
+    }
+  });
+
+  bot.action("lk_reports_format_set_analysis2", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+      setSt(ctx.from.id, { format: "analysis2", page: 0, formatUi: null });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_set_analysis2", e);
     }
   });
 
@@ -1075,6 +2183,23 @@ function registerReports(bot, ensureUser, logError) {
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_more", e);
+    }
+  });
+
+  bot.action("lk_reports_format_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const cur = st.format || defaultFormatFor(user);
+      const next = cur === "analysis" ? "cash" : "analysis";
+
+      setSt(ctx.from.id, { format: next, page: 0 });
+      await showSettings(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_toggle", e);
     }
   });
 
@@ -1387,11 +2512,21 @@ function registerReports(bot, ensureUser, logError) {
 
   // Stubs
   bot.action("lk_reports_filter_date", async (ctx) => {
-    await ctx
-      .answerCbQuery("В разработке.", { show_alert: true })
-      .catch(() => {});
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      // Входим в "режим выбора даты" НЕ отдельным экраном, а поверх отчёта
+      setSt(ctx.from.id, { dateUi: { mode: "main" } });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_filter_date", e);
+    }
   });
-  bot.action("lk_reports_filter_info", async (ctx) => {
+
+  bot.action("lk_reports_info", async (ctx) => {
     await ctx
       .answerCbQuery("В разработке.", { show_alert: true })
       .catch(() => {});
@@ -1442,7 +2577,6 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
 
       const st = getSt(ctx.from.id) || {};
       setSt(ctx.from.id, { view: "settings", page: 0, await: null });

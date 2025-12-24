@@ -5,6 +5,7 @@ const pool = require("../db/pool");
 const { countUnreadNotifications } = require("./notifications");
 const { showInterviewDetails } = require("./interviewUser");
 const { showInternshipDetails } = require("./internshipUser");
+const { registerReports } = require("./reports");
 
 async function getActiveShift(userId) {
   const sres = await pool.query(
@@ -41,6 +42,7 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
   if (activeShift) {
     rows.push([Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle")]);
     rows.push([Markup.button.callback("📋 Задачи смены", "lk_tasks_today")]);
+
     rows.push([
       Markup.button.callback(
         "💬 Замечание по прошлой смене",
@@ -48,7 +50,6 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
       ),
     ]);
 
-    // заранее под будущую кнопку (пока заглушка)
     rows.push([
       Markup.button.callback(
         "📝 Комментарий для следующей смены",
@@ -58,6 +59,9 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
   } else {
     rows.push([Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle")]);
   }
+
+  // ✅ ДОБАВЬ ВОТ ЭТО (перед "В меню")
+  rows.push([Markup.button.callback("📊 Отчёты", "lk_reports")]);
 
   rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
@@ -483,6 +487,11 @@ function registerMenu(bot, ensureUser, logError) {
       logError("lk_warehouse_locked", err);
     }
   });
+  registerReports(bot, ensureUser, logError);
 }
 
-module.exports = { registerMenu, buildStatusText, buildMainKeyboard };
+module.exports = {
+  registerMenu,
+  buildStatusText,
+  buildMainKeyboard,
+};
