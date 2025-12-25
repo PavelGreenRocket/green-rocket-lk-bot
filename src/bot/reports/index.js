@@ -45,10 +45,14 @@ function fmtMoneyRub(v) {
 
 function userLabelCash(row, { admin }) {
   const name = row.full_name || "—";
+
   // username — только для админа
   if (admin && row.username) return `${name} (@${row.username})`;
-  // если нет username — показываем телефон
-  if (row.work_phone) return `${name} (${row.work_phone})`;
+
+  // телефон показываем ТОЛЬКО админам
+  if (admin && row.work_phone) return `${name} (${row.work_phone})`;
+
+  // обычному сотруднику — только имя
   return name;
 }
 
@@ -106,7 +110,7 @@ function renderAnalysisTable(rows, { elements, filters }) {
     { key: "dow", title: "ДН", w: 2 },
   ];
 
-  if (showTp) cols.push({ key: "tp", title: "точ", w: 3 });
+  if (showTp) cols.push({ key: "tp", title: "точ", w: 4 });
 
   cols.push(
     { key: "sales_total", title: "Продажи", w: 8 },
@@ -200,6 +204,85 @@ function renderAnalysisTable2(rows, { filters }) {
   const pad = (s, w) => s + " ".repeat(Math.max(0, w - s.length));
   const aligned = split
     .map((parts) => parts.map((p, i) => pad(p || "", widths[i])).join(" | "))
+    .join("\n");
+
+  return `<pre>${aligned}</pre>`;
+}
+
+function renderDowAnalysisTable(listRows) {
+  // ISO DOW: 1..7 (пн..вс)
+  const labels = {
+    1: "пн",
+    2: "вт",
+    3: "ср",
+    4: "чт",
+    5: "пт",
+    6: "сб",
+    7: "вс",
+  };
+
+  const by = new Map();
+  for (let iso = 1; iso <= 7; iso++) by.set(iso, { iso, sales: 0, checks: 0 });
+
+  for (const r of listRows) {
+    if (!r.opened_at) continue;
+    // JS getDay: 0..6 (Sun..Sat) -> ISO: Mon=1..Sun=7
+    const d = new Date(r.opened_at);
+    const js = d.getDay(); // 0..6
+    const iso = js === 0 ? 7 : js; // 1..7
+    const cur = by.get(iso);
+    cur.sales += Number(r.sales_total) || 0;
+    cur.checks += Number(r.checks_count) || 0;
+  }
+
+  const rows = [...by.values()];
+
+  const totalSales = rows.reduce((a, x) => a + x.sales, 0);
+  const totalChecks = rows.reduce((a, x) => a + x.checks, 0);
+
+  const pct = (part, total) => {
+    if (!total) return "-";
+    return `${Math.round((part / total) * 100)}%`;
+  };
+
+  // колонки (простое выравнивание по ширинам, как в analysis2)
+  const cols = ["ДН", "ТО", "%ТО", "ВП", "%ВП", "чек", "%чек"];
+
+  const makeLine = (x) => [
+    labels[x.iso],
+    fmtMoney(x.sales),
+    pct(x.sales, totalSales),
+    "-", // ВП заглушка
+    "-", // %ВП заглушка
+    fmtMoney(x.checks),
+    pct(x.checks, totalChecks),
+  ];
+
+  const tableRaw = [cols, ...rows.map(makeLine)];
+
+  // итоговая строка "="
+  tableRaw.push([
+    "=",
+    fmtMoney(totalSales),
+    totalSales ? "100%" : "-",
+    "-",
+    "-",
+    fmtMoney(totalChecks),
+    totalChecks ? "100%" : "-",
+  ]);
+
+  // выравниваем
+  const widths = [];
+  for (const parts of tableRaw) {
+    parts.forEach((p, i) => {
+      widths[i] = Math.max(widths[i] || 0, String(p ?? "").length);
+    });
+  }
+  const pad = (s, w) =>
+    String(s ?? "") + " ".repeat(Math.max(0, w - String(s ?? "").length));
+
+  const aligned = tableRaw
+    .map((parts) => parts.map((p, i) => pad(p, widths[i])).join(" | "))
     .join("\n");
 
   return `<pre>${aligned}</pre>`;
@@ -636,7 +719,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   const { rows, hasMore } = await loadReportsPage({ page, filters, limit });
 
   const inDateUi = Boolean(st.dateUi); // открыт выбор периода
-  const filterOpened = !inDateUi && admin && Boolean(st.filterOpened);
+  const filterOpened = admin && Boolean(st.filterOpened); // ✅ разрешаем фильтр внутри периода
 
   const formatLabel = isAnalysis ? "для анализа" : "стандарт";
 
@@ -656,10 +739,19 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     // молча оставляем "Все"
   }
 
+  // месяц заголовка берём из periodFrom (выбранный месяц в конструкторе)
+  const monthIdxForTitle = st.periodFrom
+    ? Number(String(st.periodFrom).split("-")[1]) - 1
+    : todayLocalDate().getMonth();
+  const monthTitleCap = (() => {
+    const s = monthNameRu(monthIdxForTitle) || "";
+    return s ? s[0].toUpperCase() + s.slice(1) : "";
+  })();
+
   const header = admin
     ? format === "cash"
       ? ` <b>Отчёты (стандарт)</b>`
-      : ` <b>(${pointsLabel}) АНАЛИТИКА ЗА ПЕРИОД</b>`
+      : ` <b>(${pointsLabel}) Аналитика за ${monthTitleCap}</b>`
     : "";
 
   // Фильтры показываем ТОЛЬКО когда фильтр раскрыт
@@ -728,18 +820,22 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   let summaryBlock = null;
 
   if (!filterOpened && isAnalysis && rows.length) {
-    const dates = rows
-      .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
-      .filter(Boolean);
+    // месяц берём из выбранного периода (periodFrom)
+    const base = st.periodFrom
+      ? new Date(
+          Number(st.periodFrom.split("-")[0]),
+          Number(st.periodFrom.split("-")[1]) - 1,
+          1
+        )
+      : startOfMonth(todayLocalDate());
 
-    const dayStart = (d) =>
-      new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const minD = new Date(Math.min(...dates.map((d) => dayStart(d).getTime())));
-    const maxD = new Date(Math.max(...dates.map((d) => dayStart(d).getTime())));
+    const monthStart = new Date(base.getFullYear(), base.getMonth(), 1);
+    const monthEnd = new Date(base.getFullYear(), base.getMonth() + 1, 0); // последний день месяца
 
     const msPerDay = 24 * 60 * 60 * 1000;
-    const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
+    const daysInMonth = monthEnd.getDate();
 
+    // продажи/чеки считаем по rows (они уже отфильтрованы датами/точками/днями недели)
     const sumSales = rows.reduce(
       (acc, r) => acc + (Number(r.sales_total) || 0),
       0
@@ -749,28 +845,52 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       0
     );
 
-    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub0 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+        Math.round(Number(n) || 0)
+      )} ₽`;
+
     const fmtRub1 = (n) =>
       `${new Intl.NumberFormat("ru-RU", {
         minimumFractionDigits: 1,
         maximumFractionDigits: 1,
       }).format(n)} ₽`;
 
-    const periodFrom = fmtDateShort(minD);
-    const periodTo = fmtDateShort(maxD);
+    const periodFrom = fmtDateShort(monthStart);
+    const periodTo = fmtDateShort(monthEnd);
 
-    // 4) Среднее кол-во чеков в день = сумма чеков / дни
-    const avgChecksPerDay = sumChecks ? sumChecks / days : 0;
-
-    // 3) Средний чек = продажи / чеки, округление до десятых
+    const avgChecksPerDay = sumChecks ? sumChecks / daysInMonth : 0;
     const avgCheck = sumChecks ? sumSales / sumChecks : 0;
+    const avgSalesPerDay = sumSales ? sumSales / daysInMonth : 0;
 
-    // 5) Средние продажи в день = продажи / дни
-    const avgSalesPerDay = sumSales ? sumSales / days : 0;
+    // ── Пропущенные дни
+    // считаем сколько дней "прошло" в месяце: до today (если это текущий месяц), иначе весь месяц
+    const today = todayLocalDate();
+    const isCurrentMonth =
+      today.getFullYear() === monthStart.getFullYear() &&
+      today.getMonth() === monthStart.getMonth();
+
+    const elapsedEnd = isCurrentMonth ? today : monthEnd;
+    const elapsedDays = Math.max(
+      1,
+      Math.round((elapsedEnd - monthStart) / msPerDay) + 1
+    );
+
+    // дни, в которые реально были смены (хотя бы 1), в пределах elapsed
+    const worked = new Set();
+    for (const r of rows) {
+      if (!r.opened_at) continue;
+      const d = new Date(r.opened_at);
+      const ds = new Date(d.getFullYear(), d.getMonth(), d.getDate()); // dayStart
+      if (ds < monthStart || ds > elapsedEnd) continue;
+      worked.add(ds.getTime());
+    }
+
+    const missed = Math.max(0, elapsedDays - worked.size);
 
     summaryBlock = [
-      `📊 ${periodFrom} — ${periodTo} (${days} дн)`,
-
+      `📊 ${periodFrom} — ${periodTo} (${daysInMonth} дн.)`,
+      missed > 0 ? `Пропущенных дней: ${missed}` : "",
       "",
       `<u><b>Финансы</b></u>`,
       `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
@@ -778,13 +898,15 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       `• <b>Чистая прибыль:</b> —`,
       `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
       "",
-      `<u><b>Поведение гостей</b></u>`,
+      `\n<u><b>Поведение гостей</b></u>`,
       `• <b>Кол-во чеков за период:</b> ${fmtMoney(sumChecks)}`,
       `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
       `• <b>Среднее кол-во чеков в день:</b> ${
         avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
       }`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   const text = [header, filterBlock, summaryBlock, "", body]
@@ -796,41 +918,33 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   // top controls
   if (admin) {
     if (!filterOpened) {
-      // закрыт: показываем фильтр + настройки
+      // у админа: период + настройки
       buttons.push([
-        Markup.button.callback("🔍 Фильтр", "lk_reports_filter_toggle"),
+        Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
         Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
       ]);
     } else {
-      // открыт: настройки скрываем, показываем только "скрыть фильтр"
+      // если админ открыл фильтр (внутри периода), то тут просто показываем период (чтобы закрыть)
       buttons.push([
-        Markup.button.callback(
-          "🔍 Фильтр (скрыть)",
-          "lk_reports_filter_toggle"
-        ),
+        Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
       ]);
     }
   } else {
+    // у обычного: изменить + период
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_last"),
-      Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
+      Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
     ]);
   }
 
   // expanded filter menu
   if (admin && st.filterOpened) {
-    // 2) Выбрать дату
-    buttons.push([
-      Markup.button.callback("📅 Выбрать дату", "lk_reports_filter_date"),
-    ]);
-
-    // 3) По сотрудникам | по точке
+    // 3) По сотрудникам (оставляем)
     buttons.push([
       Markup.button.callback("👥 По сотрудникам", "lk_reports_filter_workers"),
-      Markup.button.callback("🏬 По точке", "lk_reports_filter_points"),
     ]);
 
-    // 4) По дням недели | По элементам
+    // 4) По дням недели | По элементам (оставляем)
     buttons.push([
       Markup.button.callback("📆 По дням недели", "lk_reports_filter_weekdays"),
       Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
@@ -860,8 +974,38 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   let kb = null;
 
+  // helper: клавиатура админ-фильтра внутри периода
+  const renderAdminFilterKeyboard = () => {
+    const rows = [
+      [
+        Markup.button.callback(
+          "👥 По сотрудникам",
+          "lk_reports_filter_workers"
+        ),
+      ],
+      [
+        Markup.button.callback(
+          "📆 По дням недели",
+          "lk_reports_filter_weekdays"
+        ),
+        Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
+      ],
+      [Markup.button.callback("🧹 Сбросить фильтр", "lk_reports_filter_clear")],
+      [Markup.button.callback("⬅️ Назад", "date_filter:close")],
+    ];
+    return Markup.inlineKeyboard(rows);
+  };
+
   if (st2.dateUi?.mode === "main") {
-    kb = renderDateMainKeyboard(st2);
+    // ✅ если фильтр открыт — показываем кнопки фильтра, а не период
+    kb = filterOpened
+      ? renderAdminFilterKeyboard()
+      : renderDateMainKeyboard({ ...st2, __admin: admin });
+  } else if (st2.dateUi?.mode === "points") {
+    const r = await pool.query(
+      `SELECT id, title FROM trade_points ORDER BY title NULLS LAST, id`
+    );
+    kb = renderDatePointsKeyboard(r.rows || [], st2);
   } else if (st2.dateUi?.mode === "pick") {
     kb = renderPickKeyboard(st2.dateUi);
   } else if (st2.formatUi?.mode === "menu") {
@@ -1088,7 +1232,11 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
       0
     );
 
-    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub0 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+        Math.round(Number(n) || 0)
+      )} ₽`;
+
     const fmtRub1 = (n) =>
       `${new Intl.NumberFormat("ru-RU", {
         minimumFractionDigits: 1,
@@ -1186,6 +1334,8 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
     Array.isArray(filters.weekdays) ? filters.weekdays : []
   );
 
+  const dowAnalysisMode = Boolean(st.dowAnalysisMode);
+
   // показываем АНАЛИЗ (как на экране отчёта), а не отдельный экран "фильтр"
   const st2 = getSt(ctx.from.id) || {};
   const admin2 = isAdmin(user);
@@ -1201,22 +1351,81 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
     limit: limit2,
   });
 
+  // Период (как сейчас у тебя в showFiltersWeekdays): min/max по данным
+  const dates = listRows
+    .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
+    .filter(Boolean);
+
+  const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const msPerDay = 24 * 60 * 60 * 1000;
+
+  const minD = dates.length
+    ? new Date(Math.min(...dates.map((d) => dayStart(d).getTime())))
+    : dayStart(todayLocalDate());
+
+  const maxD = dates.length
+    ? new Date(Math.max(...dates.map((d) => dayStart(d).getTime())))
+    : dayStart(todayLocalDate());
+
+  const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
+
+  const periodFrom = fmtDateShort(minD);
+  const periodTo = fmtDateShort(maxD);
+
+  // название выбранных точек для короткой шапки
+  let pointsLabel = "Все";
+  try {
+    const f = filters2 || {};
+    if (Array.isArray(f.pointIds) && f.pointIds.length) {
+      const r = await pool.query(
+        `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
+        [f.pointIds]
+      );
+      const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
+      if (titles.length) pointsLabel = titles.join(", ");
+    }
+  } catch (_) {}
+
+  // ─────────────────────────────────────────────
+  // MODE: Анализ ДН (только короткая шапка + таблица)
+  // ─────────────────────────────────────────────
+  if (dowAnalysisMode) {
+    const headerLine = `(${pointsLabel}) 📊 ${periodFrom} — ${periodTo} (${days} дн)`;
+
+    // В этом режиме: таблица "ДН | ТО | %ТО | ... | чек | %чек"
+    const table = renderDowAnalysisTable(listRows);
+
+    const text = [headerLine, "", table].filter(Boolean).join("\n");
+
+    const buttons = [
+      [
+        Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list"),
+        Markup.button.callback("Анализ ДН", "lk_reports_dow_analysis_toggle"),
+      ],
+    ];
+
+    return deliver(
+      ctx,
+      {
+        text,
+        extra: {
+          ...(Markup.inlineKeyboard(buttons) || {}),
+          parse_mode: "HTML",
+        },
+      },
+      { edit }
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  // MODE: обычный выбор дней недели (как было), но:
+  // + будние/выходные
+  // + кнопка "Анализ ДН"
+  // ─────────────────────────────────────────────
+
+  // старый summaryBlock2 (оставляем как есть у тебя)
   let summaryBlock2 = null;
-
-  // формируем summaryBlock (копия логики showReportsList / showFiltersPoints)
   if (isAnalysis2 && listRows.length) {
-    const dates = listRows
-      .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
-      .filter(Boolean);
-
-    const dayStart = (d) =>
-      new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const minD = new Date(Math.min(...dates.map((d) => dayStart(d).getTime())));
-    const maxD = new Date(Math.max(...dates.map((d) => dayStart(d).getTime())));
-
-    const msPerDay = 24 * 60 * 60 * 1000;
-    const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
-
     const sumSales = listRows.reduce(
       (acc, r) => acc + (Number(r.sales_total) || 0),
       0
@@ -1226,15 +1435,16 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
       0
     );
 
-    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub0 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+        Math.round(Number(n) || 0)
+      )} ₽`;
+
     const fmtRub1 = (n) =>
       `${new Intl.NumberFormat("ru-RU", {
         minimumFractionDigits: 1,
         maximumFractionDigits: 1,
       }).format(n)} ₽`;
-
-    const periodFrom = fmtDateShort(minD);
-    const periodTo = fmtDateShort(maxD);
 
     const avgChecksPerDay = sumChecks ? sumChecks / days : 0;
     const avgCheck = sumChecks ? sumSales / sumChecks : 0;
@@ -1290,8 +1500,15 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   const buttons = [
     [btn(1, "пн"), btn(2, "вт"), btn(3, "ср")],
     [btn(4, "чт"), btn(5, "пт"), btn(6, "сб")],
-    [btn(7, "вс")],
-    [Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")],
+    [
+      btn(7, "вс"),
+      Markup.button.callback("будние", "lk_reports_dow_set_weekdays"),
+      Markup.button.callback("выходные", "lk_reports_dow_set_weekends"),
+    ],
+    [
+      Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list"),
+      Markup.button.callback("Анализ ДН", "lk_reports_dow_analysis_toggle"),
+    ],
   ];
 
   return deliver(
@@ -1384,18 +1601,11 @@ async function showSettings(ctx, user, { edit = true } = {}) {
   setSt(ctx.from.id, { view: "settings" });
 
   const st = getSt(ctx.from.id) || {};
-  const format = st.format || defaultFormatFor(user);
-  const fmtLabel =
-    format === "analysis"
-      ? "🧾 Формат отчёта: для анализа"
-      : "🧾 Формат отчёта: кассовый";
 
   const text = "⚙️ <b>Настройки отчётов</b>\n\nВыберите действие:";
 
   const buttons = [];
 
-  // Доступно всем
-  buttons.push([Markup.button.callback(fmtLabel, "lk_reports_format_toggle")]);
   buttons.push([
     Markup.button.callback("ℹ️ Доп. информация", "lk_reports_info"),
   ]);
@@ -1807,7 +2017,7 @@ function renderDateMainKeyboard(st) {
     btn(`${fd}.`, "date_part:from:d"),
     btn(`${fm}.`, "date_part:from:m"),
     btn(`${fy}`, "date_part:from:y"),
-    btn("—", "noop"),
+    btn("—", "date_table:toggle"),
     btn(`${td}.`, "date_part:to:d"),
     btn(`${tm}.`, "date_part:to:m"),
     btn(`${ty}`, "date_part:to:y"),
@@ -1828,10 +2038,12 @@ function renderDateMainKeyboard(st) {
     btn(preset === "today" ? "✅ сегодня" : "сегодня", "date_preset:today"),
   ];
 
-  // 5) назад/скрыть таб
+  // 5) назад/скрыть таб/точки
+  const admin = Boolean(st.__admin); // проставим перед рендером клавы
   const rowBottom = [
     btn("⬅️ назад", "date_back"),
-    btn(hideTable ? "Показать таб" : "Скрыть таб", "date_table:toggle"),
+    admin ? btn("🔍 Фильтр", "date_filter:open") : btn(" ", "noop"),
+    btn("📍Точки", "date_points:open"),
   ];
 
   return Markup.inlineKeyboard([
@@ -1841,6 +2053,38 @@ function renderDateMainKeyboard(st) {
     rowYesterdayToday,
     rowBottom,
   ]);
+}
+
+function renderDatePointsKeyboard(tradePoints, st) {
+  const btn = (text, data) => Markup.button.callback(text, data);
+
+  const filters = st.filters || {};
+  const curId =
+    Array.isArray(filters.pointIds) && filters.pointIds.length
+      ? Number(filters.pointIds[0])
+      : null;
+
+  const rows = [];
+
+  // первая строка: "Все"
+  rows.push([btn(curId == null ? "✅ Все" : "☑️ Все", "date_points:set_all")]);
+
+  // по 3 в ряд
+  let cur = [];
+  for (const tp of tradePoints) {
+    const mark = Number(tp.id) === curId ? "✅ " : "☑️ ";
+    cur.push(
+      btn(`${mark}${tp.title || `#${tp.id}`}`, `date_points:set:${tp.id}`)
+    );
+    if (cur.length === 3) {
+      rows.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length) rows.push(cur);
+
+  rows.push([btn("⬅️ назад", "date_points:back")]);
+  return Markup.inlineKeyboard(rows);
 }
 
 async function showDateMenu(ctx, user, { edit = true } = {}) {
@@ -1926,8 +2170,107 @@ async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
 // Register
 // ───────────────────────────────────────────────────────────────
 function registerReports(bot, ensureUser, logError) {
+  bot.action("date_filter:open", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return;
+
+      // открываем admin-фильтр, оставаясь в dateUi (экран не меняется)
+      const st = getSt(ctx.from.id) || {};
+      setSt(ctx.from.id, {
+        filterOpened: !st.filterOpened,
+        view: "list",
+        dateUi: { mode: "main" },
+      });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_filter_open", e);
+    }
+  });
+
+  bot.action("lk_reports_dow_analysis_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      const st = getSt(ctx.from.id) || {};
+      setSt(ctx.from.id, { dowAnalysisMode: !st.dowAnalysisMode });
+
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_analysis_toggle", e);
+    }
+  });
+
+  bot.action("lk_reports_dow_set_weekdays", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      const st = getSt(ctx.from.id) || {};
+      const filters = st.filters || {};
+      setSt(ctx.from.id, {
+        filters: { ...filters, weekdays: [1, 2, 3, 4, 5] },
+      });
+
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_set_weekdays", e);
+    }
+  });
+
+  bot.action("lk_reports_dow_set_weekends", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      const st = getSt(ctx.from.id) || {};
+      const filters = st.filters || {};
+      setSt(ctx.from.id, { filters: { ...filters, weekdays: [6, 7] } });
+
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_set_weekends", e);
+    }
+  });
+
+  bot.action("date_filter:close", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return;
+
+      setSt(ctx.from.id, { filterOpened: false, dateUi: { mode: "main" } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_filter_close", e);
+    }
+  });
+
   bot.action("noop", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
+  });
+
+  bot.action("lk_reports_period_open", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      setSt(ctx.from.id, { dateUi: { mode: "main" }, view: "list" });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_period_open", e);
+    }
   });
 
   bot.action("date_open", async (ctx) => {
@@ -1944,6 +2287,75 @@ function registerReports(bot, ensureUser, logError) {
     if (!user) return;
     setSt(ctx.from.id, { dateUi: null });
     await showReportsList(ctx, user, { edit: true });
+  });
+
+  bot.action("date_points:open", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      setSt(ctx.from.id, { dateUi: { mode: "points" } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_points_open", e);
+    }
+  });
+
+  bot.action("date_points:back", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      setSt(ctx.from.id, { dateUi: { mode: "main" } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_points_back", e);
+    }
+  });
+
+  bot.action(/^date_points:set:(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const id = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id) || {};
+      const filters = st.filters || {};
+
+      setSt(ctx.from.id, {
+        filters: { ...filters, pointIds: [id] }, // ✅ одиночный выбор
+        page: 0,
+        dateUi: { mode: "points" },
+      });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_points_set", e);
+    }
+  });
+
+  bot.action("date_points:set_all", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const filters = st.filters || {};
+
+      setSt(ctx.from.id, {
+        filters: { ...filters, pointIds: [] }, // ✅ "Все"
+        page: 0,
+        dateUi: { mode: "points" },
+      });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_points_set_all", e);
+    }
   });
 
   bot.action(/^date_part:(from|to):(d|m|y)$/, async (ctx) => {
@@ -2129,6 +2541,10 @@ function registerReports(bot, ensureUser, logError) {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
+      const st0 = getSt(ctx.from.id) || {};
+      const fmt = st0.format || defaultFormatFor(user);
+      if (fmt === "cash") return; // в кассовом — бездействует
+
       if (!user) return;
 
       const st = getSt(ctx.from.id) || {};
@@ -2665,6 +3081,7 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
 
       const st = getSt(ctx.from.id) || {};
       setSt(ctx.from.id, { view: "settings", page: 0, await: null });
