@@ -218,13 +218,13 @@ function renderFormatKeyboard(st) {
     ],
     [
       Markup.button.callback(
-        `${mark("analysis1")}Для анализа 1`,
+        `${mark("analysis1")}Для анализа (по дням)`,
         "lk_reports_format_set_analysis1"
       ),
     ],
     [
       Markup.button.callback(
-        `${mark("analysis2")}Для анализа 2`,
+        `${mark("analysis2")}Для анализа (по точкам)`,
         "lk_reports_format_set_analysis2"
       ),
     ],
@@ -619,7 +619,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   const st = getSt(ctx.from.id) || {};
   const page = Number.isInteger(st.page) ? st.page : 0;
-  const filters = admin ? { ...(st.filters || {}) } : { workerIds: [user.id] };
+  const filters = { ...(st.filters || {}) }; // сотрудники видят все смены
 
   // Подключаем период
   if (st.periodFrom) filters.dateFrom = st.periodFrom;
@@ -703,20 +703,25 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   let body = "Пока нет закрытых смен.";
   if (rows.length) {
-    const isAnalysis = format === "analysis1" || format === "analysis2";
+    const isAnalysisFmt = format === "analysis1" || format === "analysis2";
 
-    const rowsForUi = isAnalysis
+    const rowsForUi = isAnalysisFmt
       ? [...rows].sort(
           (a, b) =>
             new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
         )
       : rows;
 
-    body = isAnalysis
-      ? format === "analysis2"
-        ? renderAnalysisTable2(rowsForUi, { filters })
-        : renderAnalysisTable(rowsForUi, { elements, filters })
-      : rowsForUi.map((r) => renderCashCard(r, { admin })).join("\n\n");
+    // ✅ скрытие таблицы работает и для analysis1 и для analysis2
+    if (hideTable && isAnalysisFmt) {
+      body = ""; // оставляем только header + summaryBlock (и фильтры если раскрыты)
+    } else {
+      body = isAnalysisFmt
+        ? format === "analysis2"
+          ? renderAnalysisTable2(rowsForUi, { filters })
+          : renderAnalysisTable(rowsForUi, { elements, filters })
+        : rowsForUi.map((r) => renderCashCard(r, { admin })).join("\n\n");
+    }
   }
 
   // Сводка показывается ТОЛЬКО когда фильтр закрыт (и только для формата анализа)
@@ -770,6 +775,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       `<u><b>Финансы</b></u>`,
       `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
       `• <b>Валовая прибыль:</b> —`,
+      `• <b>Чистая прибыль:</b> —`,
       `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
       "",
       `<u><b>Поведение гостей</b></u>`,
@@ -882,6 +888,34 @@ async function loadPeriodSettings(userId) {
     [userId]
   );
   return r.rows[0] || null;
+}
+
+async function loadFormatSetting(userId) {
+  try {
+    const r = await pool.query(
+      `SELECT report_format FROM report_period_settings WHERE user_id = $1`,
+      [userId]
+    );
+    return r.rows[0]?.report_format || null;
+  } catch (_) {
+    // если колонки нет — миграция не применена
+    return null;
+  }
+}
+
+async function saveFormatSetting(userId, format) {
+  try {
+    await pool.query(
+      `INSERT INTO report_period_settings(user_id, preset, date_from, date_to, report_format)
+       VALUES ($1, 'month', NULL, NULL, $2)
+       ON CONFLICT (user_id) DO UPDATE
+       SET report_format = EXCLUDED.report_format,
+           updated_at = now()`,
+      [userId, format]
+    );
+  } catch (_) {
+    // если колонки нет — миграция не применена
+  }
 }
 
 async function savePeriodSettings(userId, preset, dateFrom, dateTo) {
@@ -1021,8 +1055,8 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
   const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
   const format2 = st2.format || defaultFormatFor(user);
   const elements2 = st2.elements || defaultElementsFor(user);
-  const limit2 =
-    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+  const isAnalysis2 = format2 === "analysis1" || format2 === "analysis2";
+  const limit2 = isAnalysis2 ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
 
   const { rows: listRows } = await loadReportsPage({
     page: pageList,
@@ -1032,7 +1066,7 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
 
   // формируем summaryBlock (копия логики showReportsList)
   let summaryBlock2 = null;
-  if (format2 === "analysis" && listRows.length) {
+  if (isAnalysis2 && listRows.length) {
     const dates = listRows
       .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
       .filter(Boolean);
@@ -1096,16 +1130,14 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
           )
         : listRows;
 
-    body2 =
-      format2 === "analysis1" || format2 === "analysis2"
-    
-        ? renderAnalysisTable(rowsForUi, {
+    body2 = isAnalysis2
+      ? format2 === "analysis2"
+        ? renderAnalysisTable2(rowsForUi, { filters: filters2 })
+        : renderAnalysisTable(rowsForUi, {
             elements: elements2,
             filters: filters2,
           })
-        : rowsForUi
-            .map((r) => renderCashCard(r, { admin: admin2 }))
-            .join("\n\n");
+      : rowsForUi.map((r) => renderCashCard(r, { admin: admin2 })).join("\n\n");
   }
 
   const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
@@ -1160,8 +1192,8 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
   const format2 = st2.format || defaultFormatFor(user);
   const elements2 = st2.elements || defaultElementsFor(user);
-  const limit2 =
-    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+  const isAnalysis2 = format2 === "analysis1" || format2 === "analysis2";
+  const limit2 = isAnalysis2 ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
 
   const { rows: listRows } = await loadReportsPage({
     page: 0,
@@ -1170,6 +1202,61 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   });
 
   let summaryBlock2 = null;
+
+  // формируем summaryBlock (копия логики showReportsList / showFiltersPoints)
+  if (isAnalysis2 && listRows.length) {
+    const dates = listRows
+      .map((r) => (r.opened_at ? new Date(r.opened_at) : null))
+      .filter(Boolean);
+
+    const dayStart = (d) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const minD = new Date(Math.min(...dates.map((d) => dayStart(d).getTime())));
+    const maxD = new Date(Math.max(...dates.map((d) => dayStart(d).getTime())));
+
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const days = Math.max(1, Math.round((maxD - minD) / msPerDay) + 1);
+
+    const sumSales = listRows.reduce(
+      (acc, r) => acc + (Number(r.sales_total) || 0),
+      0
+    );
+    const sumChecks = listRows.reduce(
+      (acc, r) => acc + (Number(r.checks_count) || 0),
+      0
+    );
+
+    const fmtRub0 = (n) => `${fmtMoney(n)} ₽`;
+    const fmtRub1 = (n) =>
+      `${new Intl.NumberFormat("ru-RU", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }).format(n)} ₽`;
+
+    const periodFrom = fmtDateShort(minD);
+    const periodTo = fmtDateShort(maxD);
+
+    const avgChecksPerDay = sumChecks ? sumChecks / days : 0;
+    const avgCheck = sumChecks ? sumSales / sumChecks : 0;
+    const avgSalesPerDay = sumSales ? sumSales / days : 0;
+
+    summaryBlock2 = [
+      `📊 ${periodFrom} — ${periodTo} (${days} дн)`,
+      "",
+      `<b>Финансы</b>`,
+      `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
+      `• <b>Валовая прибыль:</b> —`,
+      `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
+      "",
+      `<b>Поведение гостей</b>`,
+      `• Кол-во чеков за период: ${fmtMoney(sumChecks)}`,
+      `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
+      `• <b>Среднее кол-во чеков в день:</b> ${
+        avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
+      }`,
+    ].join("\n");
+  }
+
   let body2 = "Пока нет закрытых смен.";
   if (listRows.length) {
     const rowsForUi =
@@ -1180,15 +1267,14 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
           )
         : listRows;
 
-    body2 =
-      format2 === "analysis1" || format2 === "analysis2"
-        ? renderAnalysisTable(rowsForUi, {
+    body2 = isAnalysis2
+      ? format2 === "analysis2"
+        ? renderAnalysisTable2(rowsForUi, { filters: filters2 })
+        : renderAnalysisTable(rowsForUi, {
             elements: elements2,
             filters: filters2,
           })
-        : rowsForUi
-            .map((r) => renderCashCard(r, { admin: admin2 }))
-            .join("\n\n");
+      : rowsForUi.map((r) => renderCashCard(r, { admin: admin2 })).join("\n\n");
   }
 
   const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
@@ -1232,8 +1318,8 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
   const filters2 = admin2 ? st2.filters || {} : { workerIds: [user.id] };
   const format2 = st2.format || defaultFormatFor(user);
   const elements2 = st2.elements || defaultElementsFor(user);
-  const limit2 =
-    format2 === "analysis" ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+  const isAnalysis2 = format2 === "analysis1" || format2 === "analysis2";
+  const limit2 = isAnalysis2 ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
 
   const { rows: listRows } = await loadReportsPage({
     page: 0,
@@ -1252,15 +1338,14 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
           )
         : listRows;
 
-    body2 =
-      format2 === "analysis1" || format2 === "analysis2"
-        ? renderAnalysisTable(rowsForUi, {
+    body2 = isAnalysis2
+      ? format2 === "analysis2"
+        ? renderAnalysisTable2(rowsForUi, { filters: filters2 })
+        : renderAnalysisTable(rowsForUi, {
             elements: elements2,
             filters: filters2,
           })
-        : rowsForUi
-            .map((r) => renderCashCard(r, { admin: admin2 }))
-            .join("\n\n");
+      : rowsForUi.map((r) => renderCashCard(r, { admin: admin2 })).join("\n\n");
   }
 
   const text = [summaryBlock2, "", body2].filter(Boolean).join("\n");
@@ -2087,7 +2172,7 @@ function registerReports(bot, ensureUser, logError) {
         filterOpened: false,
         filters: { workerIds: [], pointIds: [], weekdays: [] },
         elements: defaultElementsFor(user),
-        format: defaultFormatFor(user),
+        format: (await loadFormatSetting(user.id)) || defaultFormatFor(user),
         pickerPage: 0,
         pickerSearch: "",
         delSelected: [],
@@ -2134,6 +2219,7 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user || !isAdmin(user)) return;
       setSt(ctx.from.id, { format: "cash", page: 0, formatUi: null });
+      await saveFormatSetting(user.id, "cash");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_format_set_cash", e);
@@ -2146,6 +2232,7 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user || !isAdmin(user)) return;
       setSt(ctx.from.id, { format: "analysis1", page: 0, formatUi: null });
+      await saveFormatSetting(user.id, "analysis1");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_format_set_analysis1", e);
@@ -2158,6 +2245,7 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user || !isAdmin(user)) return;
       setSt(ctx.from.id, { format: "analysis2", page: 0, formatUi: null });
+      await saveFormatSetting(user.id, "analysis2");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_format_set_analysis2", e);
@@ -2795,9 +2883,9 @@ function registerReports(bot, ensureUser, logError) {
   });
 
   // Text input handler (search + edit fields)
-  bot.on("text", async (ctx) => {
+  bot.on("text", async (ctx, next) => {
     const st = getSt(ctx.from.id);
-    if (!st?.await) return;
+    if (!st?.await) return next(); // ⬅️ КРИТИЧНО
 
     try {
       const user = await ensureUser(ctx);

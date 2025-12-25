@@ -85,11 +85,24 @@ async function showMainMenu(ctx) {
     { edit: false }
   );
 }
+bot.use(async (ctx, next) => {
+  try {
+    return await next();
+  } catch (err) {
+    console.error("💥 Unhandled middleware error:", err);
+    // чтобы юзер не зависал в ожидании
+    try {
+      await ctx.reply("⚠️ Ошибка. Попробуйте ещё раз.");
+    } catch (_) {}
+  }
+});
 
 // Регистрация всех хендлеров
 registerWaitingOnboarding(bot, logError);
 registerLkBot(bot, ensureUser, logError);
 registerInternshipUser(bot, ensureUser, logError, showMainMenu);
+process.on("unhandledRejection", (r) => console.error("unhandledRejection", r));
+process.on("uncaughtException", (e) => console.error("uncaughtException", e));
 
 // Глобальная обработка ошибок telegraf
 bot.catch((err, ctx) => {
