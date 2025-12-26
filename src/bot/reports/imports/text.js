@@ -3,10 +3,10 @@ function registerTextImport(bot, deps) {
     deps;
 
   // ловим текст, только когда ждём импорт
-  bot.on("text", async (ctx) => {
+  bot.on("text", async (ctx, next) => {
     try {
       const st = getSt(ctx.from.id) || {};
-      if (st.importUi?.mode !== "await_text") return;
+      if (st.importUi?.mode !== "await_text") return next();
 
       const user = await ensureUser(ctx);
       if (!user) return;

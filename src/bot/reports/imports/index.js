@@ -1,5 +1,6 @@
 const { registerTextImport } = require("./text");
 const { Markup } = require("telegraf");
+const { registerStandardImport } = require("./standard");
 
 function registerReportImports(bot, deps) {
   const {
@@ -42,6 +43,13 @@ function registerReportImports(bot, deps) {
             "lk_reports_import_text"
           ),
         ],
+        [
+          Markup.button.callback(
+            "➕ Добавить: стандарт",
+            "lk_reports_import_standard_start"
+          ),
+        ],
+
         [
           Markup.button.callback(
             "🏪 Из кассы (скоро)",
@@ -136,6 +144,7 @@ function registerReportImports(bot, deps) {
 
   // регистрируем обработчики текстового импорта
   registerTextImport(bot, deps);
+  registerStandardImport(bot, deps);
 }
 
 // маленький helper, чтобы <pre> не ломался
