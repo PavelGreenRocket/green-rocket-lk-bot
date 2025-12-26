@@ -4,6 +4,7 @@ const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { toast, alert } = require("../../utils/toast");
+const { registerReportImports } = require("./imports");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -209,7 +210,7 @@ function renderAnalysisTable2(rows, { filters }) {
   return `<pre>${aligned}</pre>`;
 }
 
-function renderDowAnalysisTable(listRows) {
+function renderDowAnalysisTable(listRows, opts = {}) {
   // ISO DOW: 1..7 (пн..вс)
   const labels = {
     1: "пн",
@@ -236,6 +237,19 @@ function renderDowAnalysisTable(listRows) {
   }
 
   const rows = [...by.values()];
+
+  // сортировка (по возрастанию) либо стандарт пн..вс
+  if (opts.sortActive && opts.sortKey) {
+    const key =
+      opts.sortKey === "to"
+        ? "sales"
+        : opts.sortKey === "checks"
+        ? "checks"
+        : null; // vp пока нет
+
+    if (key) rows.sort((a, b) => (a[key] || 0) - (b[key] || 0));
+    // если vp — пока нечего сортировать, оставляем стандарт
+  }
 
   const totalSales = rows.reduce((a, x) => a + x.sales, 0);
   const totalChecks = rows.reduce((a, x) => a + x.checks, 0);
@@ -281,11 +295,22 @@ function renderDowAnalysisTable(listRows) {
   const pad = (s, w) =>
     String(s ?? "") + " ".repeat(Math.max(0, w - String(s ?? "").length));
 
-  const aligned = tableRaw
-    .map((parts) => parts.map((p, i) => pad(p, widths[i])).join(" | "))
-    .join("\n");
+  const lines = tableRaw.map((parts) =>
+    parts.map((p, i) => pad(p, widths[i])).join(" | ")
+  );
 
-  return `<pre>${aligned}</pre>`;
+  const sep = widths.map((w) => "─".repeat(w)).join("──");
+
+  // после заголовка и между строками добавляем разделитель
+  const out = [
+    lines[0],
+    sep,
+    ...lines
+      .slice(1)
+      .flatMap((ln, idx) => (idx === lines.length - 2 ? [ln] : [ln, sep])),
+  ].join("\n");
+
+  return `<pre>${out}</pre>`;
 }
 
 function renderFormatKeyboard(st) {
@@ -1392,12 +1417,26 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   if (dowAnalysisMode) {
     const headerLine = `(${pointsLabel}) 📊 ${periodFrom} — ${periodTo} (${days} дн)`;
 
+    const stNow = getSt(ctx.from.id) || {};
+    const sortKey = stNow.dowSortKey || null;
+    const sortActive = Boolean(stNow.dowSortActive);
+
     // В этом режиме: таблица "ДН | ТО | %ТО | ... | чек | %чек"
-    const table = renderDowAnalysisTable(listRows);
+    const table = renderDowAnalysisTable(listRows, { sortKey, sortActive });
 
     const text = [headerLine, "", table].filter(Boolean).join("\n");
 
+    const m = (k) => (sortActive && sortKey === k ? "✅" : "↕️");
+
     const buttons = [
+      [
+        Markup.button.callback(`${m("to")} ТО`, "lk_reports_dow_sort_to"),
+        Markup.button.callback(`${m("vp")} ВП`, "lk_reports_dow_sort_vp"),
+        Markup.button.callback(
+          `${m("checks")} Чек`,
+          "lk_reports_dow_sort_checks"
+        ),
+      ],
       [
         Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list"),
         Markup.button.callback("Анализ ДН", "lk_reports_dow_analysis_toggle"),
@@ -1618,7 +1657,11 @@ async function showSettings(ctx, user, { edit = true } = {}) {
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_pick"),
     ]);
+      buttons.push([
+    Markup.button.callback("📥 Загрузка отчётов", "lk_reports_import_menu"),
+  ]);
   }
+
 
   buttons.push([Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")]);
 
@@ -2198,11 +2241,72 @@ function registerReports(bot, ensureUser, logError) {
       if (!isAdmin(user)) return toast(ctx, "Недоступно.");
 
       const st = getSt(ctx.from.id) || {};
+
+      // если сейчас режим ВКЛЮЧЕН и мы его выключаем — сбросить сортировку
+      if (st.dowAnalysisMode) {
+        setSt(ctx.from.id, { dowSortKey: null, dowSortActive: false });
+      }
+
       setSt(ctx.from.id, { dowAnalysisMode: !st.dowAnalysisMode });
 
       await showFiltersWeekdays(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_dow_analysis_toggle", e);
+    }
+  });
+
+  function toggleDowSort(ctx, key) {
+    const st = getSt(ctx.from.id) || {};
+    const curKey = st.dowSortKey || null;
+    const curActive = Boolean(st.dowSortActive);
+
+    // повторное нажатие по тому же ключу -> выключаем сортировку
+    if (curActive && curKey === key) {
+      setSt(ctx.from.id, { dowSortKey: null, dowSortActive: false });
+    } else {
+      setSt(ctx.from.id, { dowSortKey: key, dowSortActive: true });
+    }
+  }
+
+  bot.action("lk_reports_dow_sort_to", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      toggleDowSort(ctx, "to");
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_sort_to", e);
+    }
+  });
+
+  bot.action("lk_reports_dow_sort_vp", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      toggleDowSort(ctx, "vp");
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_sort_vp", e);
+    }
+  });
+
+  bot.action("lk_reports_dow_sort_checks", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
+
+      toggleDowSort(ctx, "checks");
+      await showFiltersWeekdays(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_dow_sort_checks", e);
     }
   });
 
@@ -3482,6 +3586,18 @@ function registerReports(bot, ensureUser, logError) {
     } catch (e) {
       logError("lk_reports_text", e);
     }
+  });
+
+  registerReportImports(bot, {
+    pool,
+    ensureUser,
+    isAdmin,
+    toast,
+    deliver,
+    showReportsSettings: showSettings,
+    setSt,
+    getSt,
+    logError,
   });
 }
 
