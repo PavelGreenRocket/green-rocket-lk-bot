@@ -271,6 +271,43 @@ function registerStandardImport(bot, deps) {
     return { rows: r.rows.slice(0, PAGE), hasMore: r.rows.length > PAGE };
   }
 
+  async function loadCashCollectorsPage(tradePointId, page) {
+    const offset = Math.max(0, page) * PAGE;
+
+    // Берём назначенных через trade_point_responsibles (event_type=cash_collection_access)
+    const r = await pool.query(
+      `
+      SELECT u.id, u.full_name, u.username
+      FROM trade_point_responsibles tpr
+      JOIN users u ON u.id = tpr.user_id
+      WHERE tpr.trade_point_id = $1
+        AND tpr.event_type = 'cash_collection_access'
+        AND tpr.is_active = TRUE
+      ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
+      LIMIT $2 OFFSET $3
+      `,
+      [tradePointId, PAGE + 1, offset]
+    );
+
+    return { rows: r.rows.slice(0, PAGE), hasMore: r.rows.length > PAGE };
+  }
+
+  async function isCashCollectorAllowed(tradePointId, userId) {
+    const r = await pool.query(
+      `
+      SELECT 1
+      FROM trade_point_responsibles
+      WHERE trade_point_id=$1
+        AND event_type='cash_collection_access'
+        AND user_id=$2
+        AND is_active=TRUE
+      LIMIT 1
+      `,
+      [tradePointId, userId]
+    );
+    return r.rows.length > 0;
+  }
+
   // ---------- screens ----------
   async function showStep(ctx) {
     const st = getStd(ctx);
@@ -489,12 +526,26 @@ function registerStandardImport(bot, deps) {
     }
 
     if (step === "cash_collection_by") {
-      // reuse worker picker style; simplest: show "Я" + list page
       const page = st.ccByPage || 0;
-      const { rows, hasMore } = await loadUsersSearch({ page, q: "" });
+      const tpId = data.tradePointId;
+
+      // safety: если точка не выбрана — не показываем список
+      if (!tpId) {
+        const text = buildCard({
+          stepNo: 4,
+          stepTotal: totalSteps,
+          tpTitle,
+          dateStr,
+          data,
+          prompt: "Сначала выберите торговую точку.",
+        });
+        return deliver(ctx, { text, extra: baseKb([]) }, { edit: true });
+      }
+
+      const { rows, hasMore } = await loadCashCollectorsPage(tpId, page);
 
       const buttons = [
-        [Markup.button.callback("👱‍♂️ Я", "lk_reports_std_cc_by_me")],
+        [Markup.button.callback("🙋 Я", "lk_reports_std_cc_by_me")],
         ...rows.map((u) => [
           Markup.button.callback(
             `${u.full_name || "—"}${u.username ? ` (@${u.username})` : ""}`,
@@ -790,17 +841,26 @@ function registerStandardImport(bot, deps) {
 
   bot.action(/^lk_reports_std_cc_by_pick:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
-    const id = Number(ctx.match[1]);
+    const pickedId = Number(ctx.match[1]);
+
     const st = getStd(ctx);
     if (!st) return;
+
+    const data = st.data || {};
+    const tpId = data.tradePointId;
+    if (!tpId) return toast(ctx, "Сначала выберите точку.");
+
+    // защита от ручной подмены callback_data
+    const ok = await isCashCollectorAllowed(tpId, pickedId);
+    if (!ok) return toast(ctx, "Нет доступа к инкассации для этой точки.");
+
     const r = await pool.query(
       `SELECT id, full_name, username FROM users WHERE id=$1`,
-      [id]
+      [pickedId]
     );
     const row = r.rows[0];
     if (!row) return toast(ctx, "Не найдено.");
 
-    const data = st.data || {};
     data.cashCollectionByUserId = row.id;
     data.cashCollectionByLabel = row.username
       ? `@${row.username}`

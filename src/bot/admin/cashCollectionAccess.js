@@ -1,393 +1,280 @@
-// // src/bot/admin/cashCollectionAccess.js
-// const { Markup } = require("telegraf");
-// const pool = require("../../db/pool");
-// const { deliver } = require("../../utils/renderHelpers");
+// src/bot/admin/cashCollectionAccess.js
+const { Markup } = require("telegraf");
+const pool = require("../../db/pool");
+const { deliver } = require("../../utils/renderHelpers");
+const { getUserState, setUserState, clearUserState } = require("../state");
 
-// function isAdmin(user) {
-//   return user && (user.role === "admin" || user.role === "super_admin");
-// }
+const MODE = "admin_cash_access";
+const EVENT_TYPE = "cash_collection_access";
 
-// const stMap = new Map();
-// function getSt(tgId) {
-//   return stMap.get(tgId) || null;
-// }
-// function setSt(tgId, patch) {
-//   const prev = stMap.get(tgId) || {};
-//   stMap.set(tgId, { ...prev, ...patch });
-// }
-// function clearSt(tgId) {
-//   stMap.delete(tgId);
-// }
+function isAdmin(user) {
+  return user && (user.role === "admin" || user.role === "super_admin");
+}
 
-// async function loadPointsPage(page = 0, limit = 10) {
-//   const off = page * limit;
-//   const res = await pool.query(
-//     `
-//     SELECT id, title
-//     FROM trade_points
-//     ORDER BY title ASC, id ASC
-//     LIMIT $1 OFFSET $2
-//     `,
-//     [limit, off]
-//   );
-//   return res.rows;
-// }
+// ---- state helpers ----
+function stGet(tgId) {
+  const st = getUserState(tgId);
+  return st && st.mode === MODE ? st : null;
+}
+function stSet(tgId, patch) {
+  const prev = stGet(tgId) || { mode: MODE };
+  setUserState(tgId, { ...prev, ...patch });
+}
+function stClear(tgId) {
+  const st = stGet(tgId);
+  if (st) clearUserState(tgId);
+}
 
-// async function countPoints() {
-//   const r = await pool.query(`SELECT COUNT(*)::int AS c FROM trade_points`);
-//   return r.rows[0]?.c || 0;
-// }
+// ---- db helpers ----
+async function loadPoints() {
+  const r = await pool.query(
+    `SELECT id, title FROM trade_points WHERE is_active=TRUE ORDER BY title NULLS LAST, id`
+  );
+  return r.rows;
+}
 
-// async function loadUsersPage(page = 0, limit = 10) {
-//   const off = page * limit;
-//   const res = await pool.query(
-//     `
-//     SELECT id, full_name, username, work_phone
-//     FROM users
-//     ORDER BY full_name NULLS LAST, id ASC
-//     LIMIT $1 OFFSET $2
-//     `,
-//     [limit, off]
-//   );
-//   return res.rows;
-// }
+async function loadAccess(tradePointId) {
+  const r = await pool.query(
+    `
+    SELECT
+      tpr.id,
+      tpr.user_id,
+      COALESCE(u.full_name,'Без имени') AS full_name,
+      u.username
+    FROM trade_point_responsibles tpr
+    JOIN users u ON u.id = tpr.user_id
+    WHERE tpr.trade_point_id=$1
+      AND tpr.event_type=$2
+      AND tpr.is_active=TRUE
+    ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
+    `,
+    [tradePointId, EVENT_TYPE]
+  );
+  return r.rows;
+}
 
-// async function countUsers() {
-//   const r = await pool.query(`SELECT COUNT(*)::int AS c FROM users`);
-//   return r.rows[0]?.c || 0;
-// }
+async function loadUsersForPick() {
+  // намеренно без фильтров по роли/статусу
+  const r = await pool.query(
+    `
+    SELECT id, COALESCE(full_name,'Без имени') AS full_name, username
+    FROM users
+    ORDER BY full_name NULLS LAST, id
+    LIMIT 80
+    `
+  );
+  return r.rows;
+}
 
-// // checked = пользователь имеет доступ НА ВСЕ выбранные точки
-// async function loadCheckedUserIdsForPoints(pointIds) {
-//   if (!pointIds?.length) return new Set();
-//   const res = await pool.query(
-//     `
-//     SELECT user_id
-//     FROM trade_point_responsibles
-//     WHERE event_type = 'cash_collection_access'
-//       AND is_active = TRUE
-//       AND trade_point_id = ANY($1::int[])
-//     GROUP BY user_id
-//     HAVING COUNT(*) = $2
-//     `,
-//     [pointIds.map(Number), pointIds.length]
-//   );
-//   return new Set(res.rows.map((x) => Number(x.user_id)));
-// }
+async function grantAccess(tradePointId, userId) {
+  // Без ON CONFLICT (на случай отсутствия уникального индекса)
+  const upd = await pool.query(
+    `
+    UPDATE trade_point_responsibles
+    SET is_active=TRUE
+    WHERE trade_point_id=$1 AND event_type=$2 AND user_id=$3
+    `,
+    [tradePointId, EVENT_TYPE, userId]
+  );
+  if (upd.rowCount > 0) return;
 
-// async function setAccessForUserOnPoints({ pointIds, userId, active, adminId }) {
-//   const tpIds = pointIds.map(Number);
-//   const uid = Number(userId);
+  await pool.query(
+    `
+    INSERT INTO trade_point_responsibles (trade_point_id, event_type, user_id, is_active)
+    VALUES ($1,$2,$3,TRUE)
+    `,
+    [tradePointId, EVENT_TYPE, userId]
+  );
+}
 
-//   if (active) {
-//     await pool.query(
-//       `
-//       INSERT INTO trade_point_responsibles (
-//         trade_point_id, event_type, user_id, created_by_user_id, is_active
-//       )
-//       SELECT tp_id, 'cash_collection_access', $2, $3, TRUE
-//       FROM unnest($1::int[]) AS tp_id
-//       ON CONFLICT (trade_point_id, event_type, user_id)
-//       DO UPDATE SET
-//         is_active = TRUE,
-//         created_by_user_id = EXCLUDED.created_by_user_id
-//       `,
-//       [tpIds, uid, Number(adminId)]
-//     );
-//   } else {
-//     await pool.query(
-//       `
-//       UPDATE trade_point_responsibles
-//       SET is_active = FALSE,
-//           created_by_user_id = $3
-//       WHERE event_type = 'cash_collection_access'
-//         AND user_id = $2
-//         AND trade_point_id = ANY($1::int[])
-//       `,
-//       [tpIds, uid, Number(adminId)]
-//     );
-//   }
-// }
+async function revokeAccessById(id) {
+  await pool.query(
+    `UPDATE trade_point_responsibles SET is_active=FALSE WHERE id=$1`,
+    [id]
+  );
+}
 
-// async function renderPickPoints(ctx) {
-//   const st = getSt(ctx.from.id) || {};
-//   const page = Number(st.pointsPage || 0);
-//   const selected = new Set((st.selectedPointIds || []).map(Number));
+// ---- ui ----
+async function showRoot(ctx) {
+  const text =
+    "💰 <b>Доступ к инкассации</b>\n\n" +
+    "Здесь назначаются сотрудники, которые могут быть выбраны как «кто инкассировал»\n" +
+    "для конкретной торговой точки.\n\n" +
+    "Выберите точку:";
 
-//   const [rows, total] = await Promise.all([
-//     loadPointsPage(page, 10),
-//     countPoints(),
-//   ]);
+  const points = await loadPoints();
+  const rows = points.map((p) => [
+    Markup.button.callback(
+      p.title || `Точка #${p.id}`,
+      `admin_cash_access_point_${p.id}`
+    ),
+  ]);
+  rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
 
-//   const kbRows = [];
-//   rows.forEach((p) => {
-//     const on = selected.has(Number(p.id));
-//     kbRows.push([
-//       Markup.button.callback(
-//         `${on ? "✅" : "⬜️"} ${p.title}`,
-//         `admin_cash_access_tp_${p.id}`
-//       ),
-//     ]);
-//   });
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
 
-//   kbRows.push([
-//     Markup.button.callback("✅ Выбрать все", "admin_cash_access_tp_all"),
-//   ]);
+async function showPointCard(ctx, tradePointId) {
+  const tp = await pool.query(
+    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  const title = tp.rows[0]?.title || `#${tradePointId}`;
 
-//   const hasMore = (page + 1) * 10 < total;
-//   if (hasMore)
-//     kbRows.push([
-//       Markup.button.callback("➡️ ещё", "admin_cash_access_tp_more"),
-//     ]);
+  const list = await loadAccess(tradePointId);
 
-//   kbRows.push([
-//     Markup.button.callback("➡️ Далее", "admin_cash_access_tp_next"),
-//   ]);
-//   kbRows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
+  let text = "💰 <b>Доступ к инкассации</b>\n\n";
+  text += `📍 Точка: <b>${title}</b>\n\n`;
 
-//   const text =
-//     "💰 <b>Доступ к инкассации</b>\n\n" +
-//     "Шаг 1/2: выберите торговые точки (мультивыбор).";
+  if (!list.length) {
+    text += "Пока никто не назначен.\n";
+  } else {
+    text += "Назначены:\n";
+    list.forEach((r, i) => {
+      const tag = r.username ? ` (@${r.username})` : "";
+      text += `${i + 1}. ${r.full_name}${tag}\n`;
+    });
+  }
 
-//   await deliver(
-//     ctx,
-//     { text, extra: { ...Markup.inlineKeyboard(kbRows), parse_mode: "HTML" } },
-//     { edit: true }
-//   );
-// }
+  const kb = [];
 
-// async function renderPickUsers(ctx) {
-//   const st = getSt(ctx.from.id) || {};
-//   const page = Number(st.usersPage || 0);
-//   const pointIds = (st.selectedPointIds || []).map(Number);
+  if (list.length) {
+    const btns = list.map((r, idx) =>
+      Markup.button.callback(
+        `${idx + 1}`,
+        `admin_cash_access_del_${r.id}_${tradePointId}`
+      )
+    );
+    for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
+    kb.push([{ text: "🗑 удалить (нажмите номер)", callback_data: "noop" }]);
+  }
 
-//   if (!pointIds.length) {
-//     await ctx.answerCbQuery("Сначала выберите точки").catch(() => {});
-//     return renderPickPoints(ctx);
-//   }
+  kb.push([
+    Markup.button.callback(
+      "➕ Назначить доступ",
+      `admin_cash_access_add_${tradePointId}`
+    ),
+  ]);
+  kb.push([Markup.button.callback("⬅️ Назад", "admin_cash_access_root")]);
 
-//   const [users, total, checkedSet] = await Promise.all([
-//     loadUsersPage(page, 10),
-//     countUsers(),
-//     loadCheckedUserIdsForPoints(pointIds),
-//   ]);
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(kb) },
+    { edit: true }
+  );
+}
 
-//   const kbRows = [];
-//   users.forEach((u) => {
-//     const uid = Number(u.id);
-//     const on = checkedSet.has(uid);
-//     const labelName = u.full_name || u.username || u.work_phone || `#${uid}`;
-//     kbRows.push([
-//       Markup.button.callback(
-//         `${on ? "✅" : "⬜️"} ${labelName}`,
-//         `admin_cash_access_user_${uid}`
-//       ),
-//     ]);
-//   });
+async function showPickUser(ctx, tradePointId) {
+  stSet(ctx.from.id, { step: "pick_user", tradePointId });
 
-//   kbRows.push([
-//     Markup.button.callback(
-//       "✅ Выбрать всех на странице",
-//       "admin_cash_access_user_page_all"
-//     ),
-//   ]);
+  const users = await loadUsersForPick();
+  const text =
+    "➕ <b>Доступ к инкассации</b>\n\n" +
+    "Выберите пользователя, которому дать доступ:";
 
-//   const hasMore = (page + 1) * 10 < total;
-//   if (hasMore)
-//     kbRows.push([
-//       Markup.button.callback("➡️ ещё", "admin_cash_access_user_more"),
-//     ]);
+  const rows = users.map((u) => [
+    Markup.button.callback(
+      `${u.full_name}${u.username ? ` (@${u.username})` : ""}`,
+      `admin_cash_access_pick_${u.id}`
+    ),
+  ]);
 
-//   kbRows.push([
-//     Markup.button.callback("⬅️ К точкам", "admin_cash_access_back_points"),
-//   ]);
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_cash_access_point_${tradePointId}`
+    ),
+  ]);
 
-//   const text =
-//     "💰 <b>Доступ к инкассации</b>\n\n" +
-//     "Шаг 2/2: выберите сотрудников.\n" +
-//     "Нажатие по сотруднику включает/выключает доступ для всех выбранных точек.";
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
 
-//   await deliver(
-//     ctx,
-//     { text, extra: { ...Markup.inlineKeyboard(kbRows), parse_mode: "HTML" } },
-//     { edit: true }
-//   );
-// }
+// ---- registration ----
+function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
+  bot.action("admin_cash_access_root", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      stClear(ctx.from.id);
+      await showRoot(ctx);
+    } catch (e) {
+      logError("admin_cash_access_root", e);
+    }
+  });
 
-// function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
-//   bot.action("admin_cash_access_root", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
+  bot.action(/^admin_cash_access_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      stClear(ctx.from.id);
+      await showPointCard(ctx, Number(ctx.match[1]));
+    } catch (e) {
+      logError("admin_cash_access_point", e);
+    }
+  });
 
-//       setSt(ctx.from.id, {
-//         step: "pick_points",
-//         pointsPage: 0,
-//         usersPage: 0,
-//         selectedPointIds: [],
-//       });
+  bot.action(/^admin_cash_access_add_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await showPickUser(ctx, Number(ctx.match[1]));
+    } catch (e) {
+      logError("admin_cash_access_add", e);
+    }
+  });
 
-//       await renderPickPoints(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_root", e);
-//     }
-//   });
+  bot.action(/^admin_cash_access_pick_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
 
-//   bot.action(/^admin_cash_access_tp_(\d+)$/, async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
+      const st = stGet(ctx.from.id);
+      if (!st || st.step !== "pick_user") return;
 
-//       const tpId = Number(ctx.match[1]);
-//       const st = getSt(ctx.from.id) || {};
-//       const selected = new Set((st.selectedPointIds || []).map(Number));
-//       if (selected.has(tpId)) selected.delete(tpId);
-//       else selected.add(tpId);
+      const pickedUserId = Number(ctx.match[1]);
+      const tpId = Number(st.tradePointId);
 
-//       setSt(ctx.from.id, { selectedPointIds: Array.from(selected) });
-//       await renderPickPoints(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_tp_toggle", e);
-//     }
-//   });
+      await grantAccess(tpId, pickedUserId);
 
-//   bot.action("admin_cash_access_tp_all", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
+      stClear(ctx.from.id);
+      await ctx.answerCbQuery("✅ Назначено").catch(() => {});
+      await showPointCard(ctx, tpId);
+    } catch (e) {
+      logError("admin_cash_access_pick", e);
+    }
+  });
 
-//       const all = await pool.query(
-//         `SELECT id FROM trade_points ORDER BY title ASC, id ASC`
-//       );
-//       setSt(ctx.from.id, {
-//         selectedPointIds: all.rows.map((r) => Number(r.id)),
-//       });
-//       await renderPickPoints(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_tp_all", e);
-//     }
-//   });
+  bot.action(/^admin_cash_access_del_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!isAdmin(admin)) return;
 
-//   bot.action("admin_cash_access_tp_more", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
+      const id = Number(ctx.match[1]);
+      const tpId = Number(ctx.match[2]);
 
-//       const st = getSt(ctx.from.id) || {};
-//       setSt(ctx.from.id, { pointsPage: Number(st.pointsPage || 0) + 1 });
-//       await renderPickPoints(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_tp_more", e);
-//     }
-//   });
+      await revokeAccessById(id);
 
-//   bot.action("admin_cash_access_tp_next", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
+      await ctx.answerCbQuery("🗑 Удалено").catch(() => {});
+      await showPointCard(ctx, tpId);
+    } catch (e) {
+      logError("admin_cash_access_del", e);
+    }
+  });
 
-//       const st = getSt(ctx.from.id) || {};
-//       if (!st.selectedPointIds || st.selectedPointIds.length === 0) {
-//         await ctx
-//           .answerCbQuery("Выберите хотя бы одну точку", { show_alert: true })
-//           .catch(() => {});
-//         return;
-//       }
+  bot.action("noop", async (ctx) => ctx.answerCbQuery().catch(() => {}));
+}
 
-//       setSt(ctx.from.id, { step: "pick_users", usersPage: 0 });
-//       await renderPickUsers(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_tp_next", e);
-//     }
-//   });
-
-//   bot.action("admin_cash_access_back_points", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
-
-//       setSt(ctx.from.id, { step: "pick_points", pointsPage: 0, usersPage: 0 });
-//       await renderPickPoints(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_back_points", e);
-//     }
-//   });
-
-//   bot.action("admin_cash_access_user_more", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const user = await ensureUser(ctx);
-//       if (!isAdmin(user)) return;
-
-//       const st = getSt(ctx.from.id) || {};
-//       setSt(ctx.from.id, { usersPage: Number(st.usersPage || 0) + 1 });
-//       await renderPickUsers(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_user_more", e);
-//     }
-//   });
-
-//   bot.action(/^admin_cash_access_user_(\d+)$/, async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const admin = await ensureUser(ctx);
-//       if (!isAdmin(admin)) return;
-
-//       const st = getSt(ctx.from.id) || {};
-//       const pointIds = (st.selectedPointIds || []).map(Number);
-//       const userId = Number(ctx.match[1]);
-
-//       const checkedSet = await loadCheckedUserIdsForPoints(pointIds);
-//       const isOn = checkedSet.has(userId);
-
-//       // toggle: если был доступ на всех точках -> снимаем, иначе назначаем
-//       await setAccessForUserOnPoints({
-//         pointIds,
-//         userId,
-//         active: !isOn,
-//         adminId: admin.id,
-//       });
-
-//       await renderPickUsers(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_user_toggle", e);
-//     }
-//   });
-
-//   bot.action("admin_cash_access_user_page_all", async (ctx) => {
-//     try {
-//       await ctx.answerCbQuery().catch(() => {});
-//       const admin = await ensureUser(ctx);
-//       if (!isAdmin(admin)) return;
-
-//       const st = getSt(ctx.from.id) || {};
-//       const pointIds = (st.selectedPointIds || []).map(Number);
-//       const page = Number(st.usersPage || 0);
-
-//       const users = await loadUsersPage(page, 10);
-//       const ids = users.map((u) => Number(u.id));
-
-//       // назначим доступ всем на странице
-//       for (const uid of ids) {
-//         await setAccessForUserOnPoints({
-//           pointIds,
-//           userId: uid,
-//           active: true,
-//           adminId: admin.id,
-//         });
-//       }
-
-//       await renderPickUsers(ctx);
-//     } catch (e) {
-//       logError("admin_cash_access_user_page_all", e);
-//     }
-//   });
-// }
-
-// module.exports = { registerAdminCashCollectionAccess };
+module.exports = { registerAdminCashCollectionAccess };

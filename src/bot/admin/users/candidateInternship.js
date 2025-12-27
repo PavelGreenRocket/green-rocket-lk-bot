@@ -946,6 +946,9 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         tradePointId: Number(c.internship_point_id),
         mentorUserId: Number(admin.id),
         mentorTelegramId: Number(ctx.from.id),
+
+        step: "late_choice",
+        lateMinutes: null,
       });
 
       const text = "Стажёр пришёл вовремя?";
@@ -989,10 +992,20 @@ function registerCandidateInternship(bot, ensureUser, logError) {
   });
 
   // helper: фактический старт сессии (создание internship_sessions + нотификации)
-  async function doStartInternship(ctx, wasLate) {
+  // helper: фактический старт сессии (создание internship_sessions + сохранение опоздания)
+  async function doStartInternship(ctx, wasLate, lateMinutes = null) {
+    const candidateIdFromCb =
+      ctx.updateType === "callback_query" && ctx.match && ctx.match[1]
+        ? Number(ctx.match[1])
+        : null;
+
     const st = startInternshipStates.get(ctx.from.id);
     if (!st) {
-      await ctx.answerCbQuery("Состояние старта потеряно").catch(() => {});
+      // сценарий сброшен/истёк — возвращаем в карточку (как ты просил)
+      await ctx.answerCbQuery("Сценарий отменён/истёк").catch(() => {});
+      if (candidateIdFromCb) {
+        await showCandidateCardLk(ctx, candidateIdFromCb, { edit: true });
+      }
       return;
     }
 
@@ -1003,100 +1016,95 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       internName,
       tradePointId,
       mentorUserId,
-      mentorTelegramId,
     } = st;
 
-    // 0) если уже есть активная сессия — просто перерисуем карточку
-    const activeRes = await pool.query(
-      `
-      SELECT 1
-      FROM internship_sessions
-      WHERE user_id = $1 AND finished_at IS NULL AND is_canceled = FALSE
-      LIMIT 1
-      `,
-      [internUserId]
-    );
-    if (activeRes.rows.length) {
+    try {
+      // 0) если уже есть активная сессия — не создаём новую
+      const activeRes = await pool.query(
+        `
+        SELECT id
+        FROM internship_sessions
+        WHERE user_id = $1
+          AND finished_at IS NULL
+          AND is_canceled = FALSE
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+        [internUserId]
+      );
+
+      if (activeRes.rows.length) {
+        startInternshipStates.delete(ctx.from.id);
+        await ctx
+          .answerCbQuery("У стажёра уже идёт стажировка")
+          .catch(() => {});
+        await showCandidateCardLk(ctx, candidateId, { edit: true });
+        return;
+      }
+
+      // 1) определяем day_number = max(day_number)+1
+      const dayRes = await pool.query(
+        `
+        SELECT COALESCE(MAX(day_number), 0)::int + 1 AS next_day
+        FROM internship_sessions
+        WHERE user_id = $1
+        `,
+        [internUserId]
+      );
+      const nextDay = Number(dayRes.rows[0]?.next_day || 1);
+
+      // 2) comment про опоздание
+      let comment = null;
+      if (wasLate) {
+        const mins = Number.isFinite(lateMinutes) ? Number(lateMinutes) : null;
+        comment = mins !== null ? `Опоздание: ${mins} мин.` : "Опоздание";
+      }
+
+      // 3) создаём сессию
+      await pool.query(
+        `
+        INSERT INTO internship_sessions
+          (user_id, day_number, started_by, trade_point_id, was_late, comment)
+        VALUES
+          ($1, $2, $3, $4, $5, $6)
+        `,
+        [
+          internUserId,
+          nextDay,
+          mentorUserId || null,
+          tradePointId || null,
+          wasLate ? true : false,
+          comment,
+        ]
+      );
+
+      // 4) переводим кандидата в intern (если ещё не переведён)
+      await pool.query(
+        `UPDATE candidates SET status = 'intern' WHERE id = $1`,
+        [candidateId]
+      );
+
+      // 5) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
+      await ctx.telegram
+        .sendMessage(
+          internTelegramId,
+          `🚀 Стажировка началась!\nДень: ${nextDay}\n${
+            wasLate ? comment : ""
+          }`.trim()
+        )
+        .catch(() => {});
+
+      // 6) чистим состояние и возвращаем в карточку стажёра
       startInternshipStates.delete(ctx.from.id);
-      await ctx.answerCbQuery("Стажировка уже запущена").catch(() => {});
       await showCandidateCardLk(ctx, candidateId, { edit: true });
-      return;
+    } catch (err) {
+      startInternshipStates.delete(ctx.from.id);
+      logError("doStartInternship", err);
+      await ctx.reply("Не удалось начать стажировку. Попробуйте ещё раз.");
+      await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
+        () => {}
+      );
     }
-
-    // 1) следующий день = кол-во завершённых (не cancelled) + 1
-    const cntRes = await pool.query(
-      `
-      SELECT COUNT(*)::int AS finished_cnt
-      FROM internship_sessions
-      WHERE user_id = $1 AND finished_at IS NOT NULL AND is_canceled = FALSE
-      `,
-      [internUserId]
-    );
-    const nextDay = (cntRes.rows[0]?.finished_cnt || 0) + 1;
-
-    // 2) создаём сессию
-    await pool.query(
-      `
-      INSERT INTO internship_sessions (user_id, day_number, started_by, trade_point_id, was_late)
-      VALUES ($1, $2, $3, $4, $5)
-      `,
-      [internUserId, nextDay, mentorUserId, tradePointId, wasLate]
-    );
-
-    // 3) фиксируем, что человек теперь intern (если вдруг ещё candidate)
-    await pool.query(
-      `
-      UPDATE users
-      SET staff_status = 'intern'
-      WHERE id = $1
-      `,
-      [internUserId]
-    );
-
-    // 3.1) КРИТИЧНО:
-    // переводим кандидата в статус "intern",
-    // чтобы он исчез из списка "Кандидаты" и появился в "Стажёры"
-    await pool.query(
-      `
-  UPDATE candidates
-  SET status = 'intern'
-  WHERE id = $1
-  `,
-      [candidateId]
-    );
-
-    // 4) уведомление стажёру (в lk-bot) + кнопка перехода в academy bot
-    await ctx.telegram
-      .sendMessage(
-        internTelegramId,
-        "🚀 Стажировка началась!\n\nНажмите кнопку ниже, чтобы перейти к обучению.",
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: "🚀 Перейти к обучению",
-                  url: "https://t.me/barista_academy_GR_bot",
-                },
-              ],
-            ],
-          },
-        }
-      )
-      .catch(() => {});
-
-    // 5) уведомление наставнику В academy bot через outbox (academy worker уже это обрабатывает)
-    await pushOutboxEvent("academy", "internship_started", {
-      mentor_telegram_id: mentorTelegramId,
-      intern_user_id: internUserId,
-      intern_name: internName,
-    });
-
-    startInternshipStates.delete(ctx.from.id);
-
-    // 6) перерисовываем карточку (теперь isTraineeMode станет true, потому что появилась активная сессия)
-    await ctx.answerCbQuery().catch(() => {});
-    await showCandidateCardLk(ctx, candidateId, { edit: true });
   }
 
   // 3) Пришёл вовремя
@@ -1309,7 +1317,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // 1) уведомление стажёру (ссылкой в academy bot)
       if (intern.telegram_id) {
         const academyBot =
-          process.env.ACADEMY_BOT_USERNAME || "barista_academy_GR_bot";
+          process.env.ACADEMY_BOT_USERNAME || "baristaAcademy_GR_bot";
         const url = `https://t.me/${academyBot}`;
 
         const text =

@@ -442,7 +442,7 @@ FROM candidates c
           rows.push([
             Markup.button.url(
               "⏺️ Перейти к обучению",
-              "https://t.me/barista_academy_GR_bot"
+              "https://t.me/baristaAcademy_GR_bot"
             ),
           ]);
         } else {

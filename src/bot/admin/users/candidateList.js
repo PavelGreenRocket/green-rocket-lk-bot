@@ -959,6 +959,74 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     isRestoreModeFor
   );
 
+  // ---------------- ОТКРЫТИЕ КАРТОЧКИ СТАЖЁРА ИЗ СПИСКА ----------------
+
+  // 1) Обычный стажёр (есть candidate_id)
+  bot.action(/^admin_intern_open_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin) return;
+      if (admin.role !== "admin" && admin.role !== "super_admin") {
+        await ctx.answerCbQuery("Нет доступа").catch(() => {});
+        return;
+      }
+
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
+    } catch (err) {
+      logError("admin_intern_open", err);
+    }
+  });
+
+  // 2) “Ручной” стажёр (есть только users.id, candidate может отсутствовать)
+  bot.action(/^admin_intern_user_open_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin) return;
+      if (admin.role !== "admin" && admin.role !== "super_admin") {
+        await ctx.answerCbQuery("Нет доступа").catch(() => {});
+        return;
+      }
+
+      const userId = Number(ctx.match[1]);
+
+      // если у этого users есть candidate_id — откроем полноценную карточку кандидата/стажёра
+      const { rows } = await pool.query(
+        `SELECT candidate_id FROM users WHERE id = $1 LIMIT 1`,
+        [userId]
+      );
+
+      if (rows.length && rows[0].candidate_id) {
+        await ctx.answerCbQuery().catch(() => {});
+        await showCandidateCardLk(ctx, Number(rows[0].candidate_id), {
+          edit: true,
+        });
+        return;
+      }
+
+      // иначе — это реально “ручной” стажёр без кандидата
+      await ctx.answerCbQuery().catch(() => {});
+      const text =
+        "🧑‍🎓 *Стажёр добавлен вручную*\n\n" +
+        `user_id=${userId}\n\n` +
+        "Карточка кандидата у него пустая (это нормально).\n" +
+        "Дальше мы допилим полноценную карточку стажёра без кандидата.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback("⬅️ Назад к стажёрам", "admin_users_interns")],
+      ]);
+
+      await ctx
+        .editMessageText(text, { parse_mode: "Markdown", ...keyboard })
+        .catch(async () => {
+          await ctx.reply(text, { parse_mode: "Markdown", ...keyboard });
+        });
+    } catch (err) {
+      logError("admin_intern_user_open", err);
+    }
+  });
+
   const POSITIONS = [
     { code: "barista", label: "Бариста" },
     { code: "point_admin", label: "Администратор точки" },
@@ -981,7 +1049,25 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   ];
 
   bot.on("text", async (ctx, next) => {
-    const st = getAddWorkerState(ctx.from.id);
+    // 0) ВВОД МИНУТ ОПОЗДАНИЯ (старт стажировки)
+    const startSt = startInternshipStates.get(ctx.from.id);
+    if (startSt && startSt.step === "late_minutes") {
+      const raw = String(ctx.message.text || "").trim();
+      const mins = parseInt(raw, 10);
+
+      if (!Number.isFinite(mins) || mins < 0 || mins > 600) {
+        await ctx.reply("Введите число минут (например: 5).");
+        return;
+      }
+
+      // сохраним в состоянии и стартуем
+      startInternshipStates.set(ctx.from.id, { ...startSt, lateMinutes: mins });
+      await doStartInternship(ctx, true, mins);
+      return;
+    }
+
+    // 1) Старый сценарий: приглашение на стажировку (дата/время/точка/наставник)
+    const st = getState(ctx.from.id);
     if (!st) return next();
 
     try {
