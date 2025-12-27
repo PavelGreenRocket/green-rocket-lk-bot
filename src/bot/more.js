@@ -888,6 +888,16 @@ function registerMore(bot, ensureUser, logError) {
             [id]
           );
 
+          // если пользователь указан в отчётах как "кто делал инкассацию" — обнуляем ссылку
+          await pool.query(
+            `
+  UPDATE shift_closings
+     SET cash_collection_by_user_id = NULL
+   WHERE cash_collection_by_user_id = $1
+  `,
+            [id]
+          );
+
           // --- и только теперь пробуем удалить самого пользователя ---
           await pool.query("DELETE FROM users WHERE id = $1", [id]);
 

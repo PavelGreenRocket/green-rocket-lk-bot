@@ -48,19 +48,12 @@ function registerAdminSettings(bot, ensureUser, logError) {
       const keyboard = Markup.inlineKeyboard([
         [
           {
-            text: "📚🔧 Настройка академии",
-            callback_data: "admin_settings_academy",
-          },
-        ],
-        [
-          {
             text: "🏢🔧 Настройка компании",
             callback_data: "admin_settings_company",
           },
         ],
         [{ text: "🔮🔧 Настройка ИИ", callback_data: "admin_settings_ai" }],
         [{ text: "👥🔧 Пользователи", callback_data: "admin_settings_users" }],
-        [{ text: "📦🔧 Склад", callback_data: "admin_settings_stock" }],
         [{ text: "⬅️ Назад", callback_data: "lk_admin_menu" }],
       ]);
 

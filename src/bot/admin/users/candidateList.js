@@ -57,6 +57,12 @@ function clearAddWorkerState(tgId) {
   addWorkerStates.delete(tgId);
 }
 
+// alias для старых вставок: раньше в ответах называли это getState()
+// чтобы не падал bot.on("text") после частичных патчей
+function getState(tgId) {
+  return getAddWorkerState(tgId);
+}
+
 function normalizePhone(raw) {
   const s = String(raw || "").trim();
   if (!s) return null;
@@ -583,54 +589,29 @@ async function showInternsListLk(ctx, user, options = {}) {
 
   const res = await pool.query(
     `
-  WITH interns_union AS (
-    -- 1) "Обычные" стажёры из candidates (как было)
-    SELECT
-      c.id                  AS intern_key,   -- ключ для кнопки
-      'candidate'           AS intern_src,
-      c.id                  AS candidate_id,
-      u.id                  AS lk_user_id,
-
-      c.name,
-      c.age,
-
-      c.internship_date,
-      c.internship_time_from,
-      c.internship_time_to
-    FROM candidates c
-    LEFT JOIN users u ON u.candidate_id = c.id
-    WHERE ${where}
-
-    UNION ALL
-
-    -- 2) "Ручные" стажёры из users.staff_status='intern' (через ожидание)
-    SELECT
-      u.id                  AS intern_key,
-      'user'                AS intern_src,
-      NULL                  AS candidate_id,
-      u.id                  AS lk_user_id,
-
-      u.full_name           AS name,
-      w.age                 AS age,
-
-      NULL::date            AS internship_date,
-      NULL::text            AS internship_time_from,
-      NULL::text            AS internship_time_to
-    FROM users u
-    LEFT JOIN lk_waiting_users w ON w.linked_user_id = u.id
-    WHERE u.staff_status = 'intern'
-  )
-
   SELECT
-    x.*,
+    c.id                  AS intern_key,
+    'candidate'           AS intern_src,
+    c.id                  AS candidate_id,
+    u.id                  AS lk_user_id,
+
+    c.name,
+    c.age,
+
+    c.internship_date,
+    c.internship_time_from,
+    c.internship_time_to,
+
     COALESCE(fin.finished_cnt, 0) AS finished_cnt,
     (act.id IS NOT NULL)          AS has_active
-  FROM interns_union x
+
+  FROM candidates c
+  JOIN users u ON u.candidate_id = c.id
 
   LEFT JOIN LATERAL (
     SELECT COUNT(*)::int AS finished_cnt
     FROM internship_sessions s
-    WHERE s.user_id = x.lk_user_id
+    WHERE s.user_id = u.id
       AND s.finished_at IS NOT NULL
       AND s.is_canceled = FALSE
   ) fin ON TRUE
@@ -638,14 +619,15 @@ async function showInternsListLk(ctx, user, options = {}) {
   LEFT JOIN LATERAL (
     SELECT id
     FROM internship_sessions s
-    WHERE s.user_id = x.lk_user_id
+    WHERE s.user_id = u.id
       AND s.finished_at IS NULL
       AND s.is_canceled = FALSE
     ORDER BY s.id DESC
     LIMIT 1
   ) act ON TRUE
 
-  ORDER BY x.internship_date NULLS LAST, x.intern_key
+  WHERE ${where}
+  ORDER BY c.internship_date NULLS LAST, c.id
   `,
     params
   );
@@ -1049,25 +1031,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
   ];
 
   bot.on("text", async (ctx, next) => {
-    // 0) ВВОД МИНУТ ОПОЗДАНИЯ (старт стажировки)
-    const startSt = startInternshipStates.get(ctx.from.id);
-    if (startSt && startSt.step === "late_minutes") {
-      const raw = String(ctx.message.text || "").trim();
-      const mins = parseInt(raw, 10);
-
-      if (!Number.isFinite(mins) || mins < 0 || mins > 600) {
-        await ctx.reply("Введите число минут (например: 5).");
-        return;
-      }
-
-      // сохраним в состоянии и стартуем
-      startInternshipStates.set(ctx.from.id, { ...startSt, lateMinutes: mins });
-      await doStartInternship(ctx, true, mins);
-      return;
-    }
-
     // 1) Старый сценарий: приглашение на стажировку (дата/время/точка/наставник)
-    const st = getState(ctx.from.id);
+    const st = getAddWorkerState(ctx.from.id);
+
     if (!st) return next();
 
     try {
@@ -2237,38 +2203,6 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     }
   });
 
-  bot.action(/^admin_intern_open_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const u = await ensureUser(ctx);
-      if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
-
-      const candidateId = Number(ctx.match[1]);
-      await showCandidateCardLk(ctx, candidateId, {
-        edit: true,
-        backTo: "interns",
-      });
-    } catch (err) {
-      logError("admin_intern_open", err);
-    }
-  });
-
-  bot.action(/^admin_intern_user_open_(\d+)$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const u = await ensureUser(ctx);
-      if (!u || (u.role !== "admin" && u.role !== "super_admin")) return;
-
-      const userId = Number(ctx.match[1]);
-      // пока просто показываем карточку пользователя-сотрудника как заглушку,
-      // либо можно сделать отдельную intern-card позже.
-      await ctx.reply(
-        `Стажёр добавлен вручную. user_id=${userId}\n(карточку стажёра можно допилить следующим шагом)`
-      );
-    } catch (err) {
-      logError("admin_intern_user_open", err);
-    }
-  });
 
   // Сотрудники — полноценный экран
   bot.action("admin_users_workers", async (ctx) => {
