@@ -5,6 +5,10 @@ const { deliver } = require("../../utils/renderHelpers");
 const { getUserState, setUserState, clearUserState } = require("../state");
 const { toast } = require("../../utils/toast");
 const { buildStatusText, buildMainKeyboard } = require("../menu");
+const {
+  loadCashCollectorsPage,
+  isCashCollectorForPoint,
+} = require("./cashCollectors");
 
 const MODE = "shift_close";
 
@@ -493,36 +497,35 @@ async function showByStep(ctx, user, step) {
     // Если ничего не назначено — показываем fallback "Я".
     const PAGE = 10;
     const page = Number.isInteger(st.cashByPage) ? st.cashByPage : 0;
-    const offset = page * PAGE;
-
     let collectors = [];
     let hasMore = false;
-
     try {
-      const r = await pool.query(
-        `
-        SELECT u.id, u.full_name, u.username, u.work_phone
-        FROM trade_point_responsibles tpr
-        JOIN users u ON u.id = tpr.user_id
-        WHERE tpr.trade_point_id = $1
-          AND tpr.event_type = 'cash_collection_access'
-          AND tpr.is_active = true
-        ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
-        LIMIT $2 OFFSET $3
-        `,
-        [st.tradePointId, PAGE + 1, offset]
-      );
-      collectors = r.rows.slice(0, PAGE);
-      hasMore = r.rows.length > PAGE;
-    } catch (e) {
+      const r = await loadCashCollectorsPage(pool, st.tradePointId, page, PAGE);
+      collectors = r.rows;
+      hasMore = r.hasMore;
+    } catch (_) {
       collectors = [];
       hasMore = false;
     }
 
     const kbRows = [];
 
-    // "Я" всегда доступен
-    kbRows.push([{ text: "🙋 Я", callback_data: "shift_close_cash_by_me" }]);
+    // "Я" показываем только если:
+    // - вообще никто не назначен (fallback), или
+    // - текущий пользователь назначен к этой точке
+    let showMe = false;
+    if (!collectors.length) {
+      showMe = true; // fallback
+    } else {
+      try {
+        showMe = await isCashCollectorForPoint(pool, st.tradePointId, user.id);
+      } catch (_) {
+        showMe = false;
+      }
+    }
+    if (showMe) {
+      kbRows.push([{ text: "🙋 Я", callback_data: "shift_close_cash_by_me" }]);
+    }
 
     for (const u of collectors) {
       const label =

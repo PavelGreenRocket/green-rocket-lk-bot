@@ -2,164 +2,128 @@
 const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
-const { getUserState, setUserState, clearUserState } = require("../state");
-
-const MODE = "admin_cash_access";
-const EVENT_TYPE = "cash_collection_access";
 
 function isAdmin(user) {
   return user && (user.role === "admin" || user.role === "super_admin");
 }
 
-// ---- state helpers ----
-function stGet(tgId) {
-  const st = getUserState(tgId);
-  return st && st.mode === MODE ? st : null;
+// tgId -> { step, tradePointId }
+const stMap = new Map();
+function getSt(tgId) {
+  return stMap.get(tgId) || null;
 }
-function stSet(tgId, patch) {
-  const prev = stGet(tgId) || { mode: MODE };
-  setUserState(tgId, { ...prev, ...patch });
+function setSt(tgId, st) {
+  stMap.set(tgId, st);
 }
-function stClear(tgId) {
-  const st = stGet(tgId);
-  if (st) clearUserState(tgId);
+function clrSt(tgId) {
+  stMap.delete(tgId);
 }
 
-// ---- db helpers ----
 async function loadPoints() {
   const r = await pool.query(
-    `SELECT id, title FROM trade_points WHERE is_active=TRUE ORDER BY title NULLS LAST, id`
+    `SELECT id, title, is_active FROM trade_points ORDER BY title NULLS LAST, id`
   );
   return r.rows;
 }
 
-async function loadAccess(tradePointId) {
+async function loadAssigned(tradePointId) {
   const r = await pool.query(
     `
     SELECT
-      tpr.id,
-      tpr.user_id,
-      COALESCE(u.full_name,'Без имени') AS full_name,
+      tpr.id AS tpr_id,
+      u.id AS user_id,
+      u.full_name,
       u.username
     FROM trade_point_responsibles tpr
     JOIN users u ON u.id = tpr.user_id
-    WHERE tpr.trade_point_id=$1
-      AND tpr.event_type=$2
-      AND tpr.is_active=TRUE
+    WHERE tpr.trade_point_id = $1
+      AND tpr.event_type = 'cash_collection_access'
+      AND tpr.is_active = true
     ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
     `,
-    [tradePointId, EVENT_TYPE]
+    [Number(tradePointId)]
   );
   return r.rows;
 }
 
-async function loadUsersForPick() {
-  // намеренно без фильтров по роли/статусу
+async function loadUsers(limit = 60) {
   const r = await pool.query(
-    `
-    SELECT id, COALESCE(full_name,'Без имени') AS full_name, username
-    FROM users
-    ORDER BY full_name NULLS LAST, id
-    LIMIT 80
-    `
+    `SELECT id, full_name, username FROM users ORDER BY full_name NULLS LAST, id LIMIT $1`,
+    [Number(limit)]
   );
   return r.rows;
 }
 
-async function grantAccess(tradePointId, userId) {
-  // Без ON CONFLICT (на случай отсутствия уникального индекса)
-  const upd = await pool.query(
-    `
-    UPDATE trade_point_responsibles
-    SET is_active=TRUE
-    WHERE trade_point_id=$1 AND event_type=$2 AND user_id=$3
-    `,
-    [tradePointId, EVENT_TYPE, userId]
-  );
-  if (upd.rowCount > 0) return;
-
-  await pool.query(
-    `
-    INSERT INTO trade_point_responsibles (trade_point_id, event_type, user_id, is_active)
-    VALUES ($1,$2,$3,TRUE)
-    `,
-    [tradePointId, EVENT_TYPE, userId]
-  );
-}
-
-async function revokeAccessById(id) {
-  await pool.query(
-    `UPDATE trade_point_responsibles SET is_active=FALSE WHERE id=$1`,
-    [id]
-  );
-}
-
-// ---- ui ----
-async function showRoot(ctx) {
-  const text =
-    "💰 <b>Доступ к инкассации</b>\n\n" +
-    "Здесь назначаются сотрудники, которые могут быть выбраны как «кто инкассировал»\n" +
-    "для конкретной торговой точки.\n\n" +
-    "Выберите точку:";
-
+async function renderRoot(ctx) {
   const points = await loadPoints();
-  const rows = points.map((p) => [
-    Markup.button.callback(
-      p.title || `Точка #${p.id}`,
-      `admin_cash_access_point_${p.id}`
-    ),
-  ]);
+  const rows = [];
+
+  for (const tp of points) {
+    const status = tp.is_active === false ? "⚪️" : "🟢";
+    rows.push([
+      Markup.button.callback(
+        `${status} ${tp.title || `Точка #${tp.id}`}`.slice(0, 64),
+        `admin_cash_access_point_${tp.id}`
+      ),
+    ]);
+  }
+
   rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
 
   await deliver(
     ctx,
-    { text, extra: Markup.inlineKeyboard(rows) },
+    {
+      text: "💰 <b>Доступ к инкассации</b>\n\nВыберите торговую точку:",
+      extra: Markup.inlineKeyboard(rows),
+    },
     { edit: true }
   );
 }
 
-async function showPointCard(ctx, tradePointId) {
+async function renderPoint(ctx, tradePointId) {
   const tp = await pool.query(
-    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
-    [tradePointId]
+    `SELECT id, title FROM trade_points WHERE id=$1`,
+    [Number(tradePointId)]
   );
-  const title = tp.rows[0]?.title || `#${tradePointId}`;
+  const title = tp.rows[0]?.title || `Точка #${tradePointId}`;
 
-  const list = await loadAccess(tradePointId);
+  const assigned = await loadAssigned(tradePointId);
 
-  let text = "💰 <b>Доступ к инкассации</b>\n\n";
-  text += `📍 Точка: <b>${title}</b>\n\n`;
-
-  if (!list.length) {
+  let text = `💰 <b>Доступ к инкассации</b>\n\n🏬 <b>${title}</b>\n\n`;
+  if (!assigned.length) {
     text += "Пока никто не назначен.\n";
   } else {
     text += "Назначены:\n";
-    list.forEach((r, i) => {
-      const tag = r.username ? ` (@${r.username})` : "";
-      text += `${i + 1}. ${r.full_name}${tag}\n`;
+    assigned.forEach((u, i) => {
+      const label =
+        u.full_name || (u.username ? `@${u.username}` : `#${u.user_id}`);
+      text += `${i + 1}) ${label}\n`;
     });
   }
 
   const kb = [];
-
-  if (list.length) {
-    const btns = list.map((r, idx) =>
-      Markup.button.callback(
-        `${idx + 1}`,
-        `admin_cash_access_del_${r.id}_${tradePointId}`
-      )
-    );
-    for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
-    kb.push([{ text: "🗑 удалить (нажмите номер)", callback_data: "noop" }]);
-  }
-
   kb.push([
     Markup.button.callback(
-      "➕ Назначить доступ",
+      "➕ Добавить",
       `admin_cash_access_add_${tradePointId}`
     ),
   ]);
-  kb.push([Markup.button.callback("⬅️ Назад", "admin_cash_access_root")]);
+
+  if (assigned.length) {
+    // кнопки удаления (по одному в строке, чтобы не упереться в лимиты)
+    assigned.forEach((u, i) => {
+      kb.push([
+        Markup.button.callback(
+          `❌ Убрать: ${i + 1}`,
+          `admin_cash_access_del_${u.tpr_id}_${tradePointId}`
+        ),
+      ]);
+    });
+  }
+
+  kb.push([
+    Markup.button.callback("⬅️ К списку точек", "admin_cash_access_root"),
+  ]);
 
   await deliver(
     ctx,
@@ -168,20 +132,21 @@ async function showPointCard(ctx, tradePointId) {
   );
 }
 
-async function showPickUser(ctx, tradePointId) {
-  stSet(ctx.from.id, { step: "pick_user", tradePointId });
+async function renderPickUser(ctx, tradePointId) {
+  const users = await loadUsers(60);
 
-  const users = await loadUsersForPick();
-  const text =
-    "➕ <b>Доступ к инкассации</b>\n\n" +
-    "Выберите пользователя, которому дать доступ:";
-
-  const rows = users.map((u) => [
-    Markup.button.callback(
-      `${u.full_name}${u.username ? ` (@${u.username})` : ""}`,
-      `admin_cash_access_pick_${u.id}`
-    ),
-  ]);
+  const rows = [];
+  for (const u of users) {
+    const label = `${u.full_name || "—"}${
+      u.username ? ` (@${u.username})` : ""
+    }`;
+    rows.push([
+      Markup.button.callback(
+        label.slice(0, 64),
+        `admin_cash_access_pick_${tradePointId}_${u.id}`
+      ),
+    ]);
+  }
 
   rows.push([
     Markup.button.callback(
@@ -192,20 +157,25 @@ async function showPickUser(ctx, tradePointId) {
 
   await deliver(
     ctx,
-    { text, extra: Markup.inlineKeyboard(rows) },
+    {
+      text:
+        "➕ <b>Добавить доступ к инкассации</b>\n\n" +
+        "Выберите сотрудника (пока показываю первые 60):",
+      extra: Markup.inlineKeyboard(rows),
+    },
     { edit: true }
   );
 }
 
-// ---- registration ----
 function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
+  // вход с кнопки из responsibles:
   bot.action("admin_cash_access_root", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-      stClear(ctx.from.id);
-      await showRoot(ctx);
+      clrSt(ctx.from.id);
+      return renderRoot(ctx);
     } catch (e) {
       logError("admin_cash_access_root", e);
     }
@@ -216,8 +186,10 @@ function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-      stClear(ctx.from.id);
-      await showPointCard(ctx, Number(ctx.match[1]));
+
+      const tpId = Number(ctx.match[1]);
+      setSt(ctx.from.id, { step: "point", tradePointId: tpId });
+      return renderPoint(ctx, tpId);
     } catch (e) {
       logError("admin_cash_access_point", e);
     }
@@ -228,29 +200,35 @@ function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-      await showPickUser(ctx, Number(ctx.match[1]));
+
+      const tpId = Number(ctx.match[1]);
+      setSt(ctx.from.id, { step: "pick_user", tradePointId: tpId });
+      return renderPickUser(ctx, tpId);
     } catch (e) {
       logError("admin_cash_access_add", e);
     }
   });
 
-  bot.action(/^admin_cash_access_pick_(\d+)$/, async (ctx) => {
+  bot.action(/^admin_cash_access_pick_(\d+)_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const admin = await ensureUser(ctx);
       if (!isAdmin(admin)) return;
 
-      const st = stGet(ctx.from.id);
-      if (!st || st.step !== "pick_user") return;
+      const tpId = Number(ctx.match[1]);
+      const userId = Number(ctx.match[2]);
 
-      const pickedUserId = Number(ctx.match[1]);
-      const tpId = Number(st.tradePointId);
+      await pool.query(
+        `
+        INSERT INTO trade_point_responsibles (trade_point_id, event_type, user_id, created_by_user_id, is_active)
+        VALUES ($1, 'cash_collection_access', $2, $3, true)
+        ON CONFLICT (trade_point_id, event_type, user_id)
+        DO UPDATE SET is_active = true, created_by_user_id = EXCLUDED.created_by_user_id
+        `,
+        [tpId, userId, admin.id]
+      );
 
-      await grantAccess(tpId, pickedUserId);
-
-      stClear(ctx.from.id);
-      await ctx.answerCbQuery("✅ Назначено").catch(() => {});
-      await showPointCard(ctx, tpId);
+      return renderPoint(ctx, tpId);
     } catch (e) {
       logError("admin_cash_access_pick", e);
     }
@@ -262,19 +240,23 @@ function registerAdminCashCollectionAccess(bot, ensureUser, logError) {
       const admin = await ensureUser(ctx);
       if (!isAdmin(admin)) return;
 
-      const id = Number(ctx.match[1]);
+      const tprId = Number(ctx.match[1]);
       const tpId = Number(ctx.match[2]);
 
-      await revokeAccessById(id);
+      await pool.query(
+        `
+        UPDATE trade_point_responsibles
+        SET is_active = false, created_by_user_id = $2
+        WHERE id = $1
+        `,
+        [tprId, admin.id]
+      );
 
-      await ctx.answerCbQuery("🗑 Удалено").catch(() => {});
-      await showPointCard(ctx, tpId);
+      return renderPoint(ctx, tpId);
     } catch (e) {
       logError("admin_cash_access_del", e);
     }
   });
-
-  bot.action("noop", async (ctx) => ctx.answerCbQuery().catch(() => {}));
 }
 
 module.exports = { registerAdminCashCollectionAccess };

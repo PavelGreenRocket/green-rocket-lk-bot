@@ -30,6 +30,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
   registerAdminShiftClosingTasks(bot, ensureUser, logError);
   registerAdminResponsibles(bot, ensureUser, logError);
   registerAdminCashCollectionAccess(bot, ensureUser, logError);
+   registerAdminCashCollectionAccess(bot, ensureUser, logError);
 
 
   registerAiSettings(bot, ensureUser, logError);

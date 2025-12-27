@@ -634,6 +634,25 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
 // ------------- РЕГИСТРАЦИЯ ХЕНДЛЕРОВ -------------
 
 function registerCandidateInternship(bot, ensureUser, logError) {
+  // Ввод минут опоздания (для старта стажировки)
+  bot.on("text", async (ctx, next) => {
+    const st = startInternshipStates.get(ctx.from.id);
+    if (!st || st.step !== "late_minutes") return next();
+
+    const raw = (ctx.message?.text || "").trim();
+    const mins = Number(raw);
+
+    if (!Number.isFinite(mins) || mins < 0 || mins > 600) {
+      await ctx.reply("Введите число минут от 0 до 600 (например: 7).");
+      return;
+    }
+
+    st.lateMinutes = Math.floor(mins);
+    startInternshipStates.set(ctx.from.id, st);
+
+    await doStartInternship(ctx, true, st.lateMinutes);
+  });
+
   // Старт сценария: "✅ пригласить на стажировку"
   bot.action(/^lk_cand_invite_(\d+)$/, async (ctx) => {
     try {
@@ -1117,240 +1136,118 @@ function registerCandidateInternship(bot, ensureUser, logError) {
   });
 
   // 4) Опоздал
+  // 4) Опоздал -> спрашиваем, на сколько минут
   bot.action(/^lk_intern_start_late_yes_(\d+)$/, async (ctx) => {
     try {
-      await doStartInternship(ctx, true);
+      const candidateId = Number(ctx.match[1]);
+      const st = startInternshipStates.get(ctx.from.id);
+
+      if (!st || Number(st.candidateId) !== candidateId) {
+        await ctx.answerCbQuery("Сценарий старта не активен").catch(() => {});
+        await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
+          () => {}
+        );
+        return;
+      }
+
+      st.step = "late_minutes";
+      startInternshipStates.set(ctx.from.id, st);
+
+      await ctx.answerCbQuery().catch(() => {});
+      await ctx
+        .editMessageText(
+          "На сколько минут опоздал стажёр?\n\nВведите число (например: 7).",
+          {
+            parse_mode: "Markdown",
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback(
+                  "↩️ Назад",
+                  `lk_intern_start_late_back_${candidateId}`
+                ),
+              ],
+              [
+                Markup.button.callback(
+                  "❌ Отмена",
+                  `lk_intern_start_cancel_${candidateId}`
+                ),
+              ],
+            ]),
+          }
+        )
+        .catch(async () => {
+          await ctx.reply(
+            "На сколько минут опоздал стажёр?\n\nВведите число (например: 7).",
+            {
+              parse_mode: "Markdown",
+              ...Markup.inlineKeyboard([
+                [
+                  Markup.button.callback(
+                    "↩️ Назад",
+                    `lk_intern_start_late_back_${candidateId}`
+                  ),
+                ],
+                [
+                  Markup.button.callback(
+                    "❌ Отмена",
+                    `lk_intern_start_cancel_${candidateId}`
+                  ),
+                ],
+              ]),
+            }
+          );
+        });
     } catch (err) {
       logError("lk_intern_start_late_yes", err);
     }
   });
-
-  // ---------------- НАЧАТЬ СТАЖИРОВКУ ----------------
-
-  // 1) Нажатие "🚀 начать стажировку" на карточке кандидата
-  bot.action(/^lk_cand_start_intern_(\d+)$/, async (ctx) => {
+  // Назад со ввода минут опоздания
+  bot.action(/^lk_intern_start_late_back_(\d+)$/, async (ctx) => {
     try {
-      const admin = await ensureUser(ctx);
-      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
-        await ctx.answerCbQuery("Нет доступа").catch(() => {});
-        return;
-      }
-
       const candidateId = Number(ctx.match[1]);
-
-      // достаём кандидата + кто наставник + к какому user привязан стажёр + торговая точка
-      const cRes = await pool.query(
-        `
-        SELECT
-          c.id,
-          c.name,
-          c.internship_admin_id,
-          c.internship_point_id,
-          u.id AS intern_user_id,
-          u.telegram_id AS intern_telegram_id
-        FROM candidates c
-        LEFT JOIN users u ON u.candidate_id = c.id
-        WHERE c.id = $1
-        LIMIT 1
-        `,
-        [candidateId]
-      );
-
-      if (!cRes.rows.length) {
-        await ctx.answerCbQuery("Кандидат не найден").catch(() => {});
-        return;
-      }
-
-      const c = cRes.rows[0];
-
-      // кнопка доступна только наставнику
-      if (
-        !c.internship_admin_id ||
-        Number(c.internship_admin_id) !== Number(admin.id)
-      ) {
-        await ctx.answerCbQuery("Доступно только наставнику").catch(() => {});
-        return;
-      }
-
-      if (!c.intern_user_id || !c.intern_telegram_id) {
-        await ctx
-          .answerCbQuery("Стажёр не привязан к пользователю")
-          .catch(() => {});
-        return;
-      }
-
-      if (!c.internship_point_id) {
-        await ctx
-          .answerCbQuery("Не указана торговая точка стажировки")
-          .catch(() => {});
-        return;
-      }
-
-      // проверка: нет ли уже активной сессии по стажёру
-      const activeRes = await pool.query(
-        `
-        SELECT id
-        FROM internship_sessions
-        WHERE user_id = $1
-          AND finished_at IS NULL
-          AND is_canceled = FALSE
-        LIMIT 1
-        `,
-        [c.intern_user_id]
-      );
-
-      if (activeRes.rows.length) {
-        await ctx
-          .answerCbQuery("У стажёра уже идёт стажировка")
-          .catch(() => {});
-        return;
-      }
-
-      // сохраняем состояние "ожидаем ответ вовремя/опоздал"
-      startInternshipStates.set(ctx.from.id, {
-        candidateId,
-        internUserId: Number(c.intern_user_id),
-        tradePointId: Number(c.internship_point_id),
-      });
-
-      await ctx.answerCbQuery().catch(() => {});
-
-      const text = `🕒 <b>Начать стажировку</b>\n\n` + `Стажёр пришёл вовремя?`;
-
-      const keyboard = {
-        inline_keyboard: [
-          [
-            {
-              text: "✅ пришёл вовремя",
-              callback_data: "lk_intern_start_late_no",
-            },
-          ],
-          [{ text: "⚠️ опоздал", callback_data: "lk_intern_start_late_yes" }],
-          [{ text: "❌ отмена", callback_data: "lk_intern_start_cancel" }],
-        ],
-      };
-
-      await ctx.editMessageText(text, {
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      });
-    } catch (err) {
-      logError("lk_cand_start_intern", err);
-    }
-  });
-
-  // 2) Отмена старта (ничего не начинаем, возвращаемся на карточку)
-  bot.action(/^lk_intern_start_cancel$/, async (ctx) => {
-    try {
       const st = startInternshipStates.get(ctx.from.id);
-      await ctx.answerCbQuery().catch(() => {});
-      if (!st) return;
-
-      startInternshipStates.delete(ctx.from.id);
-
-      // вернёмся на карточку кандидата
-      await showCandidateCardLk(ctx, st.candidateId, { edit: true });
-    } catch (err) {
-      logError("lk_intern_start_cancel", err);
-    }
-  });
-
-  // 3) Пришёл вовремя / опоздал -> фактический старт
-  bot.action(/^lk_intern_start_late_(yes|no)$/, async (ctx) => {
-    try {
-      const admin = await ensureUser(ctx);
-      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
-        await ctx.answerCbQuery("Нет доступа").catch(() => {});
-        return;
-      }
-
-      const st = startInternshipStates.get(ctx.from.id);
-      if (!st) {
+      if (!st || Number(st.candidateId) !== candidateId) {
         await ctx.answerCbQuery("Сценарий старта не активен").catch(() => {});
-        return;
-      }
-
-      const wasLate = ctx.match[1] === "yes";
-      startInternshipStates.delete(ctx.from.id);
-
-      // пересчёт следующего дня
-      const uRes = await pool.query(
-        `SELECT id, full_name, staff_status, intern_days_completed, telegram_id
-         FROM users
-         WHERE id = $1`,
-        [st.internUserId]
-      );
-      if (!uRes.rows.length) {
-        await ctx
-          .answerCbQuery("Пользователь стажёра не найден")
-          .catch(() => {});
-        return;
-      }
-
-      const intern = uRes.rows[0];
-
-      // если он ещё не intern — делаем intern (иначе academy не даст стажировку)
-      if (intern.staff_status !== "intern") {
-        await pool.query(
-          `UPDATE users
-           SET staff_status = 'intern',
-               intern_days_completed = COALESCE(intern_days_completed, 0)
-           WHERE id = $1`,
-          [intern.id]
+        await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
+          () => {}
         );
+        return;
       }
 
-      const nextDay = (intern.intern_days_completed || 0) + 1;
+      st.step = "late_choice";
+      st.lateMinutes = null;
+      startInternshipStates.set(ctx.from.id, st);
 
-      // создаём сессию стажировки (как в academy bot startInternshipSession :contentReference[oaicite:3]{index=3})
-      const ins = await pool.query(
-        `
-        INSERT INTO internship_sessions (user_id, day_number, started_by, trade_point_id, was_late)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id
-        `,
-        [intern.id, nextDay, admin.id, st.tradePointId, wasLate]
-      );
-
-      const sessionId = ins.rows[0].id;
-
-      // 1) уведомление стажёру (ссылкой в academy bot)
-      if (intern.telegram_id) {
-        const academyBot =
-          process.env.ACADEMY_BOT_USERNAME || "baristaAcademy_GR_bot";
-        const url = `https://t.me/${academyBot}`;
-
-        const text =
-          `🌱 Стажировка началась!\n` +
-          `День ${nextDay}.\n\n` +
-          `Нажмите кнопку ниже, чтобы перейти к обучению.`;
-
-        const keyboard = {
-          inline_keyboard: [[{ text: "🚀 Перейти к обучению", url }]],
-        };
-
-        await ctx.telegram
-          .sendMessage(intern.telegram_id, text, {
-            reply_markup: keyboard,
-          })
-          .catch(() => {});
-      }
-
-      // 2) событие в outbox для academy bot (наставнику внутри academy bot)
-      await pushOutboxEvent("academy", "internship_started", {
-        intern_user_id: intern.id,
-        intern_name: intern.full_name || null,
-        mentor_telegram_id: ctx.from.id,
-        session_id: sessionId,
-        day_number: nextDay,
-      });
+      const text = "Стажёр пришёл вовремя?";
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ Пришёл вовремя",
+            `lk_intern_start_late_no_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⚠️ Опоздал",
+            `lk_intern_start_late_yes_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "❌ Отмена",
+            `lk_intern_start_cancel_${candidateId}`
+          ),
+        ],
+      ]);
 
       await ctx.answerCbQuery().catch(() => {});
-
-      // возвращаемся на карточку кандидата (она позже будет перерисована под "стажёр/день 1")
-      await showCandidateCardLk(ctx, st.candidateId, { edit: true });
+      await ctx
+        .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+        .catch(async () => {
+          await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+        });
     } catch (err) {
-      logError("lk_intern_start_late", err);
+      logError("lk_intern_start_late_back", err);
     }
   });
 }

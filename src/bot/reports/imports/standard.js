@@ -1,5 +1,10 @@
 // src/bot/reports/imports/standard.js
 const { Markup } = require("telegraf");
+const {
+  loadCashCollectorsPage,
+  isCashCollectorForPoint,
+  hasAnyCashCollectors,
+} = require("../../shifts/cashCollectors");
 
 function registerStandardImport(bot, deps) {
   const { pool, ensureUser, isAdmin, toast, deliver, getSt, setSt, logError } =
@@ -527,25 +532,41 @@ function registerStandardImport(bot, deps) {
 
     if (step === "cash_collection_by") {
       const page = st.ccByPage || 0;
-      const tpId = data.tradePointId;
+      const tpId = data?.tradePointId;
 
-      // safety: если точка не выбрана — не показываем список
       if (!tpId) {
-        const text = buildCard({
-          stepNo: 4,
-          stepTotal: totalSteps,
-          tpTitle,
-          dateStr,
-          data,
-          prompt: "Сначала выберите торговую точку.",
-        });
-        return deliver(ctx, { text, extra: baseKb([]) }, { edit: true });
+        return toast(ctx, "Сначала выберите торговую точку.");
       }
 
-      const { rows, hasMore } = await loadCashCollectorsPage(tpId, page);
+      const { rows, hasMore } = await loadCashCollectorsPage(
+        pool,
+        tpId,
+        page,
+        PAGE
+      );
+
+      // "Я" показываем только если:
+      // - вообще никто не назначен (fallback), или
+      // - текущий юзер назначен к точке
+      let showMe = false;
+      const me = await ensureUser(ctx);
+      if (me) {
+        if (!rows.length) {
+          // если на странице пусто, проверим вообще есть ли назначения
+          const any = await hasAnyCashCollectors(pool, tpId);
+          showMe = !any; // fallback только если реально никого нет
+          if (any) {
+            showMe = await isCashCollectorForPoint(pool, tpId, me.id);
+          }
+        } else {
+          showMe = await isCashCollectorForPoint(pool, tpId, me.id);
+        }
+      }
 
       const buttons = [
-        [Markup.button.callback("🙋 Я", "lk_reports_std_cc_by_me")],
+        ...(showMe
+          ? [[Markup.button.callback("👱‍♂️ Я", "lk_reports_std_cc_by_me")]]
+          : []),
         ...rows.map((u) => [
           Markup.button.callback(
             `${u.full_name || "—"}${u.username ? ` (@${u.username})` : ""}`,
@@ -832,6 +853,17 @@ function registerStandardImport(bot, deps) {
     if (!u) return;
     const st = getStd(ctx);
     if (!st) return;
+
+    const tpId = st.data?.tradePointId;
+    if (!tpId) return toast(ctx, "Сначала выберите торговую точку.");
+
+    // fallback разрешаем только если нет назначенных вообще
+    const any = await hasAnyCashCollectors(pool, tpId);
+    if (any) {
+      const ok = await isCashCollectorForPoint(pool, tpId, u.id);
+      if (!ok) return toast(ctx, "Нет доступа к инкассации на этой точке.");
+    }
+
     const data = st.data || {};
     data.cashCollectionByUserId = u.id;
     data.cashCollectionByLabel = "Я";
@@ -841,26 +873,28 @@ function registerStandardImport(bot, deps) {
 
   bot.action(/^lk_reports_std_cc_by_pick:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
-    const pickedId = Number(ctx.match[1]);
-
+    const pickId = Number(ctx.match[1]);
     const st = getStd(ctx);
     if (!st) return;
 
-    const data = st.data || {};
-    const tpId = data.tradePointId;
-    if (!tpId) return toast(ctx, "Сначала выберите точку.");
+    const tpId = st.data?.tradePointId;
+    if (!tpId) return toast(ctx, "Сначала выберите торговую точку.");
 
-    // защита от ручной подмены callback_data
-    const ok = await isCashCollectorAllowed(tpId, pickedId);
-    if (!ok) return toast(ctx, "Нет доступа к инкассации для этой точки.");
+    const ok = await isCashCollectorForPoint(pool, tpId, pickId);
+    if (!ok)
+      return toast(
+        ctx,
+        "Этот сотрудник не назначен на инкассацию для этой точки."
+      );
 
     const r = await pool.query(
       `SELECT id, full_name, username FROM users WHERE id=$1`,
-      [pickedId]
+      [pickId]
     );
     const row = r.rows[0];
     if (!row) return toast(ctx, "Не найдено.");
 
+    const data = st.data || {};
     data.cashCollectionByUserId = row.id;
     data.cashCollectionByLabel = row.username
       ? `@${row.username}`
