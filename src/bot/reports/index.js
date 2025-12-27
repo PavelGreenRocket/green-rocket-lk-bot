@@ -5,6 +5,7 @@ const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { toast, alert } = require("../../utils/toast");
 const { registerReportImports } = require("./imports");
+const { registerReportEdit } = require("./edit");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -1657,11 +1658,10 @@ async function showSettings(ctx, user, { edit = true } = {}) {
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_pick"),
     ]);
-      buttons.push([
-    Markup.button.callback("📥 Загрузка отчётов", "lk_reports_import_menu"),
-  ]);
+    buttons.push([
+      Markup.button.callback("📥 Загрузка отчётов", "lk_reports_import_menu"),
+    ]);
   }
-
 
   buttons.push([Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")]);
 
@@ -3598,6 +3598,7 @@ function registerReports(bot, ensureUser, logError) {
     setSt,
     getSt,
     logError,
+    showReportsList,
   });
 }
 
