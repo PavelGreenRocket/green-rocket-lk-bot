@@ -804,11 +804,17 @@ function registerReportEdit(bot, deps) {
     const user = await ensureUser(ctx);
     if (!user) return;
 
-    const st = getSt(ctx.from.id);
-    if (!st?.shiftId) return;
+    await saveShiftClosing(
+      st.shiftId,
+      {
+        was_cash_collection: false,
+        cash_collection_amount: null,
+        cash_collection_by_user_id: null,
+      },
+      user.id
+    );
 
-    await saveShiftClosing(st.shiftId, { was_cash_collection: true }, user.id);
-    return toast(ctx, "Ок. Теперь укажите сумму и кто.");
+    return toast(ctx, "Ок. Теперь укажи сумму и кто.");
   });
 
   bot.action("lk_reports_edit_cc_no", async (ctx) => {
@@ -890,7 +896,12 @@ function registerReportEdit(bot, deps) {
       if (!ok) return toast(ctx, "Нет доступа к инкассации на этой точке.");
     }
 
-    await saveShiftClosing(st.shiftId, { cash_collection_by_user_id: user.id });
+    await saveShiftClosing(
+      st.shiftId,
+      { cash_collection_by_user_id: user.id },
+      user.id
+    );
+
     return toast(ctx, "Ок. Установлено: Я");
   });
 
@@ -1111,7 +1122,8 @@ function registerReportEdit(bot, deps) {
           const n = Number(text.replace(/\s+/g, "").replace(",", "."));
           if (!Number.isFinite(n)) return toast(ctx, "Введите число.");
           const fixed = Math.round(n * 10) / 10;
-          await saveShiftClosing(shiftId, { sales_total: fixed });
+          await saveShiftClosing(shiftId, { sales_total: fixed }, user.id);
+
           return showMain(ctx, user);
         }
 
@@ -1129,12 +1141,13 @@ function registerReportEdit(bot, deps) {
             return toast(ctx, "Введите целое число.");
           if (field === "cash_collection_amount") {
             // если сумма задана — логично считать, что инкассация была
-            await saveShiftClosing(shiftId, {
-              cash_collection_amount: n,
-              was_cash_collection: true,
-            });
+            await saveShiftClosing(
+              shiftId,
+              { cash_collection_amount: n, was_cash_collection: true },
+              user.id
+            );
           } else {
-            await saveShiftClosing(shiftId, { [field]: n });
+            await saveShiftClosing(shiftId, { [field]: n }, user.id);
           }
           return showMain(ctx, user);
         }
