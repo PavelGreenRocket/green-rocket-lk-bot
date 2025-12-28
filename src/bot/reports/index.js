@@ -819,6 +819,11 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   const page = Number.isInteger(st.page) ? st.page : 0;
   const filters = { ...(st.filters || {}) }; // сотрудники видят все смены
 
+  // Тумблер "Мои смены" (только для обычных)
+  if (!admin && st.onlyMyShifts) {
+    filters.workerIds = [user.id];
+  }
+
   // Подключаем период
   if (st.periodFrom) filters.dateFrom = st.periodFrom;
   if (st.periodTo) filters.dateTo = st.periodTo;
@@ -1021,7 +1026,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
     summaryBlock = [
       `📊 ${periodFrom} — ${periodTo} (${daysInMonth} дн.)`,
-      missed > 0 ? `Пропущенных дней: ${missed}` : "",
+      missed > 0 ? `<b>Пропущенных дней:</b> ${missed}\n` : "",
       "",
       `<u><b>Финансы</b></u>`,
       `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
@@ -1046,57 +1051,59 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   const buttons = [];
 
-  // top controls
+  // ───────────────
+  // Нижняя клавиатура (единый стиль)
+  // ───────────────
+
+  // 1) Ряд пагинации: ещё назад / ещё вперёд
+  // (если нельзя — ставим noop, как в периоде)
+  const prevBtn =
+    page > 0
+      ? Markup.button.callback("⬅️ ещё", "lk_reports_less")
+      : Markup.button.callback(" ", "noop");
+
+  const nextBtn = hasMore
+    ? Markup.button.callback("➡️ ещё", "lk_reports_more")
+    : Markup.button.callback(" ", "noop");
+
+  buttons.push([prevBtn, nextBtn]);
+
   if (admin) {
-    if (!filterOpened) {
-      // у админа: период + настройки
-      buttons.push([
-        Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
-        Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
-      ]);
-    } else {
-      // если админ открыл фильтр (внутри периода), то тут просто показываем период (чтобы закрыть)
-      buttons.push([
-        Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
-      ]);
-    }
+    // 2) Ряд: период | настройки | формат
+    buttons.push([
+      Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
+      Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
+      Markup.button.callback("🎛 Формат", "lk_reports_format_open"),
+    ]);
+
+    // 3) Ряд: назад | фильтр | точки
+    buttons.push([
+      Markup.button.callback("⬅️ Назад", "lk_profile_shift"),
+      Markup.button.callback(
+        "🔍 Фильтр",
+        st.filterOpened ? "date_filter:close" : "date_filter:open"
+      ),
+      Markup.button.callback("📍Точки", "date_points:open"),
+    ]);
   } else {
-    // у обычного: изменить + период
+    // 2) Ряд: изменить | период
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_last"),
       Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
     ]);
-  }
 
-  // expanded filter menu
-  if (admin && st.filterOpened) {
-    // 3) По сотрудникам (оставляем)
+    // 3) Ряд: мои смены | точки
+    const onlyMy = Boolean(st.onlyMyShifts);
     buttons.push([
-      Markup.button.callback("👥 По сотрудникам", "lk_reports_filter_workers"),
+      Markup.button.callback(
+        onlyMy ? "👤Все смены" : "👤 Мои смены",
+        "lk_reports_only_my_toggle"
+      ),
+      Markup.button.callback("📍Точки", "date_points:open"),
     ]);
 
-    // 4) По дням недели | По элементам (оставляем)
-    buttons.push([
-      Markup.button.callback("📆 По дням недели", "lk_reports_filter_weekdays"),
-      Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
-    ]);
-
-    // 5) Сбросить фильтр
-    buttons.push([
-      Markup.button.callback("🧹 Сбросить фильтр", "lk_reports_filter_clear"),
-    ]);
-  }
-
-  if (hasMore) {
-    buttons.push([Markup.button.callback("➡️ ещё", "lk_reports_more")]);
-  }
-  if (admin) {
-    buttons.push([
-      Markup.button.callback("⬅️ К смене", "lk_profile_shift"),
-      Markup.button.callback("🎛 Формат", "lk_reports_format_open"),
-    ]);
-  } else {
-    buttons.push([Markup.button.callback("⬅️ К смене", "lk_profile_shift")]);
+    // 4) Ряд: назад
+    buttons.push([Markup.button.callback("⬅️ Назад", "lk_profile_shift")]);
   }
 
   const st2 = getSt(ctx.from.id) || {};
@@ -2912,6 +2919,44 @@ function registerReports(bot, ensureUser, logError) {
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_more", e);
+    }
+  });
+
+  bot.action("lk_reports_only_my_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      // Только для обычного пользователя
+      if (isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const next = !Boolean(st.onlyMyShifts);
+      setSt(ctx.from.id, { onlyMyShifts: next, page: 0 });
+
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_only_my_toggle", e);
+    }
+  });
+
+  bot.action("lk_reports_less", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const prevPage = Math.max(
+        0,
+        (Number.isInteger(st.page) ? st.page : 0) - 1
+      );
+      setSt(ctx.from.id, { page: prevPage });
+
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_less", e);
     }
   });
 
