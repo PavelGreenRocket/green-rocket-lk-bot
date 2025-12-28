@@ -362,55 +362,55 @@ async function showEditMenu(ctx, user) {
 
   // общие (и для user, и для admin)
   rows.push([
-    Markup.button.callback("Сумма продаж", "lk_reports_edit_field_sales_total"),
+    Markup.button.callback("Сумма продаж", "lk2_reports_edit_field_sales_total"),
   ]);
   rows.push([
     Markup.button.callback(
       "Наличные продажи",
-      "lk_reports_edit_field_sales_cash"
+      "lk2_reports_edit_field_sales_cash"
     ),
   ]);
   rows.push([
     Markup.button.callback(
       "Наличные в кассе",
-      "lk_reports_edit_field_cash_in_drawer"
+      "lk2_reports_edit_field_cash_in_drawer"
     ),
   ]);
   rows.push([
-    Markup.button.callback("Чеков", "lk_reports_edit_field_checks_count"),
+    Markup.button.callback("Чеков", "lk2_reports_edit_field_checks_count"),
   ]);
 
   rows.push([
     Markup.button.callback(
       "Инкассация: Да/Нет",
-      "lk_reports_edit_field_cc_flag"
+      "lk2_reports_edit_field_cc_flag"
     ),
   ]);
   rows.push([
     Markup.button.callback(
       "Инкассация: сумма",
-      "lk_reports_edit_field_cc_amount"
+      "lk2_reports_edit_field_cc_amount"
     ),
   ]);
   rows.push([
-    Markup.button.callback("Инкассация: кто", "lk_reports_edit_field_cc_by"),
+    Markup.button.callback("Инкассация: кто", "lk2_reports_edit_field_cc_by"),
   ]);
 
   if (!limited) {
     // admin-only
-    rows.push([Markup.button.callback("Дата", "lk_reports_edit_field_date")]);
-    rows.push([Markup.button.callback("Точка", "lk_reports_edit_field_point")]);
+    rows.push([Markup.button.callback("Дата", "lk2_reports_edit_field_date")]);
+    rows.push([Markup.button.callback("Точка", "lk2_reports_edit_field_point")]);
     rows.push([
-      Markup.button.callback("Время начала", "lk_reports_edit_field_time_from"),
+      Markup.button.callback("Время начала", "lk2_reports_edit_field_time_from"),
     ]);
     rows.push([
       Markup.button.callback(
         "Время окончания",
-        "lk_reports_edit_field_time_to"
+        "lk2_reports_edit_field_time_to"
       ),
     ]);
     rows.push([
-      Markup.button.callback("Сотрудник", "lk_reports_edit_field_worker"),
+      Markup.button.callback("Сотрудник", "lk2_reports_edit_field_worker"),
     ]);
   }
 
@@ -662,7 +662,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // entry
-  bot.action("lk_reports_edit_last", async (ctx) => {
+  bot.action("lk2_reports_edit_last", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
@@ -703,20 +703,20 @@ function registerReportEdit(bot, deps) {
     }
   });
 
-  bot.action("lk_reports_edit_cancel", async (ctx) => {
+  bot.action("lk2_reports_edit_cancel", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     clrSt(ctx.from.id);
     return toast(ctx, "Отменено.");
   });
 
-  bot.action("lk_reports_edit_back", async (ctx) => {
+  bot.action("lk2_reports_edit_back", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
     return showMain(ctx, user);
   });
 
-  bot.action("lk_reports_edit_menu", async (ctx) => {
+  bot.action("lk2_reports_edit_menu", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
@@ -728,7 +728,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // field buttons
-  bot.action("lk_reports_edit_field_sales_total", async (ctx) => {
+  bot.action("lk2_reports_edit_field_sales_total", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -739,7 +739,7 @@ function registerReportEdit(bot, deps) {
       "Введите сумму продаж (можно 1 знак после запятой):"
     );
   });
-  bot.action("lk_reports_edit_field_sales_cash", async (ctx) => {
+  bot.action("lk2_reports_edit_field_sales_cash", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -750,7 +750,7 @@ function registerReportEdit(bot, deps) {
       "Введите сумму наличных продаж (целое число):"
     );
   });
-  bot.action("lk_reports_edit_field_cash_in_drawer", async (ctx) => {
+  bot.action("lk2_reports_edit_field_cash_in_drawer", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -761,7 +761,7 @@ function registerReportEdit(bot, deps) {
       "Введите наличные в кассе (целое число):"
     );
   });
-  bot.action("lk_reports_edit_field_checks_count", async (ctx) => {
+  bot.action("lk2_reports_edit_field_checks_count", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -774,7 +774,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // cash collection yes/no
-  bot.action("lk_reports_edit_field_cc_flag", async (ctx) => {
+  bot.action("lk2_reports_edit_field_cc_flag", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("✅ Да", "lk_reports_edit_cc_yes")],
@@ -791,7 +791,7 @@ function registerReportEdit(bot, deps) {
     );
   });
 
-  bot.action("lk_reports_edit_cc_yes", async (ctx) => {
+  bot.action("lk2_reports_edit_cc_yes", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st?.shiftId) return;
@@ -799,7 +799,7 @@ function registerReportEdit(bot, deps) {
     return toast(ctx, "Ок. Теперь укажи сумму и кто.");
   });
 
-  bot.action("lk_reports_edit_cc_no", async (ctx) => {
+  bot.action("lk2_reports_edit_cc_no", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st?.shiftId) return;
@@ -811,7 +811,7 @@ function registerReportEdit(bot, deps) {
     return toast(ctx, "Ок. Инкассация сброшена.");
   });
 
-  bot.action("lk_reports_edit_field_cc_amount", async (ctx) => {
+  bot.action("lk2_reports_edit_field_cc_amount", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -823,7 +823,7 @@ function registerReportEdit(bot, deps) {
     );
   });
 
-  bot.action("lk_reports_edit_field_cc_by", async (ctx) => {
+  bot.action("lk2_reports_edit_field_cc_by", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -832,7 +832,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // cash collector paging/pick
-  bot.action("lk_reports_edit_cc_by_prev", async (ctx) => {
+  bot.action("lk2_reports_edit_cc_by_prev", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
@@ -841,7 +841,7 @@ function registerReportEdit(bot, deps) {
     if (!user) return;
     return showPickCashCollector(ctx, user);
   });
-  bot.action("lk_reports_edit_cc_by_next", async (ctx) => {
+  bot.action("lk2_reports_edit_cc_by_next", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
@@ -851,7 +851,7 @@ function registerReportEdit(bot, deps) {
     return showPickCashCollector(ctx, user);
   });
 
-  bot.action("lk_reports_edit_cc_by_me", async (ctx) => {
+  bot.action("lk2_reports_edit_cc_by_me", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
@@ -903,7 +903,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // admin-only fields: date/point/time/worker
-  bot.action("lk_reports_edit_field_date", async (ctx) => {
+  bot.action("lk2_reports_edit_field_date", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user || !isAdmin(user)) return;
@@ -915,7 +915,7 @@ function registerReportEdit(bot, deps) {
     );
   });
 
-  bot.action("lk_reports_edit_field_point", async (ctx) => {
+  bot.action("lk2_reports_edit_field_point", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user || !isAdmin(user)) return;
@@ -924,14 +924,14 @@ function registerReportEdit(bot, deps) {
     return showPickPoint(ctx);
   });
 
-  bot.action("lk_reports_edit_point_prev", async (ctx) => {
+  bot.action("lk2_reports_edit_point_prev", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
     setSt(ctx.from.id, { pointPage: Math.max(0, (st.pointPage || 0) - 1) });
     return showPickPoint(ctx);
   });
-  bot.action("lk_reports_edit_point_next", async (ctx) => {
+  bot.action("lk2_reports_edit_point_next", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
@@ -951,7 +951,7 @@ function registerReportEdit(bot, deps) {
     return toast(ctx, "Ок. Точка изменена.");
   });
 
-  bot.action("lk_reports_edit_field_time_from", async (ctx) => {
+  bot.action("lk2_reports_edit_field_time_from", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user || !isAdmin(user)) return;
@@ -962,7 +962,7 @@ function registerReportEdit(bot, deps) {
       "Введите время начала (HH:mm):"
     );
   });
-  bot.action("lk_reports_edit_field_time_to", async (ctx) => {
+  bot.action("lk2_reports_edit_field_time_to", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user || !isAdmin(user)) return;
@@ -974,7 +974,7 @@ function registerReportEdit(bot, deps) {
     );
   });
 
-  bot.action("lk_reports_edit_field_worker", async (ctx) => {
+  bot.action("lk2_reports_edit_field_worker", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user || !isAdmin(user)) return;
@@ -986,14 +986,14 @@ function registerReportEdit(bot, deps) {
     return showPickWorker(ctx);
   });
 
-  bot.action("lk_reports_edit_worker_prev", async (ctx) => {
+  bot.action("lk2_reports_edit_worker_prev", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
     setSt(ctx.from.id, { workerPage: Math.max(0, (st.workerPage || 0) - 1) });
     return showPickWorker(ctx);
   });
-  bot.action("lk_reports_edit_worker_next", async (ctx) => {
+  bot.action("lk2_reports_edit_worker_next", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st) return;
@@ -1014,7 +1014,7 @@ function registerReportEdit(bot, deps) {
   });
 
   // Done: save & go back to reports list
-  bot.action("lk_reports_edit_done", async (ctx) => {
+  bot.action("lk2_reports_edit_done", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);

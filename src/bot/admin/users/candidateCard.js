@@ -174,7 +174,10 @@ function escHtml(s) {
 async function showCandidateCardLk(ctx, candidateId, options = {}) {
   const { edit = true } = options;
   const isRestoreMode = options.restoreMode === true;
-  const isEditMode = !!options.keyboardOverride && !isRestoreMode;
+
+  // Режим изменения включаем только когда явно просим (например, "Настройки"),
+  // а не когда просто временно меняем клавиатуру (например, меню "карточки").
+  const isEditMode = options.editMode === true && !isRestoreMode;
 
   const res = await pool.query(
     `
@@ -229,6 +232,10 @@ FROM candidates c
   }
 
   const cand = res.rows[0];
+
+  // Когда открываем карточку кандидата через переключатель со стажёра/сотрудника,
+  // хотим показывать текст как на этапе "приглашён на стажировку" (скрин 3).
+  const displayStatus = options.forceCandidateStatus || cand.status;
 
   // --- стажировка: активная сессия / кол-во завершённых ---
   let activeInternshipSession = null;
@@ -285,7 +292,7 @@ FROM candidates c
   // 🔻 Заголовок в обычном режиме (как раньше, с деталями)
   const normalHeader = isTraineeMode
     ? traineeHeader
-    : getCandidateHeader(cand.status);
+    : getCandidateHeader(displayStatus);
 
   // 🔻 Заголовок в режиме изменения (только роль: кандидат/стажёр)
   const editHeaderBase = isTraineeMode ? "🔻 СТАЖЁР" : "🔻 КАНДИДАТ";
@@ -341,7 +348,7 @@ FROM candidates c
 
   // 📅 О собеседовании / Итоги собеседования
   if (!isTraineeMode) {
-    if (cand.status === "interviewed" || cand.status === "internship_invited") {
+    if (displayStatus === "internship_invited" || displayStatus === "intern") {
       text += "🔹 *Итоги собеседования*\n";
     } else {
       text += "🔹 *О собеседовании*\n";
@@ -363,7 +370,10 @@ FROM candidates c
 
   if (!isTraineeMode) {
     // 🔹 Замечания — только если собес уже прошёл / стажировка
-    if (cand.status === "interviewed" || cand.status === "internship_invited") {
+    if (
+      displayStatus === "interviewed" ||
+      displayStatus === "internship_invited"
+    ) {
       text += "🔹 *Замечания по собеседованию*\n";
 
       if (cand.was_on_time === true) {
@@ -387,7 +397,7 @@ FROM candidates c
   }
 
   // 🔹 О стажировке — когда приглашён или уже стажёр
-  if (cand.status === "internship_invited" || cand.status === "intern") {
+  if (displayStatus === "internship_invited" || displayStatus === "intern") {
     text += "🔹 *О стажировке*\n";
 
     if (cand.internship_date) {
@@ -420,118 +430,45 @@ FROM candidates c
 
   // Кнопки
   const rows = [];
+  // Если мы открыли кандидатскую карточку через меню карточек,
+  // и меню сейчас раскрыто — показываем именно меню (2 строки).
+  const cardsExpanded = isTraineeCardsExpanded(ctx.from.id);
+  const viewMode = options.cardsViewMode || "trainee";
 
-  if (cand.status === "invited") {
-    // Ещё не было собеса
+  const isCardsSwitcherView =
+    cardsExpanded &&
+    (options.forceMode === "candidate" || options.forceMode === "trainee");
+
+  if (isCardsSwitcherView) {
+    const candBtnText = viewMode === "candidate" ? "✅ Кандидат" : "Кандидат";
+    const trBtnText = viewMode === "trainee" ? "✅ Стажёр" : "Стажёр";
+
     rows.push([
       Markup.button.callback(
-        "✅ Собеседование пройдено",
-        `lk_cand_passed_${cand.id}`
+        "▾карточки (скрыть)",
+        `lk_internship_toggle_cards_${cand.id}`
       ),
     ]);
+
     rows.push([
       Markup.button.callback(
-        "❌ отказать кандидату",
-        `lk_cand_decline_reason_${cand.id}`
+        candBtnText,
+        `lk_cards_switch_candidate_${cand.id}`
       ),
+      Markup.button.callback(trBtnText, `lk_cards_switch_trainee_${cand.id}`),
+      Markup.button.callback("Сотрудник", `lk_cards_switch_worker_${cand.id}`),
     ]);
-  } else if (cand.status === "interviewed") {
-    // Собеседование проведено, можно пригласить на стажировку или отказать
-    rows.push([
-      Markup.button.callback(
-        "✅ пригласить на стажировку",
-        `lk_cand_invite_${cand.id}`
-      ),
-    ]);
-    rows.push([
-      Markup.button.callback(
-        "❌ отказать кандидату",
-        `lk_cand_decline_reason_${cand.id}`
-      ),
-    ]);
-  } else if (cand.status === "internship_invited" || cand.status === "intern") {
-    // приглашён / стажировка в процессе
-    if (isTraineeMode) {
-      const mentorTgId = cand.internship_admin_tg_id || null;
-      const isMentor = mentorTgId && ctx.from.id === mentorTgId;
 
-      // 1) Перейти к обучению / идёт обучение
-      if (activeInternshipSession) {
-        if (isMentor) {
-          rows.push([
-            Markup.button.url(
-              "⏺️ Перейти к обучению",
-              "https://t.me/baristaAcademy_GR_bot"
-            ),
-          ]);
-        } else {
-          rows.push([
-            Markup.button.callback(
-              "⏺️ идёт обучение",
-              `lk_internship_training_locked_${cand.id}`
-            ),
-          ]);
-        }
-        if (activeShift) {
-          rows.push([
-            Markup.button.callback(
-              "📝 задачи смены",
-              `lk_intern_shift_tasks_${cand.id}`
-            ),
-          ]);
-        }
-      } else {
-        // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
-        if (isMentor) {
-          rows.push([
-            Markup.button.callback(
-              "▶️ начать стажировку",
-              `lk_cand_start_intern_${cand.id}`
-            ),
-          ]);
-        }
-        // для остальных — ничего
-      }
-
-      // 2) 📊 успеваемость (заглушка) — как у сотрудника
+    // IMPORTANT: дальше НЕ добавляем остальные кнопки (начать/отказать/настройки),
+    // но "Настройки" и "К кандидатам" ты хочешь видеть при скрытии, не здесь.
+    // Поэтому просто пропускаем основной блок кнопок:
+  } else {
+    if (cand.status === "invited") {
+      // Ещё не было собеса
       rows.push([
         Markup.button.callback(
-          "📊 успеваемость",
-          `lk_intern_progress_stub_${cand.id}`
-        ),
-      ]);
-
-      // 3) 🌱 данные стажировок
-      rows.push([
-        Markup.button.callback(
-          "🌱 данные стажировок",
-          `lk_internship_data_${cand.id}`
-        ),
-      ]);
-
-      // 4) 📋 открыть другую карточку (переключатель)
-      rows.push([
-        Markup.button.callback(
-          "📋 открыть другую карточку",
-          `lk_internship_open_cards_${cand.id}`
-        ),
-      ]);
-
-      // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
-      if (!activeInternshipSession) {
-        rows.push([
-          Markup.button.callback(
-            "❌ отказать стажёру",
-            `lk_internship_decline_stub_${cand.id}`
-          ),
-        ]);
-      }
-    } else {
-      // старый режим: просто приглашён, ещё не начинали
-      rows.push([
-        Markup.button.callback(
-          "▶️ начать стажировку",
-          `lk_cand_start_intern_${cand.id}`
+          "✅ Собеседование пройдено",
+          `lk_cand_passed_${cand.id}`
         ),
       ]);
       rows.push([
@@ -540,33 +477,191 @@ FROM candidates c
           `lk_cand_decline_reason_${cand.id}`
         ),
       ]);
-    }
-  } else if (cand.status === "rejected") {
-    // Кандидат отклонён
-    rows.push([
-      Markup.button.callback(
-        "♻️ восстановить кандидата",
-        `lk_cand_restore_${cand.id}`
-      ),
-    ]);
+    } else if (cand.status === "interviewed") {
+      // Собеседование проведено, можно пригласить на стажировку или отказать
+      rows.push([
+        Markup.button.callback(
+          "✅ пригласить на стажировку",
+          `lk_cand_invite_${cand.id}`
+        ),
+      ]);
+      rows.push([
+        Markup.button.callback(
+          "❌ отказать кандидату",
+          `lk_cand_decline_reason_${cand.id}`
+        ),
+      ]);
+    } else if (
+      displayStatus === "internship_invited" ||
+      displayStatus === "intern"
+    ) {
+      // приглашён / стажировка в процессе
+      if (isTraineeMode) {
+        const mentorTgId = cand.internship_admin_tg_id || null;
+        const isMentor = mentorTgId && ctx.from.id === mentorTgId;
 
-    if (cand.is_deferred) {
+        // 1) Перейти к обучению / идёт обучение
+        if (activeInternshipSession) {
+          if (isMentor) {
+            rows.push([
+              Markup.button.url(
+                "⏺️ Перейти к обучению",
+                "https://t.me/baristaAcademy_GR_bot"
+              ),
+            ]);
+          } else {
+            rows.push([
+              Markup.button.callback(
+                "⏺️ идёт обучение",
+                `lk_internship_training_locked_${cand.id}`
+              ),
+            ]);
+          }
+          if (activeShift) {
+            rows.push([
+              Markup.button.callback(
+                "📝 задачи смены",
+                `lk_intern_shift_tasks_${cand.id}`
+              ),
+            ]);
+          }
+        } else {
+          // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
+          if (isMentor) {
+            rows.push([
+              Markup.button.callback(
+                "▶️ начать стажировку",
+                `lk_cand_start_intern_${cand.id}`
+              ),
+            ]);
+          }
+          // для остальных — ничего
+        }
+
+        // 2) 📊 успеваемость (заглушка) — как у сотрудника
+        rows.push([
+          Markup.button.callback(
+            "📊 успеваемость",
+            `lk_intern_progress_stub_${cand.id}`
+          ),
+        ]);
+
+        // 3) 🌱 данные стажировок
+        rows.push([
+          Markup.button.callback(
+            "🌱 данные стажировок",
+            `lk_internship_data_${cand.id}`
+          ),
+        ]);
+
+        const cardsExpanded = isTraineeCardsExpanded(ctx.from.id);
+        const viewMode = options.cardsViewMode || "trainee";
+
+        if (cardsExpanded) {
+          const b1 = Markup.button.callback(
+            "▾карточки (скрыть)",
+            `lk_internship_toggle_cards_${cand.id}`
+          );
+
+          const candBtnText =
+            viewMode === "candidate" ? "✅ Кандидат" : "Кандидат";
+          const trBtnText = viewMode === "trainee" ? "✅ Стажёр" : "Стажёр";
+
+          rows.length = 0; // показываем только меню
+          rows.push([b1]);
+          rows.push([
+            Markup.button.callback(
+              candBtnText,
+              `lk_cards_switch_candidate_${cand.id}`
+            ),
+
+            Markup.button.callback(
+              trBtnText,
+              `lk_cards_switch_trainee_${cand.id}`
+            ),
+            Markup.button.callback(
+              "Сотрудник",
+              `lk_cards_switch_worker_${cand.id}`
+            ),
+          ]);
+        } else {
+          // меню скрыто — обычные кнопки стажёра
+
+          // 4) 📋 открыть другую карточку (переключатель)
+          rows.push([
+            Markup.button.callback(
+              "📋 открыть другую карточку",
+              `lk_internship_open_cards_${cand.id}`
+            ),
+          ]);
+
+          // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
+          if (!activeInternshipSession) {
+            rows.push([
+              Markup.button.callback(
+                "❌ отказать стажёру",
+                `lk_internship_decline_stub_${cand.id}`
+              ),
+            ]);
+          }
+        }
+      } else {
+        // Если это кандидатская карточка, открытая через "открыть другую карточку" (этап пройден),
+        // то не показываем "начать стажировку/отказать" — оставляем только переходы.
+        const isPassedCandidateView =
+          options.forceMode === "candidate" &&
+          options.headerOverride === "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)";
+
+        if (isPassedCandidateView) {
+          // вместо кандидата-экшнов — только "открыть другую карточку"
+          rows.push([
+            Markup.button.callback(
+              "📋 открыть другую карточку",
+              `lk_internship_open_cards_${cand.id}`
+            ),
+          ]);
+        } else {
+          // старый режим: просто приглашён, ещё не начинали
+          rows.push([
+            Markup.button.callback(
+              "▶️ начать стажировку",
+              `lk_cand_start_intern_${cand.id}`
+            ),
+          ]);
+          rows.push([
+            Markup.button.callback(
+              "❌ отказать кандидату",
+              `lk_cand_decline_reason_${cand.id}`
+            ),
+          ]);
+        }
+      }
+    } else if (cand.status === "rejected") {
+      // Кандидат отклонён
       rows.push([
         Markup.button.callback(
-          "↩️🗑️ убрать из отложенных",
-          `lk_cand_unpostpone_${cand.id}`
+          "♻️ восстановить кандидата",
+          `lk_cand_restore_${cand.id}`
         ),
       ]);
-    } else {
-      rows.push([
-        Markup.button.callback(
-          "🗑️ перенести в отложенные",
-          `lk_cand_postpone_${cand.id}`
-        ),
-      ]);
+
+      if (cand.is_deferred) {
+        rows.push([
+          Markup.button.callback(
+            "↩️🗑️ убрать из отложенных",
+            `lk_cand_unpostpone_${cand.id}`
+          ),
+        ]);
+      } else {
+        rows.push([
+          Markup.button.callback(
+            "🗑️ перенести в отложенные",
+            `lk_cand_postpone_${cand.id}`
+          ),
+        ]);
+      }
     }
   }
-
   // Общие кнопки
   rows.push([
     Markup.button.callback("⚙️ Настройки", `lk_cand_settings_${cand.id}`),
@@ -641,93 +736,74 @@ FROM candidates c
 function registerCandidateCard(bot, ensureUser, logError, deliver) {
   deliverFn = deliver;
 
-  // 📋 открыть другую карточку — меню переключения (кнопки меняются, текст карточки остаётся)
+  // 📋 открыть другую карточку -> раскрываем меню карточек (используем общий toggle)
   bot.action(/^lk_internship_open_cards_(\d+)$/, async (ctx) => {
     try {
       const candId = Number(ctx.match[1]);
+      traineeCardsExpandedByTgId.set(ctx.from.id, true);
       await ctx.answerCbQuery().catch(() => {});
-
-      const kb = Markup.inlineKeyboard([
-        [Markup.button.callback("▾карточки:", "lk_noop")],
-        [
-          Markup.button.callback(
-            "Кандидат",
-            `lk_cards_switch_candidate_${candId}`
-          ),
-          Markup.button.callback("Стажёр", `lk_cards_switch_trainee_${candId}`),
-          Markup.button.callback(
-            "Сотрудник",
-            `lk_cards_switch_worker_${candId}`
-          ),
-        ],
-        [
-          Markup.button.callback(
-            "⬅️ Назад",
-            `lk_internship_open_cards_back_${candId}`
-          ),
-        ],
-      ]);
-
-      await showCandidateCardLk(ctx, candId, {
-        edit: true,
-        keyboardOverride: kb,
-      });
+      await showCandidateCardLk(ctx, candId, { edit: true });
     } catch (err) {
       logError("lk_internship_open_cards", err);
     }
   });
 
-  bot.action(/^lk_internship_open_cards_back_(\d+)$/, async (ctx) => {
+  // ▾карточки (скрыть) -> сворачиваем меню карточек
+  bot.action(/^lk_internship_toggle_cards_(\d+)$/, async (ctx) => {
     try {
-      const candId = Number(ctx.match[1]);
+      const candidateId = Number(ctx.match[1]);
+      toggleTraineeCardsExpanded(ctx.from.id);
       await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candId, { edit: true });
+      await showCandidateCardLk(ctx, candidateId, { edit: true });
     } catch (err) {
-      logError("lk_internship_open_cards_back", err);
+      logError("lk_internship_toggle_cards", err);
     }
   });
 
-  // переключатель → кандидат
-  bot.action(/^lk_cards_switch_candidate_(\d+)$/, async (ctx) => {
-    try {
-      const candId = Number(ctx.match[1]);
-      await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candId, {
-        edit: true,
-        forceMode: "candidate",
-        headerOverride: "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)",
-      });
-    } catch (err) {
-      logError("lk_cards_switch_candidate", err);
-    }
-  });
+  // выбрать Кандидат/Стажёр/Сотрудник в меню карточек
+  bot.action(
+    /^lk_cards_switch_(candidate|trainee|worker)_(\d+)$/,
+    async (ctx) => {
+      try {
+        const mode = ctx.match[1];
+        const candId = Number(ctx.match[2]);
+        await ctx.answerCbQuery().catch(() => {});
 
-  // переключатель → стажёр (возвращаемся в обычную стажёрскую карточку)
-  bot.action(/^lk_cards_switch_trainee_(\d+)$/, async (ctx) => {
-    try {
-      const candId = Number(ctx.match[1]);
-      await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candId, {
-        edit: true,
-        forceMode: "trainee",
-      });
-    } catch (err) {
-      logError("lk_cards_switch_trainee", err);
-    }
-  });
+        if (mode === "worker") {
+          await ctx
+            .answerCbQuery("Пользователь ещё на этапе стажировки", {
+              show_alert: false,
+            })
+            .catch(() => {});
+          return;
+        }
 
-  // переключатель → сотрудник (если ещё стажировка — тост)
-  bot.action(/^lk_cards_switch_worker_(\d+)$/, async (ctx) => {
-    try {
-      await ctx
-        .answerCbQuery("Пользователь ещё на этапе стажировки", {
-          show_alert: false,
-        })
-        .catch(() => {});
-    } catch (err) {
-      logError("lk_cards_switch_worker", err);
+        // остаёмся в режиме меню карточек (не скрываем)
+        traineeCardsExpandedByTgId.set(ctx.from.id, true);
+
+        if (mode === "candidate") {
+          await showCandidateCardLk(ctx, candId, {
+            edit: true,
+            forceMode: "candidate",
+            headerOverride: "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)",
+            // чтобы текст был как "приглашён на стажировку" (скрин 3)
+            forceCandidateStatus: "internship_invited",
+            cardsViewMode: "candidate",
+          });
+          return;
+        }
+
+        // mode === "trainee"
+        await showCandidateCardLk(ctx, candId, {
+          edit: true,
+          forceMode: "trainee",
+          cardsViewMode: "trainee",
+        });
+      } catch (err) {
+        logError("lk_cards_switch", err);
+      }
     }
-  });
+  );
 
   bot.action(/^lk_intern_progress_stub_(\d+)$/, async (ctx) => {
     try {
@@ -829,6 +905,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       await showCandidateCardLk(ctx, candidateId, {
         edit: true,
         keyboardOverride: kb,
+        editMode: true,
       });
     } catch (err) {
       logError("lk_cand_settings_menu", err);
@@ -1103,29 +1180,6 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       parse_mode: "HTML",
       ...Markup.inlineKeyboard(rows),
     });
-  });
-
-  // toggle "📋 Открыть карточку"
-  bot.action(/^lk_internship_toggle_cards_(\d+)$/, async (ctx) => {
-    try {
-      const candidateId = Number(ctx.match[1]);
-      toggleTraineeCardsExpanded(ctx.from.id);
-      await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candidateId, { edit: true });
-    } catch (err) {
-      logError("lk_internship_toggle_cards", err);
-    }
-  });
-
-  // заглушки карточек
-  bot.action(/^lk_internship_card_candidate_stub_(\d+)$/, async (ctx) => {
-    await ctx.answerCbQuery("Карточка кандидата — позже.").catch(() => {});
-  });
-  bot.action(/^lk_internship_card_trainee_stub_(\d+)$/, async (ctx) => {
-    await ctx.answerCbQuery("Карточка стажёра — позже.").catch(() => {});
-  });
-  bot.action(/^lk_internship_card_worker_stub_(\d+)$/, async (ctx) => {
-    await ctx.answerCbQuery("Карточка сотрудника — позже.").catch(() => {});
   });
 
   bot.action(/^lk_internship_decline_stub_(\d+)$/, async (ctx) => {
