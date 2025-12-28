@@ -257,10 +257,15 @@ FROM candidates c
   // режим "СТАЖЁР":
   // - для status='intern' всегда считаем стажёром
   // - для status='internship_invited' — стажёрский режим включаем только если уже есть сессии
-  const isTraineeMode =
+  let isTraineeMode =
     cand.status === "intern" ||
     (cand.status === "internship_invited" &&
       (activeInternshipSession !== null || finishedInternshipCount > 0));
+
+  // ✅ форсируем режим карточки, когда открываем через переключатель "📋 открыть другую карточку"
+  // options.forceMode: 'candidate' | 'trainee'
+  if (options.forceMode === "candidate") isTraineeMode = false;
+  if (options.forceMode === "trainee") isTraineeMode = true;
 
   // ✅ активная смена стажёра (нужна, чтобы показывать кнопку "📝 задачи смены")
   // раньше переменная activeShift использовалась ниже, но не была определена → падало.
@@ -285,11 +290,14 @@ FROM candidates c
   // 🔻 Заголовок в режиме изменения (только роль: кандидат/стажёр)
   const editHeaderBase = isTraineeMode ? "🔻 СТАЖЁР" : "🔻 КАНДИДАТ";
 
-  const header = isRestoreMode
+  let header = isRestoreMode
     ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
     : isEditMode
     ? `${editHeaderBase} — РЕЖИМ ИЗМЕНЕНИЯ (✏️)`
     : normalHeader;
+
+  // ✅ если нужно переопределить заголовок (например "ЭТАП ПРОЙДЕН")
+  if (options.headerOverride) header = options.headerOverride;
 
   // Возраст без "лет"
   const agePart = cand.age ? ` (${cand.age})` : "";
@@ -485,44 +493,29 @@ FROM candidates c
         // для остальных — ничего
       }
 
-      // 2) данные стажировок (заглушка)
+      // 2) 📊 успеваемость (заглушка) — как у сотрудника
       rows.push([
         Markup.button.callback(
-          "▴ данные стажировок",
-          `lk_internship_data_stub_${cand.id}`
+          "📊 успеваемость",
+          `lk_intern_progress_stub_${cand.id}`
         ),
       ]);
 
-      // 3) ▾ Открыть карточку ⤵/⤴ (toggle)
-      const expanded = isTraineeCardsExpanded(ctx.from.id);
+      // 3) 🌱 данные стажировок
       rows.push([
         Markup.button.callback(
-          expanded ? "▾ Скрыть карточку" : "▴ Открыть карточку",
-          `lk_internship_toggle_cards_${cand.id}`
+          "🌱 данные стажировок",
+          `lk_internship_data_${cand.id}`
         ),
       ]);
 
-      // раскрытые кнопки (заглушки)
-      if (expanded) {
-        rows.push([
-          Markup.button.callback(
-            "Карточка кандидата",
-            `lk_internship_card_candidate_stub_${cand.id}`
-          ),
-        ]);
-        rows.push([
-          Markup.button.callback(
-            "Карточка стажёра",
-            `lk_internship_card_trainee_stub_${cand.id}`
-          ),
-        ]);
-        rows.push([
-          Markup.button.callback(
-            "Карточка сотрудника",
-            `lk_internship_card_worker_stub_${cand.id}`
-          ),
-        ]);
-      }
+      // 4) 📋 открыть другую карточку (переключатель)
+      rows.push([
+        Markup.button.callback(
+          "📋 открыть другую карточку",
+          `lk_internship_open_cards_${cand.id}`
+        ),
+      ]);
 
       // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
       if (!activeInternshipSession) {
@@ -647,6 +640,109 @@ FROM candidates c
 // регистрируем хендлеры, связанные с карточкой
 function registerCandidateCard(bot, ensureUser, logError, deliver) {
   deliverFn = deliver;
+
+  // 📋 открыть другую карточку — меню переключения (кнопки меняются, текст карточки остаётся)
+  bot.action(/^lk_internship_open_cards_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const kb = Markup.inlineKeyboard([
+        [Markup.button.callback("▾карточки:", "lk_noop")],
+        [
+          Markup.button.callback(
+            "Кандидат",
+            `lk_cards_switch_candidate_${candId}`
+          ),
+          Markup.button.callback("Стажёр", `lk_cards_switch_trainee_${candId}`),
+          Markup.button.callback(
+            "Сотрудник",
+            `lk_cards_switch_worker_${candId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            `lk_internship_open_cards_back_${candId}`
+          ),
+        ],
+      ]);
+
+      await showCandidateCardLk(ctx, candId, {
+        edit: true,
+        keyboardOverride: kb,
+      });
+    } catch (err) {
+      logError("lk_internship_open_cards", err);
+    }
+  });
+
+  bot.action(/^lk_internship_open_cards_back_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_open_cards_back", err);
+    }
+  });
+
+  // переключатель → кандидат
+  bot.action(/^lk_cards_switch_candidate_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candId, {
+        edit: true,
+        forceMode: "candidate",
+        headerOverride: "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)",
+      });
+    } catch (err) {
+      logError("lk_cards_switch_candidate", err);
+    }
+  });
+
+  // переключатель → стажёр (возвращаемся в обычную стажёрскую карточку)
+  bot.action(/^lk_cards_switch_trainee_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candId, {
+        edit: true,
+        forceMode: "trainee",
+      });
+    } catch (err) {
+      logError("lk_cards_switch_trainee", err);
+    }
+  });
+
+  // переключатель → сотрудник (если ещё стажировка — тост)
+  bot.action(/^lk_cards_switch_worker_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Пользователь ещё на этапе стажировки", {
+          show_alert: false,
+        })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_cards_switch_worker", err);
+    }
+  });
+
+  bot.action(/^lk_intern_progress_stub_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Успеваемость — добавим позже", { show_alert: false })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_intern_progress_stub", err);
+    }
+  });
+
+  // не кликабельные заголовки меню
+  bot.action(/^lk_noop$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+  });
 
   // открыть карточку кандидата по кнопке из списка
   bot.action(/^lk_cand_open_(\d+)$/, async (ctx) => {
@@ -777,13 +873,137 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
   });
 
   // данные стажировок — заглушка
-  bot.action(/^lk_internship_data_stub_(\d+)$/, async (ctx) => {
+  // 🌱 данные стажировок — выбор дня
+  bot.action(/^lk_internship_data_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const cRes = await pool.query(
+        `
+        SELECT u.id AS lk_user_id
+        FROM candidates c
+        LEFT JOIN users u ON u.candidate_id = c.id
+        WHERE c.id = $1
+        LIMIT 1
+        `,
+        [candId]
+      );
+
+      const lkUserId = cRes.rows[0]?.lk_user_id || null;
+      if (!lkUserId) {
+        await ctx
+          .answerCbQuery("Пользователь не привязан", { show_alert: false })
+          .catch(() => {});
+        return;
+      }
+
+      const sRes = await pool.query(
+        `
+        SELECT day_number, finished_at, is_canceled
+        FROM internship_sessions
+        WHERE user_id = $1
+        ORDER BY day_number ASC, id ASC
+        `,
+        [lkUserId]
+      );
+
+      const sessions = sRes.rows || [];
+
+      const finishedSet = new Set();
+      let activeDay = null;
+
+      for (const s of sessions) {
+        if (s.is_canceled) continue;
+        if (s.finished_at) finishedSet.add(Number(s.day_number));
+        else activeDay = Number(s.day_number);
+      }
+
+      const finishedDays = Array.from(finishedSet).sort((a, b) => a - b);
+
+      const buttons = [];
+      const allDayButtons = [];
+
+      for (const d of finishedDays) {
+        allDayButtons.push(
+          Markup.button.callback(`${d}дн`, `lk_internship_day_${candId}_${d}`)
+        );
+      }
+      if (activeDay != null) {
+        allDayButtons.push(
+          Markup.button.callback(
+            `🎓 ${activeDay}дн`,
+            `lk_internship_day_active_${candId}_${activeDay}`
+          )
+        );
+      }
+
+      // по 3 кнопки в строку
+      for (let i = 0; i < allDayButtons.length; i += 3) {
+        buttons.push(allDayButtons.slice(i, i + 3));
+      }
+
+      buttons.push([
+        Markup.button.callback("⬅️ Назад", `lk_internship_data_back_${candId}`),
+      ]);
+
+      const kb = Markup.inlineKeyboard(buttons);
+
+      await ctx.editMessageText("Выберите день стажировки:", {
+        ...kb,
+        parse_mode: "Markdown",
+      });
+    } catch (err) {
+      logError("lk_internship_data", err);
+    }
+  });
+
+  bot.action(/^lk_internship_data_back_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_data_back", err);
+    }
+  });
+
+  // клик по завершённому дню — экран-заглушка дня
+  bot.action(/^lk_internship_day_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      const day = Number(ctx.match[2]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "⬅️ Назад к дням",
+            `lk_internship_data_${candId}`
+          ),
+        ],
+      ]);
+
+      await ctx.editMessageText(
+        `🌱 Данные стажировки — ${day}дн\n\n(здесь позже появятся данные по дню)`,
+        { ...kb, parse_mode: "Markdown" }
+      );
+    } catch (err) {
+      logError("lk_internship_day", err);
+    }
+  });
+
+  // клик по 🎓 дню — тост
+  bot.action(/^lk_internship_day_active_(\d+)_(\d+)$/, async (ctx) => {
     try {
       await ctx
-        .answerCbQuery("Данные стажировок — в разработке.")
+        .answerCbQuery(
+          "Идёт процесс обучения, данные появятся после завершения",
+          { show_alert: false }
+        )
         .catch(() => {});
     } catch (err) {
-      logError("lk_internship_data_stub", err);
+      logError("lk_internship_day_active", err);
     }
   });
 

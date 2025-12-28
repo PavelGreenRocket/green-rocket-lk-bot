@@ -61,9 +61,32 @@ function userLabelCash(row, { admin }) {
 function renderCashCard(row, { admin, detailed, opening }) {
   const lines = [];
   if (admin && detailed) {
-    lines.push(
-      `<b>Смена:</b> <code>${row.shift_id}</code> (изменить: /edit_${row.shift_id})`
-    );
+    lines.push(`<b>Смена:</b> <code>${row.shift_id}</code>`);
+    lines.push(`<b>изменить:</b> /edit_${row.shift_id}`);
+    lines.push(`<b>удалить:</b> /delete_${row.shift_id}`);
+
+    if (row.edited_at) {
+      const d = new Date(row.edited_at);
+      const dd = String(d.getDate()).padStart(2, "0");
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const yy = String(d.getFullYear()).slice(-2);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mi = String(d.getMinutes()).padStart(2, "0");
+      const when = `${dd}.${mm}.${yy} ${hh}:${mi}`;
+
+      const who = row.edited_by_username
+        ? `@${row.edited_by_username}`
+        : row.edited_by_work_phone
+        ? row.edited_by_work_phone
+        : "";
+
+      const name = row.edited_by_name ? row.edited_by_name : "";
+      const tail = [name, who].filter(Boolean).join(" ");
+
+      lines.push(`(Изменено ${when}${tail ? ` · ${tail}` : ""})`);
+    }
+
+    lines.push(""); // пустая строка перед "Сотрудник"
   }
 
   lines.push(`<b>Сотрудник:</b> ${userLabelCash(row, { admin })}`);

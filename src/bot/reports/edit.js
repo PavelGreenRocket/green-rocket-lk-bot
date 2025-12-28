@@ -60,14 +60,24 @@ function cashByLabel(row) {
   return name || uname || null;
 }
 
+function fmtMoneyRub(v) {
+  if (v === null || v === undefined) return "-";
+  const n = Number(String(v).replace(",", "."));
+  if (!Number.isFinite(n)) return "-";
+  return `${new Intl.NumberFormat("ru-RU").format(n)} ₽`;
+}
+
 function buildCard(row, { hint, limitedUser }) {
   const lines = [];
-  const tp = row.trade_point_title || `Точка #${row.trade_point_id}`;
 
-  lines.push(`<b>Отчёт</b>`);
-  lines.push(`${tp}`);
-  const d = fmtDateShort(row.opened_at);
-  if (d) lines.push(`Дата: ${d}`);
+  // Заголовок
+  lines.push("<b>Отчёт</b>");
+
+  const tp = row.trade_point_title || `Точка #${row.trade_point_id}`;
+  lines.push(tp);
+
+  const date = fmtDateShort(row.opened_at);
+  if (date) lines.push(`Дата: ${date}`);
 
   const from = fmtTime(row.opened_at);
   const to = row.closed_at ? fmtTime(row.closed_at) : null;
@@ -76,44 +86,40 @@ function buildCard(row, { hint, limitedUser }) {
 
   lines.push("");
 
-  const st = fmtMoney(row.sales_total);
-  const sc = fmtMoney(row.sales_cash);
-  const cd = fmtMoney(row.cash_in_drawer);
+  // Поля (как кассовый формат)
+  if (row.sales_total != null)
+    lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
+  if (row.sales_cash != null)
+    lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
+  if (row.cash_in_drawer != null)
+    lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)}`);
 
-  if (st != null) lines.push(`Сумма продаж: ${st}`);
-  if (sc != null) lines.push(`Наличными: ${sc}`);
-  if (cd != null) lines.push(`В кассе: ${cd}`);
-
-  if (row.was_cash_collection === false) {
-    lines.push(`Инкассация: Нет`);
-  }
-  if (row.was_cash_collection === true) {
-    const amount = fmtMoney(row.cash_collection_amount);
-    if (amount != null) {
-      lines.push(`Инкассация: ${amount}`);
-      const who = cashByLabel(row);
-      if (who) lines.push(`Кто: ${who}`);
-    } else {
-      lines.push(`Инкассация: Да`);
-    }
-  }
-
-  if (row.checks_count != null) lines.push(`Чеков: ${row.checks_count}`);
-
+  // Чеки / инкассация
   lines.push("");
+  if (row.checks_count != null) lines.push(`<b>Чеков:</b> ${row.checks_count}`);
+
+  if (row.was_cash_collection === true) {
+    if (row.cash_collection_amount != null) {
+      lines.push(
+        `<b>Инкассация:</b> ${fmtMoneyRub(row.cash_collection_amount)}`
+      );
+    } else {
+      lines.push(`<b>Инкассация:</b> ДА`);
+    }
+  } else if (row.was_cash_collection === false) {
+    lines.push(`<b>Инкассация:</b> НЕТ`);
+  }
+
+  lines.push("──────────────");
 
   if (limitedUser) {
-    lines.push(
-      `ℹ️ Ты можешь изменить <b>только свою последнюю смену</b> (ограниченный список полей).`
-    );
     lines.push("");
+    lines.push("ℹ️ Ты можешь изменить <b>только свою последнюю смену</b>");
+    lines.push("(ограниченный список полей).");
   }
 
-  if (hint) {
-    lines.push(hint);
-  } else {
-    lines.push("Выберите действие:");
-  }
+  lines.push("");
+  lines.push(hint ? hint : "Выберите действие:");
 
   return lines.join("\n");
 }
@@ -143,6 +149,13 @@ async function loadReportByShiftId(shiftId) {
       sc.cash_collection_by_user_id,
       sc.checks_count,
 
+      sc.edited_at,
+sc.edited_by_user_id,
+eu.full_name AS edited_by_name,
+eu.username  AS edited_by_username,
+eu.work_phone AS edited_by_work_phone,
+
+
       cu.full_name AS cash_collection_by_name,
       cu.username  AS cash_collection_by_username
 
@@ -150,6 +163,7 @@ async function loadReportByShiftId(shiftId) {
     JOIN shift_closings sc ON sc.shift_id = s.id
     JOIN users u ON u.id = s.user_id
     LEFT JOIN users cu ON cu.id = sc.cash_collection_by_user_id
+    LEFT JOIN users eu ON eu.id = sc.edited_by_user_id
     LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
 
     WHERE s.id = $1
@@ -578,9 +592,7 @@ async function showPickCashCollector(ctx, user) {
 }
 
 // ---------- save ----------
-async function saveShiftClosing(shiftId, patch) {
-  // patch keys: sales_total, sales_cash, cash_in_drawer, checks_count,
-  // was_cash_collection, cash_collection_amount, cash_collection_by_user_id
+async function saveShiftClosing(shiftId, patch, editedByUserId) {
   const fields = [];
   const vals = [];
   let i = 1;
@@ -590,7 +602,12 @@ async function saveShiftClosing(shiftId, patch) {
     vals.push(v);
     i += 1;
   }
-  if (!fields.length) return;
+
+  // метки редактирования
+  fields.push(`edited_at = NOW()`);
+  fields.push(`edited_by_user_id = $${i}`);
+  vals.push(Number(editedByUserId));
+  i += 1;
 
   vals.push(Number(shiftId));
   await pool.query(
@@ -778,7 +795,7 @@ function registerReportEdit(bot, deps) {
     await ctx.answerCbQuery().catch(() => {});
     const st = getSt(ctx.from.id);
     if (!st?.shiftId) return;
-    await saveShiftClosing(st.shiftId, { was_cash_collection: true });
+    await saveShiftClosing(st.shiftId, { was_cash_collection: true }, user.id);
     return toast(ctx, "Ок. Теперь укажи сумму и кто.");
   });
 
@@ -877,7 +894,11 @@ function registerReportEdit(bot, deps) {
         "Этот сотрудник не назначен на инкассацию для этой точки."
       );
 
-    await saveShiftClosing(st.shiftId, { cash_collection_by_user_id: pickId });
+    await saveShiftClosing(
+      st.shiftId,
+      { cash_collection_by_user_id: pickId },
+      user.id
+    );
     return toast(ctx, "Ок. Инкассатор выбран.");
   });
 
