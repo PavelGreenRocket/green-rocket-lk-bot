@@ -9,6 +9,16 @@ let deliverFn = null;
 // состояние "📋 Открыть карточку" по tg_id
 const traineeCardsExpandedByTgId = new Map();
 
+// текущий выбранный экран в меню карточек: 'candidate' | 'trainee'
+const traineeCardsViewByTgId = new Map();
+
+function getTraineeCardsView(tgId) {
+  return traineeCardsViewByTgId.get(tgId) || "trainee";
+}
+function setTraineeCardsView(tgId, view) {
+  traineeCardsViewByTgId.set(tgId, view);
+}
+
 function isTraineeCardsExpanded(tgId) {
   return traineeCardsExpandedByTgId.get(tgId) === true;
 }
@@ -396,8 +406,16 @@ FROM candidates c
     }
   }
 
-  // 🔹 О стажировке — когда приглашён или уже стажёр
-  if (displayStatus === "internship_invited" || displayStatus === "intern") {
+  // 🔹 О стажировке — показываем только в "обычной" кандидатской карточке,
+  // но НЕ в режиме "этап пройден" (когда открыли через переключатель)
+  const isPassedCandidateView =
+    options.forceMode === "candidate" &&
+    options.headerOverride === "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)";
+
+  if (
+    !isPassedCandidateView &&
+    (displayStatus === "internship_invited" || displayStatus === "intern")
+  ) {
     text += "🔹 *О стажировке*\n";
 
     if (cand.internship_date) {
@@ -497,8 +515,14 @@ FROM candidates c
     ) {
       // приглашён / стажировка в процессе
       if (isTraineeMode) {
-        const mentorTgId = cand.internship_admin_tg_id || null;
-        const isMentor = mentorTgId && ctx.from.id === mentorTgId;
+        const mentorTgIdRaw = cand.internship_admin_tg_id;
+        const mentorTgId =
+          mentorTgIdRaw === null || mentorTgIdRaw === undefined
+            ? null
+            : Number(mentorTgIdRaw);
+
+        const isMentor =
+          Number.isFinite(mentorTgId) && Number(ctx.from.id) === mentorTgId;
 
         // 1) Перейти к обучению / идёт обучение
         if (activeInternshipSession) {
@@ -554,56 +578,24 @@ FROM candidates c
           ),
         ]);
 
-        const cardsExpanded = isTraineeCardsExpanded(ctx.from.id);
-        const viewMode = options.cardsViewMode || "trainee";
+        // меню скрыто — обычные кнопки стажёра
 
-        if (cardsExpanded) {
-          const b1 = Markup.button.callback(
-            "▾карточки (скрыть)",
-            `lk_internship_toggle_cards_${cand.id}`
-          );
+        // 4) 📋 открыть другую карточку (переключатель)
+        rows.push([
+          Markup.button.callback(
+            "📋 открыть другую карточку",
+            `lk_internship_open_cards_${cand.id}`
+          ),
+        ]);
 
-          const candBtnText =
-            viewMode === "candidate" ? "✅ Кандидат" : "Кандидат";
-          const trBtnText = viewMode === "trainee" ? "✅ Стажёр" : "Стажёр";
-
-          rows.length = 0; // показываем только меню
-          rows.push([b1]);
+        // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
+        if (!activeInternshipSession) {
           rows.push([
             Markup.button.callback(
-              candBtnText,
-              `lk_cards_switch_candidate_${cand.id}`
-            ),
-
-            Markup.button.callback(
-              trBtnText,
-              `lk_cards_switch_trainee_${cand.id}`
-            ),
-            Markup.button.callback(
-              "Сотрудник",
-              `lk_cards_switch_worker_${cand.id}`
+              "❌ отказать стажёру",
+              `lk_internship_decline_stub_${cand.id}`
             ),
           ]);
-        } else {
-          // меню скрыто — обычные кнопки стажёра
-
-          // 4) 📋 открыть другую карточку (переключатель)
-          rows.push([
-            Markup.button.callback(
-              "📋 открыть другую карточку",
-              `lk_internship_open_cards_${cand.id}`
-            ),
-          ]);
-
-          // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
-          if (!activeInternshipSession) {
-            rows.push([
-              Markup.button.callback(
-                "❌ отказать стажёру",
-                `lk_internship_decline_stub_${cand.id}`
-              ),
-            ]);
-          }
         }
       } else {
         // Если это кандидатская карточка, открытая через "открыть другую карточку" (этап пройден),
@@ -741,8 +733,24 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     try {
       const candId = Number(ctx.match[1]);
       traineeCardsExpandedByTgId.set(ctx.from.id, true);
+      // ничего не меняем: текущий view остаётся прежним (по умолчанию trainee)
       await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candId, { edit: true });
+      const view = getTraineeCardsView(ctx.from.id);
+      if (view === "candidate") {
+        await showCandidateCardLk(ctx, candId, {
+          edit: true,
+          forceMode: "candidate",
+          headerOverride: "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)",
+          forceCandidateStatus: "internship_invited",
+          cardsViewMode: "candidate",
+        });
+      } else {
+        await showCandidateCardLk(ctx, candId, {
+          edit: true,
+          forceMode: "trainee",
+          cardsViewMode: "trainee",
+        });
+      }
     } catch (err) {
       logError("lk_internship_open_cards", err);
     }
@@ -752,9 +760,27 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
   bot.action(/^lk_internship_toggle_cards_(\d+)$/, async (ctx) => {
     try {
       const candidateId = Number(ctx.match[1]);
-      toggleTraineeCardsExpanded(ctx.from.id);
+      const expandedNow = toggleTraineeCardsExpanded(ctx.from.id);
+
       await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candidateId, { edit: true });
+
+      const view = getTraineeCardsView(ctx.from.id);
+
+      if (view === "candidate") {
+        await showCandidateCardLk(ctx, candidateId, {
+          edit: true,
+          forceMode: "candidate",
+          headerOverride: "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)",
+          forceCandidateStatus: "internship_invited",
+          cardsViewMode: "candidate",
+        });
+      } else {
+        await showCandidateCardLk(ctx, candidateId, {
+          edit: true,
+          forceMode: "trainee",
+          cardsViewMode: "trainee",
+        });
+      }
     } catch (err) {
       logError("lk_internship_toggle_cards", err);
     }
@@ -780,6 +806,10 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
 
         // остаёмся в режиме меню карточек (не скрываем)
         traineeCardsExpandedByTgId.set(ctx.from.id, true);
+        setTraineeCardsView(
+          ctx.from.id,
+          mode === "candidate" ? "candidate" : "trainee"
+        );
 
         if (mode === "candidate") {
           await showCandidateCardLk(ctx, candId, {
