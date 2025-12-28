@@ -804,16 +804,10 @@ function registerReportEdit(bot, deps) {
     const user = await ensureUser(ctx);
     if (!user) return;
 
-    await saveShiftClosing(
-      st.shiftId,
-      {
-        was_cash_collection: false,
-        cash_collection_amount: null,
-        cash_collection_by_user_id: null,
-      },
-      user.id
-    );
+    const st = getSt(ctx.from.id);
+    if (!st?.shiftId) return;
 
+    await saveShiftClosing(st.shiftId, { was_cash_collection: true }, user.id);
     return toast(ctx, "Ок. Теперь укажи сумму и кто.");
   });
 

@@ -6,6 +6,7 @@ const { deliver } = require("../../utils/renderHelpers");
 const { toast, alert } = require("../../utils/toast");
 const { registerReportImports } = require("./imports");
 const { registerReportEdit } = require("./edit");
+const { registerReportDelete } = require("./delete");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -62,30 +63,28 @@ function renderCashCard(row, { admin, detailed, opening }) {
   const lines = [];
   if (admin && detailed) {
     lines.push(`<b>Смена:</b> <code>${row.shift_id}</code>`);
-    lines.push(`<b>изменить:</b> /edit_${row.shift_id}`);
-    lines.push(`<b>удалить:</b> /delete_${row.shift_id}`);
 
     if (row.edited_at) {
       const d = new Date(row.edited_at);
       const dd = String(d.getDate()).padStart(2, "0");
       const mm = String(d.getMonth() + 1).padStart(2, "0");
       const yy = String(d.getFullYear()).slice(-2);
-      const hh = String(d.getHours()).padStart(2, "0");
-      const mi = String(d.getMinutes()).padStart(2, "0");
-      const when = `${dd}.${mm}.${yy} ${hh}:${mi}`;
+      const when = `${dd}.${mm}.${yy}`;
 
+      const name = row.edited_by_name ? row.edited_by_name : "";
       const who = row.edited_by_username
         ? `@${row.edited_by_username}`
         : row.edited_by_work_phone
         ? row.edited_by_work_phone
         : "";
 
-      const name = row.edited_by_name ? row.edited_by_name : "";
-      const tail = [name, who].filter(Boolean).join(" ");
-
-      lines.push(`(Изменено ${when}${tail ? ` · ${tail}` : ""})`);
+      // формат: "изменено: 28.12.25 Павел (@user)" — курсивом
+      const tail = [when, name, who].filter(Boolean).join(" ");
+      lines.push(`<i>изменено: ${tail}</i>`);
+      lines.push("");
     }
-
+    lines.push(`<b>изменить:</b> /edit_${row.shift_id}`);
+    lines.push(`<b>удалить:</b> /delete_${row.shift_id}`);
     lines.push(""); // пустая строка перед "Сотрудник"
   }
 
@@ -543,41 +542,48 @@ async function loadReportsPage({ page, filters, limit }) {
 
   // Сначала пробуем с deleted_at (после миграции)
   const sqlWithDelete = `
-    SELECT
-      s.id AS shift_id,
-      s.user_id,
-      s.trade_point_id,
-      s.opened_at,
-      s.closed_at,
-      tp.title AS trade_point_title,
+  SELECT
+    s.id AS shift_id,
+    s.user_id,
+    s.trade_point_id,
+    s.opened_at,
+    s.closed_at,
+    tp.title AS trade_point_title,
 
-      u.full_name,
-      u.username,
-      u.work_phone,
+    u.full_name,
+    u.username,
+    u.work_phone,
 
-      sc.sales_total,
-      sc.sales_cash,
-      sc.cash_in_drawer,
-      sc.was_cash_collection,
-      sc.cash_collection_amount,
-      sc.cash_collection_by_user_id,
-      sc.checks_count,
+    sc.sales_total,
+    sc.sales_cash,
+    sc.cash_in_drawer,
+    sc.was_cash_collection,
+    sc.cash_collection_amount,
+    sc.cash_collection_by_user_id,
+    sc.checks_count,
 
-      cu.full_name AS cash_collection_by_name,
-      cu.username  AS cash_collection_by_username
+    sc.edited_at,
+    sc.edited_by_user_id,
+    eu.full_name AS edited_by_name,
+    eu.username  AS edited_by_username,
+    eu.work_phone AS edited_by_work_phone,
 
-    FROM shifts s
-    JOIN shift_closings sc ON sc.shift_id = s.id
-    JOIN users u ON u.id = s.user_id
-    LEFT JOIN users cu ON cu.id = sc.cash_collection_by_user_id
-    LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+    cu.full_name AS cash_collection_by_name,
+    cu.username  AS cash_collection_by_username
 
-    WHERE ${whereSql}
-      AND sc.deleted_at IS NULL
+  FROM shifts s
+  JOIN shift_closings sc ON sc.shift_id = s.id
+  JOIN users u ON u.id = s.user_id
+  LEFT JOIN users cu ON cu.id = sc.cash_collection_by_user_id
+  LEFT JOIN users eu ON eu.id = sc.edited_by_user_id
+  LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
 
-    ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
-    LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
-  `;
+  WHERE ${whereSql}
+    AND sc.deleted_at IS NULL
+
+  ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
+  LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
+`;
 
   const sqlNoDelete = `
     SELECT
@@ -3468,6 +3474,12 @@ function registerReports(bot, ensureUser, logError) {
   });
 
   registerReportEdit(bot, {
+    ensureUser,
+    logError,
+    showReportsList,
+  });
+
+  registerReportDelete(bot, {
     ensureUser,
     logError,
     showReportsList,
