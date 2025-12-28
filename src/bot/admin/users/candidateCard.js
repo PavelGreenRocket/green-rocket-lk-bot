@@ -262,6 +262,17 @@ FROM candidates c
     (cand.status === "internship_invited" &&
       (activeInternshipSession !== null || finishedInternshipCount > 0));
 
+  // ✅ активная смена стажёра (нужна, чтобы показывать кнопку "📝 задачи смены")
+  // раньше переменная activeShift использовалась ниже, но не была определена → падало.
+  let activeShift = null;
+  try {
+    if (isTraineeMode && activeInternshipSession && cand.lk_user_id) {
+      activeShift = await getActiveShiftToday(cand.lk_user_id);
+    }
+  } catch (e) {
+    activeShift = null;
+  }
+
   const traineeHeader = activeInternshipSession
     ? `🔻 СТАЖЁР — ДЕНЬ ${activeInternshipSession.day_number} (В ПРОЦЕССЕ)`
     : `🔻 СТАЖЁР — ВСЕГО СТАЖИРОВОК (${finishedInternshipCount})`;

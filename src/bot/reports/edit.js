@@ -622,6 +622,28 @@ async function saveShift(shiftId, patch) {
 function registerReportEdit(bot, deps) {
   const { ensureUser, logError, showReportsList } = deps;
 
+  // Админский быстрый переход из "Подробно": /edit_123
+  bot.hears(/^\/edit_(\d+)$/i, async (ctx) => {
+    try {
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      if (!isAdmin(user)) {
+        return toast(ctx, "Команда доступна только админам.");
+      }
+
+      const shiftId = Number(ctx.match[1]);
+      const row = await loadReportByShiftId(shiftId);
+      if (!row) return toast(ctx, "Смена/отчёт не найдены.");
+
+      clrSt(ctx.from.id);
+      setSt(ctx.from.id, { shiftId, step: "main" });
+      return showMain(ctx, user);
+    } catch (e) {
+      logError("cmd_edit_shift", e);
+    }
+  });
+
   // entry
   bot.action("lk_reports_edit_last", async (ctx) => {
     try {
@@ -639,14 +661,16 @@ function registerReportEdit(bot, deps) {
         return showMain(ctx, user);
       }
 
-      // admin flow: start with date input
-      setSt(ctx.from.id, { step: "admin_date_await" });
+      // admin flow: start with shift_id input
+      setSt(ctx.from.id, { step: "admin_shiftid_await" });
       return deliver(
         ctx,
         {
           text:
             "<b>Редактирование отчёта (админ)</b>\n\n" +
-            "Введите дату в формате <b>DD.MM.YYYY</b>:",
+            "Введите <b>ID смены</b> (число).\n" +
+            "ℹ️ ID можно посмотреть в <b>Отчёты → 🎛 Формат → ✅Подробно</b>\n\n" +
+            "Пример: <code>/edit_12</code>",
           extra: {
             parse_mode: "HTML",
             ...Markup.inlineKeyboard([
@@ -980,16 +1004,15 @@ function registerReportEdit(bot, deps) {
 
       clrSt(ctx.from.id);
 
-      // показать отчёты (через deps, чтобы не дублировать экран)
+      await toast(ctx, "✅ Изменения сохранены.");
+
       if (typeof showReportsList === "function") {
         return showReportsList(ctx, user, { edit: true });
       }
-      return toast(ctx, "Сохранено.");
     } catch (e) {
       logError("lk_reports_edit_done", e);
     }
   });
-
   // ---------- TEXT middleware (важно: next()) ----------
   bot.on("text", async (ctx, next) => {
     const st = getSt(ctx.from.id);
@@ -1000,17 +1023,21 @@ function registerReportEdit(bot, deps) {
       if (!user) return;
 
       // admin first step: date input
-      if (st.step === "admin_date_await") {
-        const d = parseDateDdMmYyyy(ctx.message.text);
-        if (!d) return toast(ctx, "Неверный формат. Нужно DD.MM.YYYY");
-        if (isFutureDate(d)) return toast(ctx, "Будущие даты запрещены.");
+      // admin first step: shift_id input
+      if (st.step === "admin_shiftid_await") {
+        const raw = String(ctx.message.text || "").trim();
+        if (!/^\d+$/.test(raw)) return toast(ctx, "Введите числовой ID смены.");
 
-        setSt(ctx.from.id, {
-          adminDate: toISODate(d),
-          step: "admin_point_pick",
-          pointPage: 0,
-        });
-        return showPickPoint(ctx);
+        const shiftId = Number(raw);
+        const row = await loadReportByShiftId(shiftId);
+        if (!row) return toast(ctx, "Смена/отчёт не найдены.");
+
+        // (опционально) можно добавить проверку, что смена закрыта
+        // если хочешь жёстко:
+        // if (!row.closed_at) return toast(ctx, "Смена ещё не закрыта.");
+
+        setSt(ctx.from.id, { shiftId, step: "main" });
+        return showMain(ctx, user);
       }
 
       // generic field input

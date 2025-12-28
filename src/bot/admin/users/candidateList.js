@@ -1153,18 +1153,10 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
-  bot.action("lk_add_intern", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const admin = await ensureUser(ctx);
-      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
-        return;
+ bot.action("lk_add_intern", async (ctx) => {
+  await ctx.answerCbQuery("⏳ Добавление стажёров будет доступно позже");
+});
 
-      await showWaitingUsersForInternLink(ctx);
-    } catch (err) {
-      logError("lk_add_intern", err);
-    }
-  });
 
   bot.action("lk_add_intern_cancel", async (ctx) => {
     try {
@@ -2202,7 +2194,6 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
       logError("admin_users_interns", err);
     }
   });
-
 
   // Сотрудники — полноценный экран
   bot.action("admin_users_workers", async (ctx) => {

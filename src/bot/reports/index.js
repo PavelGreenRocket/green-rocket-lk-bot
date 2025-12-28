@@ -58,8 +58,13 @@ function userLabelCash(row, { admin }) {
   return name;
 }
 
-function renderCashCard(row, { admin }) {
+function renderCashCard(row, { admin, detailed, opening }) {
   const lines = [];
+  if (admin && detailed) {
+    lines.push(
+      `<b>Смена:</b> <code>${row.shift_id}</code> (изменить: /edit_${row.shift_id})`
+    );
+  }
 
   lines.push(`<b>Сотрудник:</b> ${userLabelCash(row, { admin })}`);
 
@@ -77,6 +82,15 @@ function renderCashCard(row, { admin }) {
   }
 
   lines.push("");
+  if (admin && detailed && opening && opening.cash_in_drawer_open != null) {
+    lines.push("");
+    lines.push("<u><b>Открытие смены</b></u>");
+    lines.push(
+      `<b>Наличные в кассе:</b> ${fmtMoneyRub(opening.cash_in_drawer_open)}`
+    );
+    lines.push("");
+    lines.push("<u><b>Закрытие смены</b></u>");
+  }
 
   lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
   lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
@@ -96,6 +110,39 @@ function renderCashCard(row, { admin }) {
 
   lines.push("──────────────");
   return lines.join("\n");
+}
+
+async function loadOpeningsMapBestEffort(shiftIds) {
+  const ids = (shiftIds || []).map(Number).filter(Number.isFinite);
+  if (!ids.length) return new Map();
+
+  // 1) пробуем shift_openings(shift_id, cash_in_drawer ...)
+  try {
+    const r = await pool.query(
+      `SELECT shift_id, cash_in_drawer AS cash_in_drawer_open
+       FROM shift_openings
+       WHERE shift_id = ANY($1::int[])`,
+      [ids]
+    );
+    const m = new Map();
+    for (const x of r.rows) m.set(Number(x.shift_id), x);
+    return m;
+  } catch (_) {}
+
+  // 2) пробуем shift_opening_surveys(shift_id, cash_in_drawer ...)
+  try {
+    const r = await pool.query(
+      `SELECT shift_id, cash_in_drawer AS cash_in_drawer_open
+       FROM shift_opening_surveys
+       WHERE shift_id = ANY($1::int[])`,
+      [ids]
+    );
+    const m = new Map();
+    for (const x of r.rows) m.set(Number(x.shift_id), x);
+    return m;
+  } catch (_) {}
+
+  return new Map();
 }
 
 function renderAnalysisTable(rows, { elements, filters }) {
@@ -318,13 +365,26 @@ function renderFormatKeyboard(st) {
   const cur = st.format || "cash";
   const mark = (v) => (cur === v ? "✅ " : "");
 
+  const detailed = Boolean(st.cashDetailed);
+  const detMark = detailed ? "✅ " : "";
+
+  const firstRow = [
+    Markup.button.callback(
+      `${mark("cash")}Кассовый`,
+      "lk_reports_format_set_cash"
+    ),
+  ];
+
+  // "Подробно" показываем рядом с "Кассовый"
+  firstRow.push(
+    Markup.button.callback(
+      `${detMark}Подробно`,
+      "lk_reports_cash_detail_toggle"
+    )
+  );
+
   const buttons = [
-    [
-      Markup.button.callback(
-        `${mark("cash")}Кассовый`,
-        "lk_reports_format_set_cash"
-      ),
-    ],
+    firstRow,
     [
       Markup.button.callback(
         `${mark("analysis1")}Для анализа (по дням)`,
@@ -830,6 +890,14 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
         )
       : rows;
 
+    const detailed = admin && Boolean(st.cashDetailed);
+    let openingsMap = new Map();
+    if (detailed && rows.length) {
+      openingsMap = await loadOpeningsMapBestEffort(
+        rows.map((x) => x.shift_id)
+      );
+    }
+
     // ✅ скрытие таблицы работает и для analysis1 и для analysis2
     if (hideTable && isAnalysisFmt) {
       body = ""; // оставляем только header + summaryBlock (и фильтры если раскрыты)
@@ -838,7 +906,15 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
         ? format === "analysis2"
           ? renderAnalysisTable2(rowsForUi, { filters })
           : renderAnalysisTable(rowsForUi, { elements, filters })
-        : rowsForUi.map((r) => renderCashCard(r, { admin })).join("\n\n");
+        : rowsForUi
+            .map((r) =>
+              renderCashCard(r, {
+                admin,
+                detailed,
+                opening: openingsMap.get(r.shift_id),
+              })
+            )
+            .join("\n\n");
     }
   }
 
@@ -1656,7 +1732,7 @@ async function showSettings(ctx, user, { edit = true } = {}) {
       Markup.button.callback("🗑 Удалить отчёты", "lk_reports_delete_mode"),
     ]);
     buttons.push([
-      Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_pick"),
+      Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_last"),
     ]);
     buttons.push([
       Markup.button.callback("📥 Загрузка отчётов", "lk_reports_import_menu"),
@@ -2213,6 +2289,22 @@ async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
 // Register
 // ───────────────────────────────────────────────────────────────
 function registerReports(bot, ensureUser, logError) {
+  bot.action("lk_reports_cash_detail_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const next = !Boolean(st.cashDetailed);
+
+      setSt(ctx.from.id, { cashDetailed: next, formatUi: { mode: "menu" } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_cash_detail_toggle", e);
+    }
+  });
+
   bot.action("date_filter:open", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -3283,21 +3375,6 @@ function registerReports(bot, ensureUser, logError) {
     }
   });
 
-  // Edit pick (admin)
-  bot.action("lk_reports_edit_pick", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
-
-      setSt(ctx.from.id, { view: "edit_pick", page: 0, await: null });
-      await showEditPick(ctx, user, { edit: true });
-    } catch (e) {
-      logError("lk_reports_edit_pick", e);
-    }
-  });
-
   bot.action(/^lk_reports_edit_open_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -3308,42 +3385,6 @@ function registerReports(bot, ensureUser, logError) {
       await showEditMenu(ctx, user, shiftId, { edit: true });
     } catch (e) {
       logError("lk_reports_edit_open", e);
-    }
-  });
-
-  // Edit last (worker)
-  bot.action("lk_reports_edit_last", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-
-      const admin = isAdmin(user);
-      if (admin) {
-        // админ редактирует через settings
-        return toast(ctx, "Откройте через ⚙️ Настройки → ✏️ Изменить отчёт.");
-      }
-
-      const r = await pool.query(
-        `
-        SELECT s.id
-        FROM shifts s
-        WHERE s.user_id = $1
-          AND s.status = 'closed'
-        ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
-        LIMIT 1
-        `,
-        [user.id]
-      );
-      const shiftId = r.rows[0]?.id;
-      if (!shiftId) {
-        await toast(ctx, "Нет закрытых смен.");
-        return showReportsList(ctx, user, { edit: true });
-      }
-
-      await showEditMenu(ctx, user, Number(shiftId), { edit: true });
-    } catch (e) {
-      logError("lk_reports_edit_last", e);
     }
   });
 
@@ -3403,198 +3444,16 @@ function registerReports(bot, ensureUser, logError) {
     }
   });
 
-  // Text input handler (search + edit fields)
-  bot.on("text", async (ctx, next) => {
-    const st = getSt(ctx.from.id);
-    if (!st?.await) return next(); // ⬅️ КРИТИЧНО
-
-    try {
-      const user = await ensureUser(ctx);
-      if (!user) return;
-
-      const payload = st.await || {};
-      const msg = (ctx.message?.text || "").trim();
-
-      // search workers
-      if (payload.type === "fw_search") {
-        setSt(ctx.from.id, { pickerSearch: msg, pickerPage: 0, await: null });
-        return showFiltersWorkers(ctx, user, { edit: true });
-      }
-
-      // edit field
-      if (payload.type === "edit_field") {
-        const shiftId = st.editShiftId;
-        const fieldKey = payload.fieldKey;
-
-        if (!shiftId || !fieldKey) {
-          setSt(ctx.from.id, { await: null });
-          return showReportsList(ctx, user, { edit: true });
-        }
-
-        const num = Number(String(msg).replace(",", "."));
-        if (Number.isNaN(num)) {
-          await toast(ctx, "Введите число.");
-          return;
-        }
-
-        if (fieldKey === "checks_count" && !Number.isInteger(num)) {
-          await toast(ctx, "Введите целое число.");
-          return;
-        }
-
-        // cash_collection_amount: 0 => "не было"
-        if (fieldKey === "cash_collection_amount") {
-          if (num <= 0) {
-            await pool.query(
-              `
-              UPDATE shift_closings
-              SET was_cash_collection = false,
-                  cash_collection_amount = NULL,
-                  cash_collection_by_user_id = NULL
-              WHERE shift_id = $1
-              `,
-              [shiftId]
-            );
-          } else {
-            await pool.query(
-              `
-              UPDATE shift_closings
-              SET was_cash_collection = true,
-                  cash_collection_amount = $2
-              WHERE shift_id = $1
-              `,
-              [shiftId, num]
-            );
-          }
-        } else {
-          const map = {
-            sales_total: "sales_total",
-            sales_cash: "sales_cash",
-            cash_in_drawer: "cash_in_drawer",
-            checks_count: "checks_count",
-          };
-          const col = map[fieldKey];
-          if (!col) {
-            await toast(ctx, "Поле не поддерживается.");
-            setSt(ctx.from.id, { await: null });
-            return showEditMenu(ctx, user, shiftId, { edit: true });
-          }
-
-          await pool.query(
-            `UPDATE shift_closings SET ${col} = $2 WHERE shift_id = $1`,
-            [shiftId, fieldKey === "checks_count" ? Math.trunc(num) : num]
-          );
-        }
-
-        setSt(ctx.from.id, { await: null });
-        await toast(ctx, "Сохранено.");
-        return showEditMenu(ctx, user, shiftId, { edit: true });
-      }
-
-      // edit cash by (admin)
-      if (payload.type === "edit_cash_by") {
-        if (!isAdmin(user)) {
-          setSt(ctx.from.id, { await: null });
-          return;
-        }
-
-        const shiftId = st.editShiftId;
-        if (!shiftId) return;
-
-        if (msg === "-" || msg === "—") {
-          await pool.query(
-            `UPDATE shift_closings SET cash_collection_by_user_id = NULL WHERE shift_id = $1`,
-            [shiftId]
-          );
-          setSt(ctx.from.id, { await: null });
-          await toast(ctx, "Очищено.");
-          return showEditMenu(ctx, user, shiftId, { edit: true });
-        }
-
-        const isId = /^\d+$/.test(msg);
-        const uname = normalizeUsername(msg);
-
-        const q = isId
-          ? await pool.query(`SELECT id FROM users WHERE id = $1`, [
-              Number(msg),
-            ])
-          : await pool.query(
-              `SELECT id FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1`,
-              [uname]
-            );
-
-        const foundId = q.rows[0]?.id;
-        if (!foundId) {
-          await toast(ctx, "Пользователь не найден.");
-          return;
-        }
-
-        await pool.query(
-          `UPDATE shift_closings SET cash_collection_by_user_id = $2 WHERE shift_id = $1`,
-          [shiftId, foundId]
-        );
-
-        setSt(ctx.from.id, { await: null });
-        await toast(ctx, "Сохранено.");
-        return showEditMenu(ctx, user, shiftId, { edit: true });
-      }
-
-      // edit time (admin)
-      if (payload.type === "edit_time") {
-        if (!isAdmin(user)) {
-          setSt(ctx.from.id, { await: null });
-          return;
-        }
-
-        const shiftId = st.editShiftId;
-        if (!shiftId) return;
-
-        const m = msg.match(
-          /^(\d{1,2}):(\d{2})\s*-\s*(?:(\d{1,2}):(\d{2}))?\s*$/
-        );
-        if (!m) {
-          await toast(ctx, "Формат: 08:00-20:00 или 08:00-");
-          return;
-        }
-
-        const hh1 = String(m[1]).padStart(2, "0");
-        const mm1 = m[2];
-        const from = `${hh1}:${mm1}`;
-
-        let to = null;
-        if (m[3] && m[4]) {
-          const hh2 = String(m[3]).padStart(2, "0");
-          const mm2 = m[4];
-          to = `${hh2}:${mm2}`;
-        }
-
-        // Обновляем в пределах даты opened_at
-        await pool.query(
-          `
-          UPDATE shifts
-          SET opened_at = (opened_at::date + $2::time),
-              closed_at = CASE WHEN $3 IS NULL THEN NULL ELSE (opened_at::date + $3::time) END
-          WHERE id = $1
-          `,
-          [shiftId, from, to]
-        );
-
-        setSt(ctx.from.id, { await: null });
-        await toast(ctx, "Сохранено.");
-        return showEditMenu(ctx, user, shiftId, { edit: true });
-      }
-    } catch (e) {
-      logError("lk_reports_text", e);
-    }
+  registerReportEdit(bot, {
+    ensureUser,
+    logError,
+    showReportsList,
   });
 
   registerReportImports(bot, {
-    pool,
     ensureUser,
-    isAdmin,
     toast,
-    deliver,
-    showReportsSettings: showSettings,
+    alert,
     setSt,
     getSt,
     logError,

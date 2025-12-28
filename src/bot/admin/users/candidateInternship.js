@@ -1104,14 +1104,25 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       );
 
       // 5) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
-      await ctx.telegram
-        .sendMessage(
-          internTelegramId,
-          `🚀 Стажировка началась!\nДень: ${nextDay}\n${
-            wasLate ? comment : ""
-          }`.trim()
-        )
-        .catch(() => {});
+      const text =
+        "🚀 Стажировка началась!\n\n" +
+        "Нажмите кнопку ниже, чтобы перейти к обучению.";
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            {
+              text: "🚀 Перейти к обучению",
+              url: "https://t.me/baristaAcademy_GR_bot",
+            },
+          ],
+        ],
+      };
+
+      await ctx.telegram.sendMessage(internTelegramId, text, {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      });
 
       // 6) чистим состояние и возвращаем в карточку стажёра
       startInternshipStates.delete(ctx.from.id);
