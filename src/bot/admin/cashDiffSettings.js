@@ -8,6 +8,10 @@ const { getUserState, setUserState, clearUserState } = require("../state");
 
 const MODE = "admin_cash_diff_threshold";
 
+function isAdmin(user) {
+  return user && (user.role === "admin" || user.role === "super_admin");
+}
+
 async function getSettings() {
   const r = await pool.query(
     `
@@ -80,7 +84,7 @@ async function showThresholdScreen(ctx, admin, kind, { edit = true } = {}) {
   );
 }
 
-function registerCashDiffSettings(bot) {
+function registerCashDiffSettings(bot, ensureUser, logError) {
   // открыть экран недостачи
   bot.action("admin_cashdiff_shortage_open", async (ctx) => {
     try {
@@ -89,7 +93,7 @@ function registerCashDiffSettings(bot) {
       if (!isAdmin(admin)) return;
       await showThresholdScreen(ctx, admin, "shortage", { edit: true });
     } catch (e) {
-      console.error("[admin_cashdiff_shortage_open]", e);
+      logError?.("admin_cashdiff_shortage_open", e);
     }
   });
 
