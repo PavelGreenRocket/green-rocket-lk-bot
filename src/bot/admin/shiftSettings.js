@@ -317,6 +317,18 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
             callback_data: "admin_shift_closing_root",
           },
         ],
+         [
+          {
+            text: "❗ Порог недостачи",
+            callback_data: "admin_cashdiff_shortage_open",
+          },
+        ],
+         [
+          {
+            text: "💸 Порог излишек",
+            callback_data: "admin_cashdiff_surplus_open",
+          },
+        ],
         [
           {
             text: "👤 Назначение ответственных",

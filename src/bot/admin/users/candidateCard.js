@@ -5,12 +5,15 @@ const pool = require("../../../db/pool");
 
 // Функция доставки сообщений (прокидывается из index.js)
 let deliverFn = null;
+let ensureUserFn = null;
 
 // состояние "📋 Открыть карточку" по tg_id
 const traineeCardsExpandedByTgId = new Map();
 
 // текущий выбранный экран в меню карточек: 'candidate' | 'trainee'
 const traineeCardsViewByTgId = new Map();
+
+const internEditStates = new Map();
 
 function getTraineeCardsView(tgId) {
   return traineeCardsViewByTgId.get(tgId) || "trainee";
@@ -242,6 +245,10 @@ FROM candidates c
   }
 
   const cand = res.rows[0];
+  
+
+  const me = ensureUserFn ? await ensureUserFn(ctx) : null;
+  const isAdmin = me && (me.role === "admin" || me.role === "super_admin");
 
   // Когда открываем карточку кандидата через переключатель со стажёра/сотрудника,
   // хотим показывать текст как на этапе "приглашён на стажировку" (скрин 3).
@@ -406,49 +413,158 @@ FROM candidates c
     }
   }
 
-  // 🔹 О стажировке — показываем только в "обычной" кандидатской карточке,
-  // но НЕ в режиме "этап пройден" (когда открыли через переключатель)
+  // 🔹 О стажировке:
+  // - в режиме СТАЖЁР: показываем либо активную стажировку (как раньше),
+  //   либо итоговую сводку (пройдено X, следующая назначена/не назначена)
+  // - в режиме КАНДИДАТ: как раньше, но НЕ в режиме "этап пройден"
   const isPassedCandidateView =
     options.forceMode === "candidate" &&
     options.headerOverride === "🔻 КАНДИДАТ — (ЭТАП ПРОЙДЕН)";
 
-  if (
-    !isPassedCandidateView &&
-    (displayStatus === "internship_invited" || displayStatus === "intern")
-  ) {
+  if (isTraineeMode) {
     text += "🔹 *О стажировке*\n";
 
-    if (cand.internship_date) {
-      const dateLabel = formatDateWithWeekday(cand.internship_date);
-      if (cand.internship_time_from && cand.internship_time_to) {
-        text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
-          0,
-          5
-        )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+    if (activeInternshipSession) {
+      // идёт стажировка — оставляем привычный блок по назначению
+      if (cand.internship_date) {
+        const dateLabel = formatDateWithWeekday(cand.internship_date);
+        if (cand.internship_time_from && cand.internship_time_to) {
+          text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
+            0,
+            5
+          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+        } else {
+          text += `• *Дата стажировки:* ${dateLabel}\n`;
+        }
       } else {
-        text += `• *Дата стажировки:* ${dateLabel}\n`;
+        text += "• *Дата стажировки:* не указана\n";
       }
+
+      text += `• *Место стажировки:* ${
+        cand.internship_point_title || cand.place_title || "не указано"
+      }\n`;
+      text += `• *Ответственный по стажировке:* ${
+        cand.internship_admin_name || "не указан"
+      }\n\n`;
     } else {
-      text += "• *Дата стажировки:* не указана\n";
+      // стажировка завершена (нет активной сессии)
+      text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
+
+      // Вариант B: если следующая стажировка уже назначена — показываем её
+      if (cand.internship_date) {
+        const dateLabel = formatDateWithWeekday(cand.internship_date);
+        if (cand.internship_time_from && cand.internship_time_to) {
+          text += `*Следующая стажировка:*\n• ${dateLabel} (с ${cand.internship_time_from.slice(
+            0,
+            5
+          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+        } else {
+          text += `*Следующая стажировка:*\n• ${dateLabel}\n`;
+        }
+      } else {
+        text += "*Следующая стажировка:*\n• _пока не назначена_\n";
+      }
+
+      text +=
+        "\n_Чтобы узнать подробнее о предыдущих стажировках,\nнажмите «🌱 данные стажировок»._\n\n";
     }
 
-    text += `• *Место стажировки:* ${
-      cand.internship_point_title || cand.place_title || "не указано"
-    }\n`;
-    text += `• *Ответственный по стажировке:* ${
-      cand.internship_admin_name || "не указан"
-    }\n`;
+    text += "────────────────────────────────\n";
+  } else {
+    // Кандидатская карточка (как раньше), но НЕ "этап пройден"
+    if (
+      !isPassedCandidateView &&
+      (displayStatus === "internship_invited" || displayStatus === "intern")
+    ) {
+      text += "🔹 *О стажировке*\n";
 
-    if (cand.decline_reason) {
-      text += `• *Причина отказа:* ${cand.decline_reason}\n`;
+      if (cand.internship_date) {
+        const dateLabel = formatDateWithWeekday(cand.internship_date);
+        if (cand.internship_time_from && cand.internship_time_to) {
+          text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
+            0,
+            5
+          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+        } else {
+          text += `• *Дата стажировки:* ${dateLabel}\n`;
+        }
+      } else {
+        text += "• *Дата стажировки:* не указана\n";
+      }
+
+      text += `• *Место стажировки:* ${
+        cand.internship_point_title || cand.place_title || "не указано"
+      }\n`;
+      text += `• *Ответственный по стажировке:* ${
+        cand.internship_admin_name || "не указан"
+      }\n`;
+
+      if (cand.decline_reason) {
+        text += `• *Причина отказа:* ${cand.decline_reason}\n`;
+      }
+
+      text += "\n";
     }
-
-    text += "\n";
   }
 
   // Кнопки
   const rows = [];
   // Если мы открыли кандидатскую карточку через меню карточек,
+
+  // --- SUBSCREEN: настройки стажёра ---
+  if (options.internSubscreen === "settings") {
+    rows.push([
+      Markup.button.callback(
+        "✏️ Изменить карточку",
+        `lk_intern_settings_edit_${cand.id}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        "❌ Отказать стажёру",
+        `lk_intern_settings_decline_${cand.id}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        "📋 Открыть другую карточку",
+        `lk_internship_open_cards_${cand.id}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад к карточке",
+        `lk_intern_settings_back_${cand.id}`
+      ),
+    ]);
+
+    const kb = Markup.inlineKeyboard(rows);
+
+    // доставляем карточку с текущим текстом, но с новым меню настроек
+    if (!deliverFn) {
+      if (edit && ctx.updateType === "callback_query") {
+        await ctx
+          .editMessageText(text, { ...kb, parse_mode: "Markdown" })
+
+          .catch(() => {});
+      } else {
+        await ctx.reply(text, { ...kb, parse_mode: "Markdown" });
+      }
+      return;
+    }
+
+    await deliverFn(
+      ctx,
+      { text, extra: { ...kb, parse_mode: "Markdown" } },
+      { edit }
+    );
+
+    return;
+  }
+
   // и меню сейчас раскрыто — показываем именно меню (2 строки).
   const cardsExpanded = isTraineeCardsExpanded(ctx.from.id);
   const viewMode = options.cardsViewMode || "trainee";
@@ -522,7 +638,11 @@ FROM candidates c
             : Number(mentorTgIdRaw);
 
         const isMentor =
-          Number.isFinite(mentorTgId) && Number(ctx.from.id) === mentorTgId;
+          isAdmin &&
+          // если назначен конкретный наставник — пускаем только его
+          (cand.internship_admin_id
+            ? me.id === cand.internship_admin_id
+            : true);
 
         // 1) Перейти к обучению / идёт обучение
         if (activeInternshipSession) {
@@ -551,52 +671,35 @@ FROM candidates c
           }
         } else {
           // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
-          if (isMentor) {
+          // Итоговая карточка: можно назначить следующую стажировку (даже если ещё не назначена)
+          if (!activeInternshipSession) {
             rows.push([
               Markup.button.callback(
-                "▶️ начать стажировку",
-                `lk_cand_start_intern_${cand.id}`
+                "🗓 назначить стажировку",
+                `lk_cand_invite_${cand.id}`
               ),
             ]);
+
+            // если следующая стажировка уже назначена — наставник может начать
+            if (cand.internship_date && isMentor) {
+              rows.push([
+                Markup.button.callback(
+                  "▶️ начать стажировку",
+                  `lk_cand_start_intern_${cand.id}`
+                ),
+              ]);
+            }
           }
-          // для остальных — ничего
         }
 
-        // 2) 📊 успеваемость (заглушка) — как у сотрудника
+        // 2) 📊 успеваемость (заглушка-экран)
+
         rows.push([
           Markup.button.callback(
             "📊 успеваемость",
             `lk_intern_progress_stub_${cand.id}`
           ),
         ]);
-
-        // 3) 🌱 данные стажировок
-        rows.push([
-          Markup.button.callback(
-            "🌱 данные стажировок",
-            `lk_internship_data_${cand.id}`
-          ),
-        ]);
-
-        // меню скрыто — обычные кнопки стажёра
-
-        // 4) 📋 открыть другую карточку (переключатель)
-        rows.push([
-          Markup.button.callback(
-            "📋 открыть другую карточку",
-            `lk_internship_open_cards_${cand.id}`
-          ),
-        ]);
-
-        // (пока) отказ стажёру — только если НЕ идёт процесс (по твоей логике заглушка)
-        if (!activeInternshipSession) {
-          rows.push([
-            Markup.button.callback(
-              "❌ отказать стажёру",
-              `lk_internship_decline_stub_${cand.id}`
-            ),
-          ]);
-        }
       } else {
         // Если это кандидатская карточка, открытая через "открыть другую карточку" (этап пройден),
         // то не показываем "начать стажировку/отказать" — оставляем только переходы.
@@ -654,12 +757,18 @@ FROM candidates c
       }
     }
   }
+
   // Общие кнопки
   rows.push([
-    Markup.button.callback("⚙️ Настройки", `lk_cand_settings_${cand.id}`),
+    isTraineeMode
+      ? Markup.button.callback("⚙️ настройки", `lk_intern_settings_${cand.id}`)
+      : Markup.button.callback("⚙️ Настройки", `lk_cand_settings_${cand.id}`),
   ]);
   rows.push([
-    options.backTo === "interns"
+    // если карточка сейчас в режиме стажёра — всегда возвращаем "к стажёрам"
+    isTraineeMode
+      ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
+      : options.backTo === "interns"
       ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
       : Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
   ]);
@@ -727,6 +836,7 @@ FROM candidates c
 // регистрируем хендлеры, связанные с карточкой
 function registerCandidateCard(bot, ensureUser, logError, deliver) {
   deliverFn = deliver;
+  ensureUserFn = ensureUser;
 
   // 📋 открыть другую карточку -> раскрываем меню карточек (используем общий toggle)
   bot.action(/^lk_internship_open_cards_(\d+)$/, async (ctx) => {
@@ -760,7 +870,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
   bot.action(/^lk_internship_toggle_cards_(\d+)$/, async (ctx) => {
     try {
       const candidateId = Number(ctx.match[1]);
-      const expandedNow = toggleTraineeCardsExpanded(ctx.from.id);
+      toggleTraineeCardsExpanded(ctx.from.id);
 
       await ctx.answerCbQuery().catch(() => {});
 
@@ -835,13 +945,121 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   );
 
+  // 📊 успеваемость (экран-заглушка, внутри кнопка 🌱 данные стажировок)
   bot.action(/^lk_intern_progress_stub_(\d+)$/, async (ctx) => {
     try {
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const text =
+        "📊 *Успеваемость*\n\n" + "Данные об успеваемости добавим позже.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🌱 данные стажировок",
+            `lk_internship_data_${candidateId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Назад к карточке",
+            `lk_intern_progress_back_${candidateId}`
+          ),
+        ],
+      ]);
+
       await ctx
-        .answerCbQuery("Успеваемость — добавим позже", { show_alert: false })
-        .catch(() => {});
+        .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+        .catch(async () => {
+          await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+        });
     } catch (err) {
       logError("lk_intern_progress_stub", err);
+    }
+  });
+
+  // back из экрана "успеваемость" -> карточка стажёра
+  bot.action(/^lk_intern_progress_back_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+      });
+    } catch (err) {
+      logError("lk_intern_progress_back", err);
+    }
+  });
+
+  // ⚙️ Настройки стажёра (отдельный экран)
+  bot.action(/^lk_intern_settings_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+        internSubscreen: "settings",
+      });
+    } catch (err) {
+      logError("lk_intern_settings", err);
+    }
+  });
+
+  // ✏️ Изменить карточку (включаем режим изменения и показываем старые кнопки редактирования)
+  bot.action(/^lk_intern_settings_edit_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      internEditStates.set(ctx.from.id, candidateId);
+      const kb0 = await buildEditSectionsKeyboard(candidateId);
+
+      // заменим последнюю кнопку "назад" на возврат в меню стажёрских настроек
+      const rows = kb0.reply_markup.inline_keyboard;
+      rows[rows.length - 1] = [
+        Markup.button.callback(
+          "⬅️ Назад",
+          `lk_intern_settings_back_${candidateId}`
+        ),
+      ];
+      const kb = Markup.inlineKeyboard(rows);
+
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+        keyboardOverride: kb,
+        editMode: true,
+      });
+    } catch (err) {
+      logError("lk_intern_settings_edit", err);
+    }
+    // ничего дополнительно не делаем
+  });
+
+  // ❌ Отказать стажёру (пока заглушка)
+  bot.action(/^lk_intern_settings_decline_(\d+)$/, async (ctx) => {
+    try {
+      await ctx
+        .answerCbQuery("Отказ стажёру — добавим позже", { show_alert: false })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_intern_settings_decline", err);
+    }
+  });
+
+  // ⬅️ Назад из настроек -> карточка стажёра
+  bot.action(/^lk_intern_settings_back_(\d+)$/, async (ctx) => {
+    try {
+      const candidateId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+      });
+    } catch (err) {
+      logError("lk_intern_settings_back", err);
     }
   });
 
@@ -866,6 +1084,64 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
+  async function buildEditSectionsKeyboard(candidateId) {
+    const r = await pool.query(`SELECT status FROM candidates WHERE id = $1`, [
+      candidateId,
+    ]);
+    if (!r.rows.length)
+      return Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            `lk_cand_settings_back_${candidateId}`
+          ),
+        ],
+      ]);
+
+    const status = r.rows[0].status;
+    const rows = [];
+
+    rows.push([
+      Markup.button.callback(
+        "Общая информация (изменить)",
+        `lk_cand_edit_common_${candidateId}`
+      ),
+    ]);
+
+    if (status === "invited") {
+      rows.push([
+        Markup.button.callback(
+          "О собеседовании (изменить)",
+          `lk_cand_edit_interview_${candidateId}`
+        ),
+      ]);
+    } else if (status === "internship_invited" || status === "intern") {
+      rows.push([
+        Markup.button.callback(
+          "О стажировке (изменить)",
+          `lk_cand_edit_internship_${candidateId}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "Другое (изменить)",
+        `lk_cand_settings_other_${candidateId}`
+      ),
+    ]);
+
+    // универсальный "назад": для стажёра будем использовать lk_intern_settings_back
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        `lk_cand_settings_back_${candidateId}`
+      ),
+    ]);
+
+    return Markup.inlineKeyboard(rows);
+  }
+
   // меню "Настройки" в карточке
   bot.action(/^lk_cand_settings_(\d+)$/, async (ctx) => {
     try {
@@ -881,57 +1157,8 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         `SELECT status FROM candidates WHERE id = $1`,
         [candidateId]
       );
-      if (!r.rows.length) return;
 
-      const status = r.rows[0].status;
-
-      const rows = [];
-
-      // 1) Общая информация (переиспользуем существующий редактор)
-      rows.push([
-        Markup.button.callback(
-          "Общая информация (изменить)",
-          `lk_cand_edit_common_${candidateId}`
-        ),
-      ]);
-
-      // 2) Условная кнопка
-      if (status === "invited") {
-        rows.push([
-          Markup.button.callback(
-            "О собеседовании (изменить)",
-            `lk_cand_edit_interview_${candidateId}`
-          ),
-        ]);
-      } else if (status === "internship_invited") {
-        rows.push([
-          Markup.button.callback(
-            "О стажировке (изменить)",
-            `lk_cand_edit_internship_${candidateId}`
-          ),
-        ]);
-      }
-      // если status === "interviewed" — ничего не добавляем (как ты и просил)
-
-      // 3) Другие (пока заглушка)
-      rows.push([
-        Markup.button.callback(
-          "Другое (изменить)",
-          `lk_cand_settings_other_${candidateId}`
-        ),
-      ]);
-
-      // Назад в обычные кнопки карточки
-      rows.push([
-        Markup.button.callback(
-          "⬅️ Назад",
-          `lk_cand_settings_back_${candidateId}`
-        ),
-      ]);
-
-      const kb = Markup.inlineKeyboard(rows);
-
-      // ✅ текст карточки оставляем, меняем только кнопки
+      const kb = await buildEditSectionsKeyboard(candidateId);
       await showCandidateCardLk(ctx, candidateId, {
         edit: true,
         keyboardOverride: kb,
@@ -1076,11 +1303,271 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
   });
 
   // клик по завершённому дню — экран-заглушка дня
+  // клик по завершённому дню — экран деталей дня стажировки
   bot.action(/^lk_internship_day_(\d+)_(\d+)$/, async (ctx) => {
     try {
       const candId = Number(ctx.match[1]);
-      const day = Number(ctx.match[2]);
+      const dayNumber = Number(ctx.match[2]);
       await ctx.answerCbQuery().catch(() => {});
+
+      // 1) кандидат + привязанный user_id
+      const candRes = await pool.query(
+        `
+  SELECT
+    c.*,
+    u.id       AS lk_user_id,
+    u.username AS lk_username
+  FROM candidates c
+  LEFT JOIN users u ON u.candidate_id = c.id
+  WHERE c.id = $1
+  LIMIT 1
+  `,
+        [candId]
+      );
+
+      if (!candRes.rows.length) {
+        await ctx.reply("Кандидат не найден.");
+        return;
+      }
+
+      const cand = candRes.rows[0];
+      const userId = cand.lk_user_id;
+
+      if (!userId) {
+        await ctx.reply("⚠️ Пользователь не привязан.");
+        return;
+      }
+
+      // 2) session выбранного дня
+      const sesRes = await pool.query(
+        `
+      SELECT
+  s.*,
+  tp.title AS trade_point_title,
+  mentor.full_name AS mentor_name,
+  mentor.username AS mentor_username,
+  mentor.telegram_id AS mentor_tg_id
+FROM internship_sessions s
+LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+LEFT JOIN users mentor ON mentor.id = s.started_by
+WHERE s.user_id = $1
+  AND s.day_number = $2
+  AND s.is_canceled = FALSE
+ORDER BY s.id DESC
+LIMIT 1
+        `,
+        [userId, dayNumber]
+      );
+
+      if (!sesRes.rows.length) {
+        await ctx.reply("День стажировки не найден.");
+        return;
+      }
+
+      const session = sesRes.rows[0];
+
+      // 3) Комментарии по сессии
+      const comRes = await pool.query(
+        `
+        SELECT
+          c.id,
+          c.comment,
+          c.created_at,
+          u.full_name AS author_name
+        FROM internship_session_comments c
+        LEFT JOIN users u ON u.id = c.author_id
+        WHERE c.session_id = $1
+        ORDER BY c.id ASC
+        `,
+        [session.id]
+      );
+
+      // 4) Общий % изученного (накопительно по всем дням)
+      const totalStepsRes = await pool.query(
+        `SELECT COUNT(*)::int AS cnt FROM internship_steps`
+      );
+      const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
+
+      const passedAllRes = await pool.query(
+        `
+        SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+        FROM internship_step_results r
+        JOIN internship_sessions s ON s.id = r.session_id
+        WHERE s.user_id = $1
+          AND s.is_canceled = FALSE
+          AND r.is_passed = TRUE
+        `,
+        [userId]
+      );
+      const passedAll = passedAllRes.rows[0]?.cnt || 0;
+
+      const overallPercent =
+        totalSteps > 0 ? Math.round((passedAll / totalSteps) * 100) : 0;
+
+      // 5) % по плану дня N
+      // строим мапу day_number -> planned step_ids
+      const sectionsRes = await pool.query(
+        `
+        SELECT
+          p.order_index AS part_order,
+          s.id,
+          s.title,
+          s.duration_days,
+          s.order_index
+        FROM internship_sections s
+        JOIN internship_parts p ON p.id = s.part_id
+        WHERE s.duration_days IS NOT NULL
+        ORDER BY p.order_index ASC, s.order_index ASC
+        `
+      );
+
+      const dayToSteps = new Map(); // day -> [step_id]
+      let cursorDay = 1;
+
+      for (const sec of sectionsRes.rows) {
+        const dur = Number(sec.duration_days || 0);
+        if (!dur || dur < 1) continue;
+
+        const stepsRes = await pool.query(
+          `
+          SELECT id
+          FROM internship_steps
+          WHERE section_id = $1
+          ORDER BY order_index ASC, id ASC
+          `,
+          [sec.id]
+        );
+        const stepIds = stepsRes.rows.map((r) => Number(r.id));
+
+        // делим шаги секции на dur частей (равномерно по order_index)
+        const k = dur;
+        const n = stepIds.length;
+        let idx = 0;
+
+        for (let i = 0; i < k; i++) {
+          const remaining = n - idx;
+          const remainingBuckets = k - i;
+          const take =
+            remainingBuckets > 0
+              ? Math.ceil(remaining / remainingBuckets)
+              : remaining;
+
+          const chunk = stepIds.slice(idx, idx + take);
+          idx += take;
+
+          const d = cursorDay;
+          const prev = dayToSteps.get(d) || [];
+          dayToSteps.set(d, prev.concat(chunk));
+
+          cursorDay += 1;
+        }
+      }
+
+      const plannedStepIds = (dayToSteps.get(dayNumber) || []).filter(Boolean);
+      const plannedTotal = plannedStepIds.length;
+
+      let plannedPassed = 0;
+      if (plannedTotal > 0) {
+        const passPlanRes = await pool.query(
+          `
+          SELECT COUNT(*)::int AS cnt
+          FROM internship_step_results
+          WHERE session_id = $1
+            AND is_passed = TRUE
+            AND step_id = ANY($2::int[])
+          `,
+          [session.id, plannedStepIds]
+        );
+        plannedPassed = passPlanRes.rows[0]?.cnt || 0;
+      }
+
+      const planPercent =
+        plannedTotal > 0 ? Math.round((plannedPassed / plannedTotal) * 100) : 0;
+
+      const planIcon = planPercent >= 100 ? "📈" : "📉";
+
+      // 6) План времени (только для дня 1)
+      let planTimeText = "не указано";
+      if (
+        dayNumber === 1 &&
+        cand.internship_time_from &&
+        cand.internship_time_to
+      ) {
+        planTimeText = `с ${String(cand.internship_time_from).slice(
+          0,
+          5
+        )} до ${String(cand.internship_time_to).slice(0, 5)}`;
+      }
+
+      // 7) Итог времени
+      const fmtTime = (d) =>
+        d
+          ? new Date(d).toLocaleTimeString("ru-RU", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "не указано";
+
+      const fmtDate = (d) =>
+        d
+          ? new Date(d).toLocaleDateString("ru-RU", {
+              day: "2-digit",
+              month: "2-digit",
+            })
+          : "не указано";
+
+      const factFrom = session.started_at
+        ? fmtTime(session.started_at)
+        : "не указано";
+      const factTo = session.finished_at
+        ? fmtTime(session.finished_at)
+        : "не указано";
+
+      const dateLabel = session.started_at
+        ? `${fmtDate(session.started_at)}`
+        : "не указано";
+
+      // 8) Наставник строка (username если есть, иначе телефон)
+      let mentorLine = session.mentor_name || "не указан";
+      if (session.mentor_username) {
+        mentorLine += ` (@${session.mentor_username})`;
+      } else if (session.mentor_tg_id) {
+        mentorLine += ` (tg_id: ${session.mentor_tg_id})`;
+      }
+
+      // 9) Общая инфа (username если есть, иначе телефон)
+      const agePart = cand.age ? ` (${cand.age})` : "";
+      const who = cand.lk_username
+        ? `@${cand.lk_username}`
+        : cand.phone
+        ? cand.phone
+        : "—";
+
+      let text =
+        `🔹 *Общая информация*\n` +
+        `Имя: ${cand.name || "—"}${agePart} ${who}\n` +
+        "────────────────────────────────\n" +
+        `🔹 *О стажировке ${dayNumber}*\n` +
+        `• *Дата стажировки:* ${dateLabel}\n\n` +
+        `*Время стажировки:*\n` +
+        `  • *план:* ${planTimeText}\n` +
+        `  • *итог:* с ${factFrom} до ${factTo}\n\n` +
+        `• *Место стажировки:* ${session.trade_point_title || "не указано"}\n` +
+        `• *Ответственный по стажировке:* ${mentorLine}\n\n` +
+        `*Успеваемость стажировки:*\n` +
+        ` • *общий процент изученного:* ${overallPercent}%\n` +
+        ` • *процент по плану дня ${dayNumber}:* ${planPercent}% ${planIcon}\n\n` +
+        `*Комментарии по стажировке ${dayNumber}:*\n`;
+
+      if (!comRes.rows.length) {
+        text += "  — пока нет\n";
+      } else {
+        let i = 1;
+        for (const c of comRes.rows) {
+          text += `  ${i}. ${c.comment}\n`;
+          i += 1;
+        }
+      }
 
       const kb = Markup.inlineKeyboard([
         [
@@ -1091,12 +1578,17 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         ],
       ]);
 
-      await ctx.editMessageText(
-        `🌱 Данные стажировки — ${day}дн\n\n(здесь позже появятся данные по дню)`,
-        { ...kb, parse_mode: "Markdown" }
+      await deliver(
+        ctx,
+        {
+          text,
+          extra: { ...kb, parse_mode: "Markdown" },
+        },
+        { edit: true }
       );
     } catch (err) {
       logError("lk_internship_day", err);
+      await ctx.reply("⚠️ Ошибка. Попробуйте позже.");
     }
   });
 

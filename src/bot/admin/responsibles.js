@@ -36,7 +36,10 @@ async function loadResp(tradePointId, kind) {
     SELECT ra.id, ra.user_id, COALESCE(u.full_name,'Без имени') AS full_name
     FROM responsible_assignments ra
     JOIN users u ON u.id = ra.user_id
-    WHERE ra.trade_point_id=$1 AND ra.kind=$2 AND ra.is_active=TRUE
+    WHERE ra.trade_point_id IS NOT DISTINCT FROM $1
+  AND ra.kind=$2
+  AND ra.is_active=TRUE
+
     ORDER BY u.full_name NULLS LAST, ra.id
     `,
     [tradePointId, kind]
@@ -58,9 +61,10 @@ async function loadUsersForPick(q) {
 }
 
 function kindLabel(kind) {
-  return kind === "uncompleted_tasks"
-    ? "✅ Невыполненные задачи"
-    : "📝 Жалобы на прошлую смену";
+  if (kind === "uncompleted_tasks") return "📝 Невыполненные задачи";
+  if (kind === "complaints") return "☁  Жалобы на прошлую смену";
+  if (kind === "cash_diff") return "💸 Контроль недостач/излишек";
+  return "—";
 }
 
 async function showRoot(ctx) {
@@ -68,7 +72,8 @@ async function showRoot(ctx) {
     "👤 <b>Назначение ответственных</b>\n\n" +
     "Здесь назначаются сотрудники, которые будут получать уведомления:\n" +
     "• если смена закрыта с невыполненными задачами\n" +
-    "• если бариста оставил замечание по прошлой смене\n\n" +
+    "• если бариста оставил замечание по прошлой смене\n" +
+    "• если выявлена недостача/излишек по кассе\n\n" +
     "Выберите тип:";
   const kb = Markup.inlineKeyboard([
     [
@@ -81,6 +86,12 @@ async function showRoot(ctx) {
       {
         text: "💬 по жалобам на прошлую смену",
         callback_data: "admin_resp_kind_complaints",
+      },
+    ],
+    [
+      {
+        text: "💸 контроль недостач/излишек",
+        callback_data: "admin_resp_kind_cash_diff",
       },
     ],
     [
@@ -98,10 +109,18 @@ async function showRoot(ctx) {
 async function showPickPoint(ctx, kind) {
   const points = await loadPoints();
   const text = `${kindLabel(kind)}\n\n📍 Выберите точку:`;
+
   const rows = points.map((p) => [
     Markup.button.callback(p.title, `admin_resp_point_${kind}_${p.id}`),
   ]);
+
+  // "Все точки" (trade_point_id = NULL)
+  rows.push([
+    Markup.button.callback("🏬 Все точки", `admin_resp_point_${kind}_all`),
+  ]);
+
   rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
+
   await deliver(
     ctx,
     { text, extra: Markup.inlineKeyboard(rows) },
@@ -110,11 +129,15 @@ async function showPickPoint(ctx, kind) {
 }
 
 async function showPointCard(ctx, kind, tradePointId) {
-  const tp = await pool.query(
-    `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
-    [tradePointId]
-  );
-  const title = tp.rows[0]?.title || `#${tradePointId}`;
+  let title = "Все точки";
+
+  if (tradePointId !== null) {
+    const tp = await pool.query(
+      `SELECT title FROM trade_points WHERE id=$1 LIMIT 1`,
+      [tradePointId]
+    );
+    title = tp.rows[0]?.title || `#${tradePointId}`;
+  }
 
   const resp = await loadResp(tradePointId, kind);
 
@@ -133,22 +156,27 @@ async function showPointCard(ctx, kind, tradePointId) {
 
   if (resp.length) {
     // кнопки удаления 1..N
+    const tpKey = tradePointId === null ? "all" : String(tradePointId);
+
     const btns = resp.map((r, idx) =>
       Markup.button.callback(
         `${idx + 1}`,
-        `admin_resp_del_${r.id}_${kind}_${tradePointId}`
+        `admin_resp_del_${r.id}_${kind}_${tpKey}`
       )
     );
     for (let i = 0; i < btns.length; i += 5) kb.push(btns.slice(i, i + 5));
     kb.push([{ text: "🗑 удалить (нажмите номер)", callback_data: "noop" }]);
   }
 
+  const tpKey = tradePointId === null ? "all" : String(tradePointId);
+
   kb.push([
     {
       text: "➕ Назначить ответственного",
-      callback_data: `admin_resp_add_${kind}_${tradePointId}`,
+      callback_data: `admin_resp_add_${kind}_${tpKey}`,
     },
   ]);
+
   kb.push([{ text: "⬅️ Назад", callback_data: `admin_resp_kind_${kind}` }]);
 
   await deliver(
@@ -169,11 +197,10 @@ async function showPickUser(ctx, kind, tradePointId) {
   const rows = users.map((u) => [
     Markup.button.callback(u.full_name, `admin_resp_pick_${u.id}`),
   ]);
+
+  const backTp = tradePointId === null ? "all" : String(tradePointId);
   rows.push([
-    Markup.button.callback(
-      "⬅️ Назад",
-      `admin_resp_point_${kind}_${tradePointId}`
-    ),
+    Markup.button.callback("⬅️ Назад", `admin_resp_point_${kind}_${backTp}`),
   ]);
 
   await deliver(
@@ -197,7 +224,7 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   });
 
   bot.action(
-    /^admin_resp_kind_(uncompleted_tasks|complaints)$/,
+    /^admin_resp_kind_(uncompleted_tasks|complaints|cash_diff)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
@@ -213,14 +240,15 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   );
 
   bot.action(
-    /^admin_resp_point_(uncompleted_tasks|complaints)_(\d+)$/,
+    /^admin_resp_point_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
         const user = await ensureUser(ctx);
         if (!isAdmin(user)) return;
         const kind = ctx.match[1];
-        const tpId = Number(ctx.match[2]);
+        const raw = ctx.match[2];
+        const tpId = raw === "all" ? null : Number(raw);
         stClear(ctx.from.id);
         await showPointCard(ctx, kind, tpId);
       } catch (e) {
@@ -230,14 +258,15 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   );
 
   bot.action(
-    /^admin_resp_add_(uncompleted_tasks|complaints)_(\d+)$/,
+    /^admin_resp_add_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
         const user = await ensureUser(ctx);
         if (!isAdmin(user)) return;
         const kind = ctx.match[1];
-        const tpId = Number(ctx.match[2]);
+        const raw = ctx.match[2];
+        const tpId = raw === "all" ? null : Number(raw);
         await showPickUser(ctx, kind, tpId);
       } catch (e) {
         logError("admin_resp_add", e);
@@ -258,12 +287,19 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
 
       await pool.query(
         `
-        INSERT INTO responsible_assignments (trade_point_id, kind, user_id, is_active)
-        VALUES ($1,$2,$3,TRUE)
-        ON CONFLICT (trade_point_id, kind, user_id)
-        DO UPDATE SET is_active=TRUE
-        `,
-        [Number(st.tradePointId), st.kind, pickedUserId]
+  WITH up AS (
+    UPDATE responsible_assignments
+    SET is_active = TRUE
+    WHERE trade_point_id IS NOT DISTINCT FROM $1
+      AND kind = $2
+      AND user_id = $3
+    RETURNING id
+  )
+  INSERT INTO responsible_assignments (trade_point_id, kind, user_id, is_active)
+  SELECT $1, $2, $3, TRUE
+  WHERE NOT EXISTS (SELECT 1 FROM up)
+  `,
+        [st.tradePointId, st.kind, pickedUserId]
       );
 
       stClear(ctx.from.id);
@@ -275,7 +311,7 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   });
 
   bot.action(
-    /^admin_resp_del_(\d+)_(uncompleted_tasks|complaints)_(\d+)$/,
+    /^admin_resp_del_(\d+)_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
@@ -284,7 +320,8 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
 
         const id = Number(ctx.match[1]);
         const kind = ctx.match[2];
-        const tpId = Number(ctx.match[3]);
+        const raw = ctx.match[3];
+        const tpId = raw === "all" ? null : Number(raw);
 
         await pool.query(
           `UPDATE responsible_assignments SET is_active=FALSE WHERE id=$1`,

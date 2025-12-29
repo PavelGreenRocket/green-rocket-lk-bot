@@ -46,6 +46,30 @@ function fmtMoneyRub(v) {
   return `${new Intl.NumberFormat("ru-RU").format(n)} ₽`;
 }
 
+function fmtDeltaSign(diff) {
+  const n = Number(diff);
+  if (!Number.isFinite(n)) return "(?)";
+  if (Math.abs(n) < 0.000001) return "(=)";
+  const abs = Math.abs(n);
+  // без ₽, просто число (как ты просил)
+  const s =
+    abs % 1 === 0 ? String(Math.trunc(abs)) : String(abs).replace(".", ",");
+  return n > 0 ? `(+${s})` : `(-${s})`;
+}
+
+function calcExpectedEndCash(row) {
+  const opening = Number(row.opening_cash_amount);
+  const salesCash = Number(row.sales_cash);
+  if (!Number.isFinite(opening) || !Number.isFinite(salesCash)) return null;
+
+  const was = row.was_cash_collection === true;
+  const inc = was ? Number(row.cash_collection_amount) : 0;
+  const incOk = was ? Number.isFinite(inc) : true;
+  if (!incOk) return null;
+
+  return opening + salesCash - (was ? inc : 0);
+}
+
 function userLabelCash(row, { admin }) {
   const name = row.full_name || "—";
 
@@ -62,7 +86,8 @@ function userLabelCash(row, { admin }) {
 function renderCashCard(row, { admin, detailed, opening }) {
   const lines = [];
   if (admin && detailed) {
-    lines.push(`<b>Смена:</b> <code>${row.shift_id}</code>`);
+    const shiftType = detailed ? "🔻Смена:" : "Смена:";
+    lines.push(`<b>${shiftType}</b> <code>${row.shift_id}</code>`);
 
     if (row.edited_at) {
       const d = new Date(row.edited_at);
@@ -80,11 +105,10 @@ function renderCashCard(row, { admin, detailed, opening }) {
 
       // формат: "изменено: 28.12.25 Павел (@user)" — курсивом
       const tail = [when, name, who].filter(Boolean).join(" ");
-      lines.push(`<i>изменено: ${tail}</i>`);
-      lines.push("");
+      lines.push(`      <i>изменено: ${tail}</i>`);
     }
-    lines.push(`<b>изменить:</b> /edit_${row.shift_id}`);
-    lines.push(`<b>удалить:</b> /delete_${row.shift_id}`);
+    lines.push(`      <b>изменить:</b> /edit_${row.shift_id}`);
+    lines.push(`      <b>удалить:</b> /delete_${row.shift_id}`);
     lines.push(""); // пустая строка перед "Сотрудник"
   }
 
@@ -104,28 +128,60 @@ function renderCashCard(row, { admin, detailed, opening }) {
   }
 
   lines.push("");
-  if (admin && detailed && opening && opening.cash_in_drawer_open != null) {
-    lines.push("");
-    lines.push("<u><b>Открытие смены</b></u>");
+  // ─────────────────────────────
+  // Детализация + дельты по кассе
+  // ─────────────────────────────
+
+  const openingCash = Number(row.opening_cash_amount);
+  const prevEnd = Number(row.prev_cash_in_drawer);
+
+  // Δ к началу смены (opening - prevEnd) — показываем ТОЛЬКО при detailed
+  const startDelta =
+    Number.isFinite(openingCash) && Number.isFinite(prevEnd)
+      ? fmtDeltaSign(openingCash - prevEnd)
+      : "(?)";
+
+  // Δ к концу смены (cash_in_drawer - expected_end_cash) — показываем ВСЕГДА
+  const expectedEnd = calcExpectedEndCash(row);
+  const endDelta =
+    Number.isFinite(expectedEnd) && Number.isFinite(Number(row.cash_in_drawer))
+      ? fmtDeltaSign(Number(row.cash_in_drawer) - expectedEnd)
+      : "(?)";
+
+  if (detailed) {
+    lines.push(`🔷 <u><b>Начало смены:</b></u>`);
     lines.push(
-      `<b>Наличные в кассе:</b> ${fmtMoneyRub(opening.cash_in_drawer_open)}`
+      `В кассе: ${fmtMoneyRub(row.opening_cash_amount)} ${startDelta}`
     );
     lines.push("");
-    lines.push("<u><b>Закрытие смены</b></u>");
   }
+  const shiftEnd = detailed
+    ? "🔷 <u><b>Конец смены:</b></u>"
+    : "<b>Конец смены:</b>";
 
+  lines.push(shiftEnd);
   lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
   lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
-  lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)}`);
+  lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)} ${endDelta}`);
 
   lines.push("");
 
   lines.push(`<b>Чеков:</b> ${row.checks_count ?? "-"}`);
 
-  if (row.was_cash_collection) {
-    lines.push(`<b>Инкассация:</b> ${fmtMoneyRub(row.cash_collection_amount)}`);
+  const ccName = row.cash_collection_by_name ? row.cash_collection_by_name : "";
+  const ccUser = row.cash_collection_by_username
+    ? `(@${row.cash_collection_by_username})`
+    : "";
+  const ccTail = [ccName, ccUser].filter(Boolean).join(" ");
+
+  if (row.was_cash_collection === true) {
+    lines.push(
+      `<b>Инкассация:</b> ${fmtMoneyRub(row.cash_collection_amount)}${
+        ccTail ? ` ${ccTail}` : ""
+      }`
+    );
   } else if (row.was_cash_collection === false) {
-    lines.push(`<b>Инкассация:</b> НЕТ`);
+    lines.push(`<b>Инкассация:</b> НЕТ${ccTail ? ` ${ccTail}` : ""}`);
   } else {
     lines.push(`<b>Инкассация:</b> -`);
   }
@@ -397,13 +453,15 @@ function renderFormatKeyboard(st) {
     ),
   ];
 
-  // "Подробно" показываем рядом с "Кассовый"
-  firstRow.push(
-    Markup.button.callback(
-      `${detMark}Подробно`,
-      "lk_reports_cash_detail_toggle"
-    )
-  );
+  // "Подробно" показываем ТОЛЬКО в кассовом формате
+  if ((st.format || "cash") === "cash") {
+    firstRow.push(
+      Markup.button.callback(
+        `${detMark}Подробно`,
+        "lk_reports_cash_detail_toggle"
+      )
+    );
+  }
 
   const buttons = [
     firstRow,
@@ -548,6 +606,9 @@ async function loadReportsPage({ page, filters, limit }) {
     s.trade_point_id,
     s.opened_at,
     s.closed_at,
+     s.cash_amount AS opening_cash_amount,
+      prev.prev_cash_in_drawer,
+    
     tp.title AS trade_point_title,
 
     u.full_name,
@@ -577,6 +638,19 @@ async function loadReportsPage({ page, filters, limit }) {
   LEFT JOIN users cu ON cu.id = sc.cash_collection_by_user_id
   LEFT JOIN users eu ON eu.id = sc.edited_by_user_id
   LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+      LEFT JOIN LATERAL (
+      SELECT sc2.cash_in_drawer AS prev_cash_in_drawer
+      FROM shifts s2
+      JOIN shift_closings sc2 ON sc2.shift_id = s2.id
+      WHERE s2.trade_point_id = s.trade_point_id
+        AND sc2.deleted_at IS NULL
+        AND s2.closed_at IS NOT NULL
+        AND s.opened_at IS NOT NULL
+        AND s2.closed_at < s.opened_at
+      ORDER BY s2.closed_at DESC, s2.id DESC
+      LIMIT 1
+    ) prev ON TRUE
+
 
   WHERE ${whereSql}
     AND sc.deleted_at IS NULL
@@ -592,6 +666,8 @@ async function loadReportsPage({ page, filters, limit }) {
       s.trade_point_id,
       s.opened_at,
       s.closed_at,
+       s.cash_amount AS opening_cash_amount,
+      prev.prev_cash_in_drawer,
       tp.title AS trade_point_title,
 
       u.full_name,
@@ -614,6 +690,17 @@ async function loadReportsPage({ page, filters, limit }) {
     JOIN users u ON u.id = s.user_id
     LEFT JOIN users cu ON cu.id = sc.cash_collection_by_user_id
     LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+    LEFT JOIN LATERAL (
+      SELECT sc2.cash_in_drawer AS prev_cash_in_drawer
+      FROM shifts s2
+      JOIN shift_closings sc2 ON sc2.shift_id = s2.id
+      WHERE s2.trade_point_id = s.trade_point_id
+        AND s2.closed_at IS NOT NULL
+        AND s.opened_at IS NOT NULL
+        AND s2.closed_at < s.opened_at
+      ORDER BY s2.closed_at DESC, s2.id DESC
+      LIMIT 1
+    ) prev ON TRUE
 
     WHERE ${whereSql}
 
@@ -786,7 +873,7 @@ function formatReportCard(row, idx, { admin, elements, selectedMark = "" }) {
     lines.push(`Чеков: ${row.checks_count ?? "-"}`);
   }
 
-  return lines.join("\n");
+  return lines.join("");
 }
 
 function defaultElementsFor(user) {
@@ -1029,9 +1116,9 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       missed > 0 ? `<b>Пропущенных дней:</b> ${missed}\n` : "",
       "",
       `<u><b>Финансы</b></u>`,
-      `• <b>Продажи:</b> ${fmtRub0(sumSales)}`,
-      `• <b>Валовая прибыль:</b> —`,
-      `• <b>Чистая прибыль:</b> —`,
+      `• <b>Продажи (ТО):</b> ${fmtRub0(sumSales)}`,
+      `• <b>Валовая прибыль (ВП):</b> —`,
+      `• <b>Чистая прибыль (ЧП):</b> —`,
       `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
       "",
       `\n<u><b>Поведение гостей</b></u>`,
@@ -2326,6 +2413,12 @@ async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
 // ───────────────────────────────────────────────────────────────
 function registerReports(bot, ensureUser, logError) {
   bot.action("lk_reports_cash_detail_toggle", async (ctx) => {
+    const st = getSt(ctx.from.id) || {};
+    if ((st.format || "cash") !== "cash") {
+      await ctx.answerCbQuery().catch(() => {});
+      return;
+    }
+
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
@@ -2498,7 +2591,11 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      setSt(ctx.from.id, { dateUi: { mode: "main" }, view: "list" });
+      setSt(ctx.from.id, {
+        dateUi: { mode: "main" },
+        view: "list",
+        dateUiEntry: "reports", // 👈 откуда открыли период
+      });
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_period_open", e);
@@ -2517,7 +2614,11 @@ function registerReports(bot, ensureUser, logError) {
     await ctx.answerCbQuery().catch(() => {});
     const user = await ensureUser(ctx);
     if (!user) return;
-    setSt(ctx.from.id, { dateUi: null });
+    setSt(ctx.from.id, {
+      dateUi: null,
+      dateUiEntry: null,
+      filterOpened: false,
+    });
     await showReportsList(ctx, user, { edit: true });
   });
 
@@ -2539,8 +2640,11 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-
-      setSt(ctx.from.id, { dateUi: { mode: "main" } });
+      setSt(ctx.from.id, {
+        dateUi: null,
+        dateUiEntry: null,
+        filterOpened: false,
+      });
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("date_points_back", e);
@@ -2879,7 +2983,8 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user || !isAdmin(user)) return;
-      setSt(ctx.from.id, { format: "analysis1", page: 0, formatUi: null });
+      setSt(ctx.from.id, { format: "analysis1", cashDetailed: false });
+
       await saveFormatSetting(user.id, "analysis1");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
@@ -2893,6 +2998,7 @@ function registerReports(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user || !isAdmin(user)) return;
       setSt(ctx.from.id, { format: "analysis2", page: 0, formatUi: null });
+
       await saveFormatSetting(user.id, "analysis2");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
@@ -2992,6 +3098,19 @@ function registerReports(bot, ensureUser, logError) {
     } catch (e) {
       logError("lk_reports_filter_toggle", e);
     }
+  });
+
+  // ───── STUBS (temporarily) ─────
+  bot.action("lk_reports_filter_workers", async (ctx) => {
+    await ctx
+      .answerCbQuery("В разработке.", { show_alert: true })
+      .catch(() => {});
+  });
+
+  bot.action("lk_reports_filter_elements", async (ctx) => {
+    await ctx
+      .answerCbQuery("В разработке.", { show_alert: true })
+      .catch(() => {});
   });
 
   // Filter: workers
@@ -3361,19 +3480,10 @@ function registerReports(bot, ensureUser, logError) {
     }
   });
 
-  // Delete mode (admin)
   bot.action("lk_reports_delete_mode", async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!user) return;
-      if (!isAdmin(user)) return toast(ctx, "Недоступно.");
-
-      setSt(ctx.from.id, { view: "delete", page: 0, delSelected: [] });
-      await showDeleteMode(ctx, user, { edit: true });
-    } catch (e) {
-      logError("lk_reports_delete_mode", e);
-    }
+    await ctx
+      .answerCbQuery("В разработке.", { show_alert: true })
+      .catch(() => {});
   });
 
   bot.action(/^lk_reports_del_(\d+)$/, async (ctx) => {
