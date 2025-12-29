@@ -385,6 +385,23 @@ async function startOrContinueClosing(ctx, user) {
     [active.id, user.id]
   );
 
+  // 2) после перевода в closing_in_progress можно проверить отклонение по кассе (close)
+  try {
+    const mod = await import("../cashDiffAlerts.js");
+    const checkCashDiffAndNotify =
+      mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+
+    if (typeof checkCashDiffAndNotify === "function") {
+      await checkCashDiffAndNotify({
+        shiftId: active.id, // <-- ВАЖНО: active.id
+        stage: "close",
+        actorUserId: user.id,
+      });
+    }
+  } catch (_) {
+    // не валим закрытие смены из-за уведомлений
+  }
+
   await ensureClosingRow(active.id);
 
   // поднимем шаг из БД
@@ -1449,7 +1466,7 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       await pool.query(
         `
         UPDATE shifts
-        SET status = 'closed',
+        SET status = 'closed',А
             closed_at = NOW()
         WHERE id = $1
       `,

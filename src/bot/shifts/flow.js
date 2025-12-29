@@ -362,10 +362,24 @@ function registerShiftFlow(bot, ensureUser, logError) {
         return;
       }
 
+      // 1) СНАЧАЛА сохраняем сумму открытия смены
       await pool.query(
         `UPDATE shifts SET cash_amount=$1 WHERE id=$2 AND user_id=$3`,
         [num, st.shiftId, user.id]
       );
+
+      // 2) И только потом считаем diff и уведомляем (через import, без require)
+      const mod = await import("../cashDiffAlerts.js");
+      const checkCashDiffAndNotify =
+        mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+
+      if (typeof checkCashDiffAndNotify === "function") {
+        await checkCashDiffAndNotify({
+          shiftId: st.shiftId,
+          stage: "open",
+          actorUserId: user.id,
+        });
+      }
 
       // запускаем регулируемый опрос
       const queue = await loadShiftQuestionsForUser(user, st.tradePointId);

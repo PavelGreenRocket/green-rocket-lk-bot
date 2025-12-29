@@ -510,7 +510,8 @@ async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
 
 async function loadInternsForAdmin(user, filters) {
   const params = [];
-  let where = "c.status = 'intern'";
+  let where =
+    "(c.status = 'intern' OR EXISTS (SELECT 1 FROM internship_sessions s WHERE s.user_id = u.id AND s.is_canceled = FALSE))";
 
   // у стажёров привязка к наставнику/админу идёт через internship_admin_id
   if (filters.scope === "personal") {
@@ -580,7 +581,8 @@ async function showInternsListLk(ctx, user, options = {}) {
 
   // ✅ стажёры — это candidates со статусом intern
   const params = [];
-  let where = "c.status = 'intern'";
+  let where =
+    "(c.status = 'intern' OR EXISTS (SELECT 1 FROM internship_sessions s WHERE s.user_id = u.id AND s.is_canceled = FALSE))";
 
   if (filters.scope === "personal") {
     params.push(user.id);
@@ -1153,10 +1155,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     }
   });
 
- bot.action("lk_add_intern", async (ctx) => {
-  await ctx.answerCbQuery("⏳ Добавление стажёров будет доступно позже");
-});
-
+  bot.action("lk_add_intern", async (ctx) => {
+    await ctx.answerCbQuery("⏳ Добавление стажёров будет доступно позже");
+  });
 
   bot.action("lk_add_intern_cancel", async (ctx) => {
     try {

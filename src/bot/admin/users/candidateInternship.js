@@ -1117,6 +1117,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         [candidateId]
       );
 
+      // очищаем "план" следующей стажировки: она стала фактом (internship_sessions)
       await pool.query(
         `
   UPDATE candidates

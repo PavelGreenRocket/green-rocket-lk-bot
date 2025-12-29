@@ -483,8 +483,8 @@ FROM candidates c
       (displayStatus === "internship_invited" || displayStatus === "intern")
     ) {
       text += "🔹 *О стажировке*\n";
-
-      if (cand.internship_date) {
+      // Вариант B: если следующая стажировка уже назначена — показываем её
+      if (isInternshipScheduled) {
         const dateLabel = formatDateWithWeekday(cand.internship_date);
         if (cand.internship_time_from && cand.internship_time_to) {
           text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(

@@ -622,6 +622,38 @@ async function saveShiftClosing(shiftId, patch, editedByUserId) {
     `UPDATE shift_closings SET ${fields.join(", ")} WHERE shift_id = $${i}`,
     vals
   );
+
+  await maybeNotifyCashDiffAfterEdit({
+    shiftId,
+    actorUserId: editedByUserId,
+    patch,
+  });
+}
+
+async function maybeNotifyCashDiffAfterEdit({ shiftId, actorUserId, patch }) {
+  try {
+    // уведомляем только если правили кассовые поля
+    const keys = Object.keys(patch || {});
+    const touched = keys.some((k) =>
+      [
+        "cash_in_drawer",
+        "sales_cash",
+        "was_cash_collection",
+        "cash_collection_amount",
+        "cash_collection_by_user_id",
+      ].includes(k)
+    );
+    if (!touched) return;
+
+    const mod = await import("../cashDiffAlerts.js");
+    const fn =
+      mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+    if (typeof fn !== "function") return;
+
+    await fn({ shiftId: Number(shiftId), stage: "close", actorUserId });
+  } catch (e) {
+    // не валим редактирование из-за уведомлений
+  }
 }
 
 async function saveShift(shiftId, patch) {
