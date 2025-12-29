@@ -245,7 +245,13 @@ FROM candidates c
   }
 
   const cand = res.rows[0];
-  
+
+  const isInternshipScheduled =
+    !!cand.internship_date &&
+    !!cand.internship_time_from &&
+    !!cand.internship_time_to &&
+    !!cand.internship_point_id &&
+    !!cand.internship_admin_id;
 
   const me = ensureUserFn ? await ensureUserFn(ctx) : null;
   const isAdmin = me && (me.role === "admin" || me.role === "super_admin");
@@ -451,7 +457,7 @@ FROM candidates c
       text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
 
       // Вариант B: если следующая стажировка уже назначена — показываем её
-      if (cand.internship_date) {
+      if (isInternshipScheduled) {
         const dateLabel = formatDateWithWeekday(cand.internship_date);
         if (cand.internship_time_from && cand.internship_time_to) {
           text += `*Следующая стажировка:*\n• ${dateLabel} (с ${cand.internship_time_from.slice(
@@ -670,25 +676,21 @@ FROM candidates c
             ]);
           }
         } else {
-          // стажировка ещё не начата (но есть завершённые) — наставнику можно начать следующую
-          // Итоговая карточка: можно назначить следующую стажировку (даже если ещё не назначена)
-          if (!activeInternshipSession) {
+          // Итоговая карточка: либо назначаем, либо начинаем (но не обе кнопки сразу)
+          if (!isInternshipScheduled) {
             rows.push([
               Markup.button.callback(
                 "🗓 назначить стажировку",
                 `lk_cand_invite_${cand.id}`
               ),
             ]);
-
-            // если следующая стажировка уже назначена — наставник может начать
-            if (cand.internship_date && isMentor) {
-              rows.push([
-                Markup.button.callback(
-                  "▶️ начать стажировку",
-                  `lk_cand_start_intern_${cand.id}`
-                ),
-              ]);
-            }
+          } else if (isMentor) {
+            rows.push([
+              Markup.button.callback(
+                "▶️ начать стажировку",
+                `lk_cand_start_intern_${cand.id}`
+              ),
+            ]);
           }
         }
 
@@ -1035,7 +1037,6 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     } catch (err) {
       logError("lk_intern_settings_edit", err);
     }
-    // ничего дополнительно не делаем
   });
 
   // ❌ Отказать стажёру (пока заглушка)

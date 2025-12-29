@@ -911,6 +911,9 @@ function registerCandidateInternship(bot, ensureUser, logError) {
           c.age,
           c.internship_admin_id,
           c.internship_point_id,
+            c.internship_date,
+  c.internship_time_from,
+  c.internship_time_to,
           u_link.id AS intern_user_id,
           u_link.telegram_id AS intern_telegram_id,
           u_link.full_name AS intern_name
@@ -953,6 +956,17 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // должна быть выбрана точка (trade_point_id)
       if (!c.internship_point_id) {
         await ctx.answerCbQuery("Не указана точка стажировки").catch(() => {});
+        return;
+      }
+
+      if (
+        !c.internship_date ||
+        !c.internship_time_from ||
+        !c.internship_time_to
+      ) {
+        await ctx
+          .answerCbQuery("Стажировка не назначена полностью (нет даты/времени)")
+          .catch(() => {});
         return;
       }
 
@@ -1100,6 +1114,19 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // 4) переводим кандидата в intern (если ещё не переведён)
       await pool.query(
         `UPDATE candidates SET status = 'intern' WHERE id = $1`,
+        [candidateId]
+      );
+
+      await pool.query(
+        `
+  UPDATE candidates
+     SET internship_date = NULL,
+         internship_time_from = NULL,
+         internship_time_to = NULL,
+         internship_point_id = NULL,
+         internship_admin_id = NULL
+   WHERE id = $1
+  `,
         [candidateId]
       );
 
