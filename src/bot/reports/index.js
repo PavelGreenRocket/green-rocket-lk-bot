@@ -83,8 +83,15 @@ function userLabelCash(row, { admin }) {
   return name;
 }
 
-function renderCashCard(row, { admin, detailed, opening }) {
+function renderCashCard(row, { admin, detailed, thresholds }) {
   const lines = [];
+
+  const num = (v) => {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
   if (admin && detailed) {
     const shiftType = detailed ? "🔻Смена:" : "Смена:";
     lines.push(`<b>${shiftType}</b> <code>${row.shift_id}</code>`);
@@ -129,24 +136,53 @@ function renderCashCard(row, { admin, detailed, opening }) {
 
   lines.push("");
   // ─────────────────────────────
-  // Детализация + дельты по кассе
+  // Детализация + дельты по кассе (единая логика)
   // ─────────────────────────────
+  const openingCash = num(row.opening_cash_amount);
+  const prevEndCash = num(row.prev_cash_in_drawer);
 
-  const openingCash = Number(row.opening_cash_amount);
-  const prevEnd = Number(row.prev_cash_in_drawer);
+  // Δ к началу смены: opening - prevEnd (только при detailed)
+  let startDelta = "(?)";
+  if (openingCash != null && prevEndCash != null) {
+    const d = openingCash - prevEndCash;
+    startDelta = fmtDeltaSign(d); // у тебя уже есть fmtDeltaSign()
+  }
 
-  // Δ к началу смены (opening - prevEnd) — показываем ТОЛЬКО при detailed
-  const startDelta =
-    Number.isFinite(openingCash) && Number.isFinite(prevEnd)
-      ? fmtDeltaSign(openingCash - prevEnd)
-      : "(?)";
+  // Ожидаемый конец: opening + sales_cash - cash_collection_amount(if was_cash_collection)
+  const salesCash = num(row.sales_cash);
+  const endCash = num(row.cash_in_drawer);
+  const wasCC = row.was_cash_collection === true;
+  const ccAmount = wasCC ? num(row.cash_collection_amount) : 0;
 
-  // Δ к концу смены (cash_in_drawer - expected_end_cash) — показываем ВСЕГДА
-  const expectedEnd = calcExpectedEndCash(row);
-  const endDelta =
-    Number.isFinite(expectedEnd) && Number.isFinite(Number(row.cash_in_drawer))
-      ? fmtDeltaSign(Number(row.cash_in_drawer) - expectedEnd)
-      : "(?)";
+  let endSuffix = " (?)";
+  if (
+    openingCash != null &&
+    salesCash != null &&
+    endCash != null &&
+    (wasCC ? ccAmount != null : true)
+  ) {
+    const expectedEnd = openingCash + salesCash - (wasCC ? ccAmount : 0);
+    const diff = endCash - expectedEnd;
+
+    // значок ❗/➕ по порогам
+    let icon = "";
+    const shortageTh = thresholds ? num(thresholds.shortage) : null;
+    const surplusTh = thresholds ? num(thresholds.surplus) : null;
+
+    if (diff < 0 && shortageTh != null && Math.abs(diff) > shortageTh)
+      icon = "❗";
+    if (diff > 0 && surplusTh != null && diff > surplusTh) icon = "➕";
+
+    // fmtDeltaSign уже делает (+10)/(-10)/(=)
+    // добавляем ❗/➕ внутрь скобок: (-10❗)
+    if (Math.abs(diff) < 0.000001) endSuffix = "(=)";
+    else {
+      const abs = Math.abs(diff);
+      const s =
+        abs % 1 === 0 ? String(Math.trunc(abs)) : String(abs).replace(".", ",");
+      endSuffix = diff > 0 ? `(+${s}${icon})` : `(-${s}${icon})`;
+    }
+  }
 
   if (detailed) {
     lines.push(`🔷 <u><b>Начало смены:</b></u>`);
@@ -155,14 +191,16 @@ function renderCashCard(row, { admin, detailed, opening }) {
     );
     lines.push("");
   }
+
   const shiftEnd = detailed
     ? "🔷 <u><b>Конец смены:</b></u>"
     : "<b>Конец смены:</b>";
 
   lines.push(shiftEnd);
+
   lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
   lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
-  lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)} ${endDelta}`);
+  lines.push(`<b>В кассе:</b> ${fmtMoneyRub(row.cash_in_drawer)} ${endSuffix}`);
 
   lines.push("");
 
@@ -221,6 +259,62 @@ async function loadOpeningsMapBestEffort(shiftIds) {
   } catch (_) {}
 
   return new Map();
+}
+
+async function loadPrevEndCashMapBestEffort(shiftIds) {
+  const ids = (shiftIds || []).map(Number).filter(Number.isFinite);
+  if (!ids.length) return new Map();
+
+  try {
+    const r = await pool.query(
+      `
+      WITH x AS (
+        SELECT
+          s.id AS shift_id,
+          s.trade_point_id,
+          sc.cash_in_drawer,
+          LAG(sc.cash_in_drawer) OVER (
+            PARTITION BY s.trade_point_id
+            ORDER BY s.opened_at
+          ) AS prev_end_cash
+        FROM shifts s
+        LEFT JOIN shift_closings sc
+          ON sc.shift_id = s.id AND sc.deleted_at IS NULL
+      )
+      SELECT shift_id, prev_end_cash
+      FROM x
+      WHERE shift_id = ANY($1::bigint[])
+      `,
+      [ids]
+    );
+
+    const m = new Map();
+    for (const row of r.rows || [])
+      m.set(Number(row.shift_id), row.prev_end_cash);
+    return m;
+  } catch (e) {
+    return new Map();
+  }
+}
+
+async function loadCashDiffThresholdsBestEffort() {
+  try {
+    const r = await pool.query(`
+      SELECT
+        shortage_threshold::numeric AS shortage_threshold,
+        surplus_threshold::numeric  AS surplus_threshold
+      FROM cash_diff_settings
+      ORDER BY id DESC
+      LIMIT 1
+    `);
+    const row = r.rows[0] || {};
+    return {
+      shortage: Number(row.shortage_threshold ?? 0),
+      surplus: Number(row.surplus_threshold ?? 0),
+    };
+  } catch (e) {
+    return { shortage: 0, surplus: 0 };
+  }
 }
 
 function renderAnalysisTable(rows, { elements, filters }) {
@@ -1012,12 +1106,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       : rows;
 
     const detailed = admin && Boolean(st.cashDetailed);
-    let openingsMap = new Map();
-    if (detailed && rows.length) {
-      openingsMap = await loadOpeningsMapBestEffort(
-        rows.map((x) => x.shift_id)
-      );
-    }
+    const thresholds = await loadCashDiffThresholdsBestEffort();
 
     // ✅ скрытие таблицы работает и для analysis1 и для analysis2
     if (hideTable && isAnalysisFmt) {
@@ -1032,7 +1121,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
               renderCashCard(r, {
                 admin,
                 detailed,
-                opening: openingsMap.get(r.shift_id),
+                thresholds,
               })
             )
             .join("\n\n");
