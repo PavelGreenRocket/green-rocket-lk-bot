@@ -58,7 +58,7 @@ function buildPerson(u) {
 }
 
 async function insertNotificationForUsers(userIds, text, createdBy) {
-  if (!userIds.length) return;
+  if (!userIds.length) return null;
 
   const n = await pool.query(
     `INSERT INTO notifications (text, created_by) VALUES ($1,$2) RETURNING id`,
@@ -66,12 +66,13 @@ async function insertNotificationForUsers(userIds, text, createdBy) {
   );
   const nid = n.rows[0].id;
 
-  // fanout
   const values = userIds.map((_, i) => `($1, $${i + 2})`).join(",");
   await pool.query(
     `INSERT INTO user_notifications (notification_id, user_id) VALUES ${values}`,
     [nid, ...userIds]
   );
+
+  return nid;
 }
 
 /**
@@ -83,12 +84,13 @@ async function checkCashDiffAndNotify({ shiftId, stage, actorUserId }) {
   // берем базовые данные смены
   const s = await pool.query(
     `
-    SELECT
-      s.id,
-      s.user_id,
-      s.trade_point_id,
-      s.opened_at,
-      s.cash_amount AS opening_cash,
+  SELECT
+  s.id,
+  s.user_id,
+  s.trade_point_id,
+  s.opened_at,
+  s.closed_at,
+  s.cash_amount AS opening_cash,
       tp.title AS point_title,
       u.full_name AS worker_name,
       u.username AS worker_username,
@@ -122,7 +124,8 @@ async function checkCashDiffAndNotify({ shiftId, stage, actorUserId }) {
       WHERE ps.trade_point_id = $1
         AND ps.status = 'closed'
         AND ps.id <> $2
-      ORDER BY ps.closed_at DESC NULLS LAST, ps.finished_at DESC NULLS LAST, ps.id DESC
+      ORDER BY ps.closed_at DESC NULLS LAST, ps.id DESC
+
       LIMIT 1
       `,
       [shift.trade_point_id, shiftId]
@@ -154,12 +157,12 @@ async function checkCashDiffAndNotify({ shiftId, stage, actorUserId }) {
       `Касса на открытии: *${fmtMoney(opening)} ₽*\n` +
       `Разница: *${diffStr} ₽*`;
 
-    await insertNotificationForUsers(
+    const nid = await insertNotificationForUsers(
       respIds,
       text,
       actorUserId || shift.user_id
     );
-    return;
+    return { userIds: respIds, text, notificationId: nid, shiftId: shift.id };
   }
 
   // ===== stage CLOSE =====
@@ -201,38 +204,60 @@ async function checkCashDiffAndNotify({ shiftId, stage, actorUserId }) {
 
     const isShortage = diff < 0 && Math.abs(diff) > shortage;
     const isSurplus = diff > 0 && diff > surplus;
-
     if (!isShortage && !isSurplus) return;
 
-    const sign = diff > 0 ? "➕" : "❗";
-    const diffStr =
-      diff > 0 ? `+${fmtMoney(diff)}` : `-${fmtMoney(Math.abs(diff))}`;
+    const diffAbs = Math.abs(diff);
 
-    const collector =
-      cl.collector_name ||
-      (cl.collector_username ? `@${cl.collector_username}` : null);
+    const alertEmoji = isSurplus ? "🟢" : "🔴";
+    const headerEmoji = "🚨";
+
+    const dateBase = shift.closed_at || cl.created_at || new Date();
+
+    const dateStr = new Date(dateBase).toLocaleDateString("ru-RU", {
+      day: "2-digit",
+      month: "2-digit",
+    });
+    const timeStr = new Date(dateBase).toLocaleTimeString("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    const shiftDate = shift.opened_at
+      ? new Date(shift.opened_at).toLocaleDateString("ru-RU", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+        })
+      : null;
 
     const text =
-      `${sign} *Отклонение кассы при закрытии смены*\n\n` +
-      `Точка: *${shift.point_title}*\n` +
-      `Смена: *${shift.id}*\n` +
-      `Сотрудник: *${shift.worker_name || "—"}*` +
-      `${shift.worker_username ? ` (@${shift.worker_username})` : ""}\n\n` +
-      `Открытие (в кассе): *${fmtMoney(opening)} ₽*\n` +
-      `Наличные продажи: *${fmtMoney(salesCash)} ₽*\n` +
-      `Инкассация: *${
-        cl.was_cash_collection ? fmtMoney(cashCollection) : "Нет"
-      }*${collector ? ` (${collector})` : ""}\n` +
-      `Ожидалось в кассе: *${fmtMoney(expected)} ₽*\n` +
-      `Факт в кассе: *${fmtMoney(inDrawer)} ₽*\n` +
-      `Разница: *${diffStr} ₽*`;
+      `${headerEmoji} *ОТКЛОНЕНИЕ КАССЫ ПРИ ЗАКРЫТИИ СМЕНЫ*\n\n` +
+      `${alertEmoji} **Разница: ${isSurplus ? "+" : "−"}${fmtMoney(
+        diffAbs
+      )} ₽**\n\n` +
+      `Точка: ${shift.point_title}\n` +
+      `Смена: ${shift.id}${shiftDate ? ` (${shiftDate})` : ""}\n` +
+      `Сотрудник: ${shift.worker_name || "—"}${
+        shift.worker_username ? ` (@${shift.worker_username})` : ""
+      }\n` +
+      `──────────────\n` +
+      `**Расчёт**\n` +
+      `• В кассе при открытии: ${fmtMoney(opening)} ₽\n` +
+      `• Наличные продажи: ${fmtMoney(salesCash)} ₽\n` +
+      `• Инкассация: ${
+        cl.was_cash_collection ? fmtMoney(cashCollection) + " ₽" : "Нет"
+      }\n\n` +
+      `• **Ожидалось в кассе:** ${fmtMoney(expected)} ₽\n` +
+      `• **Факт в кассе:** ${fmtMoney(inDrawer)} ₽\n\n` +
+      `──────────────\n` +
+      `ℹ️ Требуется проверка закрытия смены`;
 
-    await insertNotificationForUsers(
+    const nid = await insertNotificationForUsers(
       respIds,
       text,
       actorUserId || shift.user_id
     );
-    return;
+    return { userIds: respIds, text, notificationId: nid, shiftId: shift.id };
   }
 }
 

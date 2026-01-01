@@ -650,7 +650,26 @@ async function maybeNotifyCashDiffAfterEdit({ shiftId, actorUserId, patch }) {
       mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
     if (typeof fn !== "function") return;
 
-    await fn({ shiftId: Number(shiftId), stage: "close", actorUserId });
+    const res = await fn({
+      shiftId: Number(shiftId),
+      stage: "close",
+      actorUserId,
+    });
+
+    if (res?.userIds?.length && res?.text) {
+      const r = await pool.query(
+        `SELECT telegram_id FROM users WHERE id = ANY($1::int[]) AND telegram_id IS NOT NULL`,
+        [res.userIds]
+      );
+      await Promise.allSettled(
+        (r.rows || []).map((x) =>
+          // тут ctx нет, поэтому пушить ИЗ edit.js нельзя напрямую без передачи ctx
+          // вариант А (быстро): ничего не шлём тут, только записываем в "Уведомления"
+          // вариант B: передать ctx в maybeNotifyCashDiffAfterEdit от места вызова
+          Promise.resolve()
+        )
+      );
+    }
   } catch (e) {
     // не валим редактирование из-за уведомлений
   }

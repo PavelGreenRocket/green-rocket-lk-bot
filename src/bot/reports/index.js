@@ -145,7 +145,22 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
   let startDelta = "(?)";
   if (openingCash != null && prevEndCash != null) {
     const d = openingCash - prevEndCash;
-    startDelta = fmtDeltaSign(d); // у тебя уже есть fmtDeltaSign()
+
+    // значок ❗/➕ по порогам (как в конце смены)
+    let icon = "";
+    const shortageTh = thresholds ? num(thresholds.shortage) : null;
+    const surplusTh = thresholds ? num(thresholds.surplus) : null;
+
+    if (d < 0 && shortageTh != null && Math.abs(d) > shortageTh) icon = "❗";
+    if (d > 0 && surplusTh != null && d > surplusTh) icon = "➕";
+
+    if (Math.abs(d) < 0.000001) startDelta = "(=)";
+    else {
+      const abs = Math.abs(d);
+      const s =
+        abs % 1 === 0 ? String(Math.trunc(abs)) : String(abs).replace(".", ",");
+      startDelta = d > 0 ? `(+${s}${icon})` : `(-${s}${icon})`;
+    }
   }
 
   // Ожидаемый конец: opening + sales_cash - cash_collection_amount(if was_cash_collection)

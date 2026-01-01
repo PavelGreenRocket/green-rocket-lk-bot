@@ -359,8 +359,27 @@ async function showFinishScreen(ctx, user, { edit = true } = {}) {
     ? "⚠️ Внимание: у вас есть незакрытые задачи за сегодня.\n\nВсё заполнено. Закрыть смену всё равно?"
     : "Всё заполнено. Закрыть смену?";
 
+  const tr = await pool.query(
+    `
+    SELECT id
+    FROM shift_transfer_requests
+   WHERE from_shift_id = $1
+  AND status = 'accepted'
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+    [Number(st.shiftId)]
+  );
+
+  const isTransfer = !!tr.rows[0];
+
   const kb = Markup.inlineKeyboard([
-    [{ text: "🛑 Закрыть смену", callback_data: "shift_close_finish" }],
+    [
+      {
+        text: isTransfer ? "🔁 Передать смену" : "🛑 Закрыть смену",
+        callback_data: "shift_close_finish",
+      },
+    ],
     [{ text: "📝 Изменить", callback_data: "shift_close_edit_menu" }],
     [{ text: "❌ Отмена", callback_data: "shift_close_cancel" }],
     [{ text: "⬅️ К смене", callback_data: "shift_close_to_menu" }],
@@ -384,23 +403,6 @@ async function startOrContinueClosing(ctx, user) {
     `UPDATE shifts SET status='closing_in_progress' WHERE id=$1 AND user_id=$2`,
     [active.id, user.id]
   );
-
-  // 2) после перевода в closing_in_progress можно проверить отклонение по кассе (close)
-  try {
-    const mod = await import("../cashDiffAlerts.js");
-    const checkCashDiffAndNotify =
-      mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
-
-    if (typeof checkCashDiffAndNotify === "function") {
-      await checkCashDiffAndNotify({
-        shiftId: active.id, // <-- ВАЖНО: active.id
-        stage: "close",
-        actorUserId: user.id,
-      });
-    }
-  } catch (_) {
-    // не валим закрытие смены из-за уведомлений
-  }
 
   await ensureClosingRow(active.id);
 
@@ -1465,13 +1467,101 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       // 1) добиваем состояние (если надо) и закрываем смену
       await pool.query(
         `
-        UPDATE shifts
-        SET status = 'closed',А
-            closed_at = NOW()
-        WHERE id = $1
-      `,
+  UPDATE shifts
+SET status = 'closed',
+    closed_at = NOW()
+WHERE id = $1
+`,
         [Number(st.shiftId)]
       );
+
+      // ==== если это закрытие по передаче смены — завершаем transfer и уведомляем B
+      try {
+        const tr = await pool.query(
+          `
+          SELECT
+            tr.id,
+            tr.to_user_id,
+            tr.to_shift_id,
+            tr.trade_point_id,
+            u.telegram_id AS to_telegram_id,
+            tp.title AS point_title
+          FROM shift_transfer_requests tr
+          JOIN users u ON u.id = tr.to_user_id
+          JOIN trade_points tp ON tp.id = tr.trade_point_id
+         WHERE tr.from_shift_id = $1
+  AND tr.status = 'accepted'
+          ORDER BY tr.id DESC
+          LIMIT 1
+          `,
+          [Number(st.shiftId)]
+        );
+
+        const req = tr.rows[0];
+
+        if (req) {
+          await pool.query(
+            `UPDATE shift_transfer_requests
+             SET status='completed', responded_at=now()
+             WHERE id=$1 AND status='accepted'`,
+            [Number(req.id)]
+          );
+
+          if (req.to_telegram_id) {
+            const kb = Markup.inlineKeyboard([
+              [
+                Markup.button.callback(
+                  `✅ Открыть смену на ${req.point_title}`,
+                  `shift_transfer_open_${req.id}`
+                ),
+              ],
+            ]);
+
+            await ctx.telegram.sendMessage(
+              req.to_telegram_id,
+              `🔁 Вам передали смену на *${req.point_title}*.\n\nОткрыть смену?`,
+              { parse_mode: "Markdown", reply_markup: kb.reply_markup }
+            );
+          }
+        }
+      } catch (e) {
+        // не валим закрытие из-за передачи
+        logError("shift_transfer_finish", e);
+      }
+
+      // уведомление по порогам (после того как все поля уже введены)
+      try {
+        const mod = await import("../cashDiffAlerts.js");
+        const fn =
+          mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+        if (typeof fn === "function") {
+          const res = await fn({
+            shiftId: Number(st.shiftId),
+            stage: "close",
+            actorUserId: user.id,
+          });
+
+          // PUSH всем ответственным
+          if (res?.userIds?.length && res?.text) {
+            const r = await pool.query(
+              `SELECT telegram_id FROM users WHERE id = ANY($1::int[]) AND telegram_id IS NOT NULL`,
+              [res.userIds]
+            );
+            await Promise.allSettled(
+              (r.rows || []).map((x) =>
+                ctx.telegram
+                  .sendMessage(x.telegram_id, res.text, {
+                    parse_mode: "Markdown",
+                    reply_markup: kb.reply_markup,
+                  })
+                  .catch(() => {})
+              )
+            );
+          }
+        }
+      } catch (_) {
+        // не валим закрытие смены из-за уведомлений
+      }
 
       clrSt(ctx.from.id);
 

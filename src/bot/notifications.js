@@ -3,6 +3,7 @@
 const { Markup } = require("telegraf");
 const pool = require("../db/pool");
 const { deliver } = require("../utils/renderHelpers");
+let BOT = null; // чтобы слать сообщения без ctx
 
 // --------------------
 // helpers
@@ -183,6 +184,33 @@ async function getUnreadCount(userId) {
     [userId]
   );
   return Number(r.rows[0]?.cnt || 0);
+}
+
+async function sendNewNotificationPing(userId) {
+  if (!BOT) return;
+
+  const r = await pool.query(
+    `SELECT telegram_id FROM users WHERE id = $1 LIMIT 1`,
+    [userId]
+  );
+  const tgId = r.rows[0]?.telegram_id;
+  if (!tgId) return;
+
+  const unread = await getUnreadCount(userId);
+
+  const text =
+    `🔔 *Новое уведомление*\n` +
+    (unread > 0 ? `\nНепрочитанных: *${unread}*` : "");
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("➡️ Перейти в уведомления", "lk_notifications")],
+  ]);
+
+  // именно sendMessage (это “всплывающее” уведомление как на скрине)
+  await BOT.telegram.sendMessage(tgId, text, {
+    parse_mode: "Markdown",
+    reply_markup: keyboard.reply_markup,
+  });
 }
 
 async function getUnreadCountByKind(userId, kind) {
@@ -375,20 +403,23 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
 
   const { text: cleanBody, photoFileId } = extractPhotoAndClean(n.text);
 
-  let text = "🔔 *Уведомления*\n\n";
+  const total = Math.max(1, Number(unreadTotal || 0));
+  const cur = Math.min(total, Number(offset || 0) + 1);
 
-  if (n.created_by == null) {
-    text += `*Системное уведомление*\n`;
-  } else {
-    const fromName = n.sender_name || "Неизвестно";
-    const fromPos = posLabel(n.sender_position);
-    text += `*Пользовательское уведомление*\n`;
-    text += `От: ${fromName}, ${fromPos}\n`;
-  }
+  // кто отправил
+  const senderName =
+    n.created_by == null
+      ? "Системное уведомление"
+      : `${n.sender_name || "Неизвестно"}, ${posLabel(n.sender_position)}`;
 
-  text += `Дата: ${formatDtRu(n.created_at)}\n`;
-  text += `Сообщение: ${offset + 1} / ${unreadTotal}\n\n`;
-  text += safeTrim(cleanBody, 3500);
+  // дата
+  const dateStr = formatDtRu(n.created_at) || "—";
+
+  let text =
+    `🔔 Уведомления ${cur}/${total}\n` +
+    `**От:** ${senderName}\n` +
+    `**Дата:** ${dateStr}\n\n` +
+    `${safeTrim(cleanBody, 3500)}`;
 
   const leftDisabled = offset <= 0;
   const rightDisabled = offset >= unreadTotal - 1;
@@ -736,8 +767,15 @@ async function insertNotificationAndFanout({
         [notificationId, recipientUserIds]
       );
     }
-
     await client.query("COMMIT");
+
+    // пушим “Новое уведомление” всем получателям (после коммита)
+    if (recipientUserIds && recipientUserIds.length) {
+      await Promise.allSettled(
+        recipientUserIds.map((uid) => sendNewNotificationPing(Number(uid)))
+      );
+    }
+
     return notificationId;
   } catch (e) {
     await client.query("ROLLBACK");
@@ -1308,6 +1346,8 @@ async function showAdminHistoryOpen(ctx, notificationId, { edit = true } = {}) {
 // --------------------
 
 function registerNotifications(bot, ensureUser, logError) {
+  BOT = bot;
+
   bot.action("lk_notif_admin_hist_filter_toggle", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});

@@ -216,6 +216,68 @@ async function showShiftQuestion(ctx, st) {
 }
 
 function registerShiftFlow(bot, ensureUser, logError) {
+  bot.action(/^shift_transfer_open_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const reqId = Number(ctx.match[1]);
+
+      const r = await pool.query(
+        `
+        SELECT
+          tr.id,
+          tr.status,
+          tr.to_user_id,
+          tr.to_shift_id,
+          tr.trade_point_id,
+          tp.title AS point_title
+        FROM shift_transfer_requests tr
+        JOIN trade_points tp ON tp.id = tr.trade_point_id
+        WHERE tr.id = $1
+        LIMIT 1
+        `,
+        [reqId]
+      );
+
+      const req = r.rows[0];
+      if (!req) {
+        await ctx.reply("❌ Запрос не найден.");
+        return;
+      }
+
+      if (Number(req.to_user_id) !== Number(user.id)) {
+        await ctx.reply("❌ Это не ваш запрос передачи.");
+        return;
+      }
+
+      if (req.status !== "completed") {
+        await ctx.reply("⏱ Передача ещё не завершена или уже неактуальна.");
+        return;
+      }
+
+      // выставляем state на ввод кассы по shift_id, который уже создан у B
+      setShiftState(ctx.from.id, {
+        shiftId: Number(req.to_shift_id),
+        step: "cash",
+        tradePointId: Number(req.trade_point_id),
+      });
+
+      await ctx.reply(
+        `✅ Открываем смену на *${req.point_title}*.\nВведите сумму *в кассе*:`,
+        {
+          parse_mode: "Markdown",
+        }
+      );
+
+      // запускаем стандартный экран ввода кассы (как при обычном открытии)
+      await showAskCash(ctx, user);
+    } catch (err) {
+      logError("shift_transfer_open", err);
+    }
+  });
+
   // Entry point: Open/Close toggle
   bot.action("lk_shift_toggle", async (ctx) => {
     try {
@@ -316,6 +378,165 @@ function registerShiftFlow(bot, ensureUser, logError) {
     }
   });
 
+  // ===== Shift transfer: accept/decline =====
+
+  bot.action(/^shift_transfer_accept_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const reqId = Number(ctx.match[1]);
+      const r = await pool.query(
+        `
+        SELECT
+          tr.*,
+          tp.title AS point_title,
+          u_to.telegram_id AS to_telegram_id,
+          u_to.full_name AS to_name,
+          u_to.username  AS to_username
+        FROM shift_transfer_requests tr
+        JOIN trade_points tp ON tp.id = tr.trade_point_id
+        JOIN users u_to ON u_to.id = tr.to_user_id
+        WHERE tr.id = $1
+        LIMIT 1
+        `,
+        [reqId]
+      );
+      const req = r.rows[0];
+      if (!req) {
+        await ctx.reply("❌ Запрос не найден.");
+        return;
+      }
+
+      // проверка: только владелец смены может принять
+      if (Number(req.from_user_id) !== Number(user.id)) {
+        await ctx.reply("❌ Вы не можете принять этот запрос.");
+        return;
+      }
+
+      // таймаут
+      if (req.status !== "pending" || new Date(req.expires_at) <= new Date()) {
+        // если pending, но просрочен — пометим expired
+        if (req.status === "pending") {
+          await pool.query(
+            `UPDATE shift_transfer_requests SET status='expired', responded_at=now() WHERE id=$1`,
+            [reqId]
+          );
+        }
+        await ctx.reply("⏱ Запрос уже неактуален (истёк или обработан).");
+        return;
+      }
+
+      await pool.query(
+        `UPDATE shift_transfer_requests
+   SET status='accepted',
+       responded_at=now(),
+       expires_at = now() + interval '30 minutes'
+   WHERE id=$1 AND status='pending'`,
+        [reqId]
+      );
+
+      // уведомим B
+      if (req.to_telegram_id) {
+        const who =
+          req.to_name ||
+          (req.to_username ? `@${req.to_username}` : "сотрудник");
+        await ctx.telegram
+          .sendMessage(
+            req.to_telegram_id,
+            `✅ Запрос принят.\n\nСотрудник передаст смену на точке *${req.point_title}*.\nОжидайте завершения передачи.`,
+            { parse_mode: "Markdown" }
+          )
+          .catch(() => {});
+      }
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "➡️ Перейти к закрытию (передача)",
+            "shift_close_continue"
+          ),
+        ],
+      ]);
+
+      await ctx.reply(
+        "✅ Принято.\n\nТеперь перейдите к закрытию смены. В конце будет кнопка *«Передать смену»*.",
+        { parse_mode: "Markdown", reply_markup: kb.reply_markup }
+      );
+    } catch (err) {
+      logError("shift_transfer_accept", err);
+    }
+  });
+
+  bot.action(/^shift_transfer_decline_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const reqId = Number(ctx.match[1]);
+      const r = await pool.query(
+        `
+        SELECT
+          tr.*,
+          tp.title AS point_title,
+          u_to.telegram_id AS to_telegram_id
+        FROM shift_transfer_requests tr
+        JOIN trade_points tp ON tp.id = tr.trade_point_id
+        JOIN users u_to ON u_to.id = tr.to_user_id
+        WHERE tr.id = $1
+        LIMIT 1
+        `,
+        [reqId]
+      );
+      const req = r.rows[0];
+      if (!req) {
+        await ctx.reply("❌ Запрос не найден.");
+        return;
+      }
+
+      if (Number(req.from_user_id) !== Number(user.id)) {
+        await ctx.reply("❌ Вы не можете отклонить этот запрос.");
+        return;
+      }
+
+      // если уже просрочен/обработан — просто сообщим
+      if (req.status !== "pending" || new Date(req.expires_at) <= new Date()) {
+        if (req.status === "pending") {
+          await pool.query(
+            `UPDATE shift_transfer_requests SET status='expired', responded_at=now() WHERE id=$1`,
+            [reqId]
+          );
+        }
+        await ctx.reply("⏱ Запрос уже неактуален.");
+        return;
+      }
+
+      await pool.query(
+        `UPDATE shift_transfer_requests
+         SET status='declined', responded_at=now()
+         WHERE id=$1 AND status='pending'`,
+        [reqId]
+      );
+
+      // уведомим B
+      if (req.to_telegram_id) {
+        await ctx.telegram
+          .sendMessage(
+            req.to_telegram_id,
+            `❌ Передача смены отклонена.\n\nВыберите точку заново.`,
+            { parse_mode: "Markdown" }
+          )
+          .catch(() => {});
+      }
+
+      await ctx.reply("❌ Отклонено. Запрос закрыт.");
+    } catch (err) {
+      logError("shift_transfer_decline", err);
+    }
+  });
+
   // Pick point
   bot.action(/^shift_open_point_(\d+)$/, async (ctx) => {
     try {
@@ -332,6 +553,106 @@ function registerShiftFlow(bot, ensureUser, logError) {
         `UPDATE shifts SET trade_point_id=$1 WHERE id=$2 AND user_id=$3`,
         [pointId, st.shiftId, user.id]
       );
+
+      // === transfer check: есть ли активная смена другого сотрудника на этой точке
+      const active = await pool.query(
+        `
+        SELECT s.id AS shift_id, s.user_id, u.telegram_id, u.full_name, u.username, tp.title AS point_title
+        FROM shifts s
+        JOIN users u ON u.id = s.user_id
+        JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE s.trade_point_id = $1
+          AND s.status = ANY(ARRAY[
+  'opening_in_progress'::shift_status,
+  'opened'::shift_status,
+  'closing_in_progress'::shift_status
+])
+          AND s.user_id <> $2
+        ORDER BY s.id DESC
+        LIMIT 1
+        `,
+        [pointId, user.id]
+      );
+
+      const a = active.rows[0];
+
+      if (a && a.telegram_id) {
+        // если уже есть pending-запрос на эту точку — не создаём второй
+        const exists = await pool.query(
+          `SELECT id FROM shift_transfer_requests WHERE trade_point_id=$1 AND status='pending' LIMIT 1`,
+          [pointId]
+        );
+        if (exists.rows[0]) {
+          await ctx.reply(
+            "⏱ На эту точку уже отправлен запрос на передачу. Подождите минуту или попробуйте позже."
+          );
+          // оставляем пользователя на выборе точки
+          setShiftState(ctx.from.id, {
+            ...st,
+            step: "pick_point",
+            tradePointId: null,
+          });
+          await showPickPoint(ctx);
+          return;
+        }
+
+        const expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
+
+        const ins = await pool.query(
+          `
+          INSERT INTO shift_transfer_requests
+            (trade_point_id, from_shift_id, from_user_id, to_shift_id, to_user_id, expires_at)
+          VALUES
+            ($1,$2,$3,$4,$5,$6)
+          RETURNING id
+          `,
+          [pointId, a.shift_id, a.user_id, st.shiftId, user.id, expiresAt]
+        );
+
+        const reqId = ins.rows[0].id;
+
+        const requester =
+          user.full_name || (user.username ? `@${user.username}` : "сотрудник");
+
+        const msg =
+          `🔁 *Запрос на передачу смены*\n\n` +
+          `Точка: *${a.point_title}*\n` +
+          `Сотрудник: *${requester}*\n\n` +
+          `Передать смену этому сотруднику?\n` +
+          `Если вы согласитесь, далее вы заполните стандартное закрытие и завершите передачу.`;
+
+        const kb = Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "✅ Передать",
+              `shift_transfer_accept_${reqId}`
+            ),
+            Markup.button.callback(
+              "❌ Отменить",
+              `shift_transfer_decline_${reqId}`
+            ),
+          ],
+        ]);
+
+        await ctx.telegram.sendMessage(a.telegram_id, msg, {
+          parse_mode: "Markdown",
+          reply_markup: kb.reply_markup,
+        });
+
+        await ctx.reply(
+          `✅ Запрос отправлен сотруднику на точке *${a.point_title}*.\n⏱ Ожидайте ответ до 1 минуты.`,
+          { parse_mode: "Markdown" }
+        );
+
+        // возвращаем к выбору точки (как ты просил)
+        setShiftState(ctx.from.id, {
+          ...st,
+          step: "pick_point",
+          tradePointId: null,
+        });
+        await showPickPoint(ctx);
+        return;
+      }
 
       setShiftState(ctx.from.id, {
         ...st,
@@ -368,17 +689,49 @@ function registerShiftFlow(bot, ensureUser, logError) {
         [num, st.shiftId, user.id]
       );
 
-      // 2) И только потом считаем diff и уведомляем (через import, без require)
-      const mod = await import("../cashDiffAlerts.js");
-      const checkCashDiffAndNotify =
-        mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+      // если смена была открыта после передачи — синкнем задачи от предыдущего сотрудника
+      try {
+        await syncTasksFromTransferIfNeeded(st.shiftId);
+      } catch (e) {
+        logError("syncTasksFromTransferIfNeeded", e);
+      }
 
-      if (typeof checkCashDiffAndNotify === "function") {
-        await checkCashDiffAndNotify({
-          shiftId: st.shiftId,
-          stage: "open",
-          actorUserId: user.id,
-        });
+      try {
+        const mod = await import("../cashDiffAlerts.js");
+        const fn =
+          mod.checkCashDiffAndNotify || mod.default?.checkCashDiffAndNotify;
+        if (typeof fn === "function") {
+          const res = await fn({
+            shiftId: st.shiftId,
+            stage: "open",
+            actorUserId: user.id,
+          });
+
+          // PUSH всем ответственным
+          if (res?.userIds?.length && res?.text) {
+            const r = await pool.query(
+              `SELECT telegram_id FROM users WHERE id = ANY($1::int[]) AND telegram_id IS NOT NULL`,
+              [res.userIds]
+            );
+
+            const kb = Markup.inlineKeyboard([
+              [Markup.button.callback("➡️ Перейти к отчёту", `lk_reports`)],
+            ]);
+
+            await Promise.allSettled(
+              (r.rows || []).map((x) =>
+                ctx.telegram
+                  .sendMessage(x.telegram_id, res.text, {
+                    parse_mode: "Markdown",
+                    reply_markup: kb.reply_markup,
+                  })
+                  .catch(() => {})
+              )
+            );
+          }
+        }
+      } catch (e) {
+        logError("cashDiffAlerts_open", e);
       }
 
       // запускаем регулируемый опрос
@@ -599,6 +952,76 @@ function registerShiftFlow(bot, ensureUser, logError) {
       await ctx.reply("❌ Ошибка при сохранении видео. Попробуйте ещё раз.");
     }
   });
+}
+async function syncTasksFromTransferIfNeeded(toShiftId) {
+  // найдём completed transfer, где эта смена = to_shift_id, и ещё не синкали задачи
+  const r = await pool.query(
+    `
+    SELECT
+      tr.id AS req_id,
+      tr.from_user_id,
+      tr.to_user_id,
+      tr.trade_point_id,
+      s.opened_at
+    FROM shift_transfer_requests tr
+    LEFT JOIN shifts s ON s.id = tr.to_shift_id
+    WHERE tr.to_shift_id = $1
+      AND tr.status = 'completed'
+      AND tr.tasks_synced_at IS NULL
+    ORDER BY tr.id DESC
+    LIMIT 1
+    `,
+    [Number(toShiftId)]
+  );
+
+  const req = r.rows[0];
+  if (!req) return;
+
+  const tradePointId = Number(req.trade_point_id);
+  const fromUserId = Number(req.from_user_id);
+  const toUserId = Number(req.to_user_id);
+
+  // дата задач = дата смены (если opened_at нет — берём сегодня)
+  const forDate = req.opened_at
+    ? new Date(req.opened_at).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+
+  // копируем/апсёртим task_instances от A -> B по этой точке и дате
+  await pool.query(
+    `
+    INSERT INTO task_instances
+      (assignment_id, template_id, user_id, trade_point_id, for_date, time_mode, deadline_at, status, done_at)
+    SELECT
+      ti.assignment_id,
+      ti.template_id,
+      $3::bigint AS user_id,
+      ti.trade_point_id,
+      ti.for_date,
+      ti.time_mode,
+      ti.deadline_at,
+      ti.status,
+      ti.done_at
+    FROM task_instances ti
+    WHERE ti.user_id = $1
+      AND ti.trade_point_id = $2
+      AND ti.for_date = $4::date
+    ON CONFLICT (assignment_id, user_id, for_date)
+    DO UPDATE SET
+      trade_point_id = EXCLUDED.trade_point_id,
+      template_id    = EXCLUDED.template_id,
+      time_mode      = EXCLUDED.time_mode,
+      deadline_at    = EXCLUDED.deadline_at,
+      status         = EXCLUDED.status,
+      done_at        = EXCLUDED.done_at
+    `,
+    [fromUserId, tradePointId, toUserId, forDate]
+  );
+
+  // помечаем, что синк выполнен (чтобы не гонять повторно)
+  await pool.query(
+    `UPDATE shift_transfer_requests SET tasks_synced_at = now() WHERE id = $1`,
+    [Number(req.req_id)]
+  );
 }
 
 module.exports = { registerShiftFlow };
