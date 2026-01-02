@@ -47,74 +47,6 @@ function fmtMoneyRub(v) {
   return `${new Intl.NumberFormat("ru-RU").format(n)} ₽`;
 }
 
-function calcExpectedCash(row) {
-  const opening = Number(row.opening_cash_amount ?? 0);
-  const salesCash = Number(row.sales_cash ?? 0);
-
-  const was = row.was_cash_collection === true;
-  const cashCollection = was ? Number(row.cash_collection_amount ?? 0) : 0;
-
-  return opening + salesCash - cashCollection;
-}
-
-function calcCashDiff(row) {
-  const inDrawer = Number(row.cash_in_drawer ?? 0);
-  const expected = calcExpectedCash(row);
-  const diff = inDrawer - expected; // >0 излишек, <0 недостача
-  return { expected, diff };
-}
-
-function fmtSignedRub(diff) {
-  const n = Number(diff);
-  if (!Number.isFinite(n)) return "-";
-  const abs = Math.abs(n);
-  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
-  return `${sign}${new Intl.NumberFormat("ru-RU").format(abs)} ₽`;
-}
-
-// пороги берём так же, как в cashDiffAlerts (из последней строки)
-async function loadCashDiffThresholds() {
-  try {
-    const r = await pool.query(`
-      SELECT
-        shortage_threshold::numeric AS shortage_threshold,
-        surplus_threshold::numeric  AS surplus_threshold
-      FROM cash_diff_settings
-      ORDER BY id DESC
-      LIMIT 1
-    `);
-
-    const row = r.rows[0] || {};
-    return {
-      shortage: Number(row.shortage_threshold ?? 0),
-      surplus: Number(row.surplus_threshold ?? 0),
-    };
-  } catch (e) {
-    // если таблицы/колонок нет или ещё что-то — просто считаем пороги = 0
-    return { shortage: 0, surplus: 0 };
-  }
-}
-
-function diffMark(diff, thresholds) {
-  const d = Number(diff);
-  if (!Number.isFinite(d)) return "";
-  const shortage = Number(thresholds?.shortage ?? 0);
-  const surplus = Number(thresholds?.surplus ?? 0);
-
-  if (d < 0 && Math.abs(d) > shortage && shortage > 0) return " ❗";
-  if (d > 0 && d > surplus && surplus > 0) return " ➕";
-  return "";
-}
-
-function diffDot(diff) {
-  const d = Number(diff);
-  if (!Number.isFinite(d)) return "⚪";
-  if (d < 0) return "🔴";
-  if (d > 0) return "🟢";
-  return "⚪";
-}
-
-
 function fmtDeltaSign(diff) {
   const n = Number(diff);
   if (!Number.isFinite(n)) return "(?)";
@@ -1103,6 +1035,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   await purgeOldDeletedReports();
 
   const { rows, hasMore } = await loadReportsPage({ page, filters, limit });
+  setSt(ctx.from.id, { hasMore });
 
   const inDateUi = Boolean(st.dateUi); // открыт выбор периода
   const filterOpened = admin && Boolean(st.filterOpened); // ✅ разрешаем фильтр внутри периода
@@ -1316,18 +1249,14 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   // Нижняя клавиатура (единый стиль)
   // ───────────────
 
-  // 1) Ряд пагинации: ещё назад / ещё вперёд
-  // (если нельзя — ставим noop, как в периоде)
-  const prevBtn =
-    page > 0
-      ? Markup.button.callback("⬅️ ещё", "lk_reports_less")
-      : Markup.button.callback(" ", "noop");
+  // 1) Ряд пагинации: всегда две кнопки ← →
+  const prevCb = page > 0 ? "lk_reports_less" : "lk_reports_nav_no_prev";
+  const nextCb = hasMore ? "lk_reports_more" : "lk_reports_nav_no_next";
 
-  const nextBtn = hasMore
-    ? Markup.button.callback("➡️ ещё", "lk_reports_more")
-    : Markup.button.callback(" ", "noop");
-
-  buttons.push([prevBtn, nextBtn]);
+  buttons.push([
+    Markup.button.callback("←", prevCb),
+    Markup.button.callback("→", nextCb),
+  ]);
 
   if (admin) {
     // 2) Ряд: период | настройки | формат
@@ -1400,6 +1329,8 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     kb = filterOpened
       ? renderAdminFilterKeyboard()
       : renderDateMainKeyboard({ ...st2, __admin: admin });
+  } else if (st2.dateUi?.mode === "monthGrid") {
+    kb = renderMonthGridKeyboard(st2);
   } else if (st2.dateUi?.mode === "points") {
     const r = await pool.query(
       `SELECT id, title FROM trade_points ORDER BY title NULLS LAST, id`
@@ -1560,10 +1491,16 @@ async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
   }
 
   // nav row
-  const nav = [];
-  if (page > 0) nav.push(Markup.button.callback("⬅️", "lk_reports_fw_prev"));
-  if (hasMore) nav.push(Markup.button.callback("➡️", "lk_reports_fw_next"));
-  if (nav.length) buttons.push(nav);
+  buttons.push([
+    Markup.button.callback(
+      "←",
+      page > 0 ? "lk_reports_fw_prev" : "lk_reports_nav_no_prev"
+    ),
+    Markup.button.callback(
+      "→",
+      hasMore ? "lk_reports_fw_next" : "lk_reports_nav_no_next"
+    ),
+  ]);
 
   buttons.push([Markup.button.callback("🔎 Поиск", "lk_reports_fw_search")]);
   buttons.push([Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")]);
@@ -1707,11 +1644,16 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
       ),
     ]);
   }
-
-  const nav = [];
-  if (page > 0) nav.push(Markup.button.callback("⬅️", "lk_reports_tp_prev"));
-  if (hasMore) nav.push(Markup.button.callback("➡️", "lk_reports_tp_next"));
-  if (nav.length) buttons.push(nav);
+  buttons.push([
+    Markup.button.callback(
+      "←",
+      page > 0 ? "lk_reports_tp_prev" : "lk_reports_nav_no_prev"
+    ),
+    Markup.button.callback(
+      "→",
+      hasMore ? "lk_reports_tp_next" : "lk_reports_nav_no_next"
+    ),
+  ]);
 
   buttons.push([Markup.button.callback("⬅️ Назад", "lk_reports_back_to_list")]);
 
@@ -2056,6 +1998,7 @@ async function showDeleteMode(ctx, user, { edit = true } = {}) {
   const selected = new Set(Array.isArray(st.delSelected) ? st.delSelected : []);
 
   const { rows, hasMore } = await loadReportsPage({ page, filters });
+  setSt(ctx.from.id, { hasMore });
 
   const header = "🗑 <b>Удаление отчётов</b>";
   const body = rows.length
@@ -2147,6 +2090,7 @@ async function showEditPick(ctx, user, { edit = true } = {}) {
   const filters = st.filters || {};
 
   const { rows, hasMore } = await loadReportsPage({ page, filters });
+  setSt(ctx.from.id, { hasMore });
 
   const header = "✏️ <b>Выберите отчёт для изменения</b>";
   const body = rows.length
@@ -2424,7 +2368,7 @@ function renderDateMainKeyboard(st) {
   // 1) Месяц: ← февраль →
   const rowMonth = [
     btn("←", "date_month:prev"),
-    btn(monthTitle, "noop"),
+    btn(`${monthTitle} ${f[0]}`, "date_month:menu"),
     btn("→", "date_month:next"),
   ];
 
@@ -2517,6 +2461,73 @@ async function showDateMenu(ctx, user, { edit = true } = {}) {
     },
     { edit }
   );
+}
+
+const MONTHS_GRID_RU = [
+  "янв",
+  "фев",
+  "мар",
+  "апр",
+  "май",
+  "июн",
+  "июл",
+  "авг",
+  "сен",
+  "окт",
+  "ноя",
+  "дек",
+];
+
+function renderMonthGridKeyboard(st) {
+  const btn = (text, data) => Markup.button.callback(text, data);
+
+  const now = todayLocalDate();
+  const currentYear = now.getFullYear();
+  const currentMonthIdx = now.getMonth(); // 0..11
+
+  const from = st.periodFrom || toPgDate(now);
+  const f = String(from).split("-");
+  const selectedYear = Number(f[0]);
+  const selectedMonthIdx = Number(f[1]) - 1;
+
+  const year =
+    Number(st.dateUi?.year) ||
+    (Number.isFinite(selectedYear) ? selectedYear : currentYear);
+
+  const rows = [];
+
+  // верхняя строка: год + стрелки
+  rows.push([
+    btn("←", "date_month_year:prev"),
+    btn(String(year), "noop"),
+    btn(
+      year >= currentYear ? "→" : "→",
+      year >= currentYear ? "noop" : "date_month_year:next"
+    ),
+  ]);
+
+  // 12 месяцев сеткой 4х3
+  let cur = [];
+  for (let m = 0; m < 12; m++) {
+    const isFuture =
+      year > currentYear || (year === currentYear && m > currentMonthIdx);
+
+    const isSelected = year === selectedYear && m === selectedMonthIdx;
+    const label = isSelected ? `✅ ${MONTHS_GRID_RU[m]}` : MONTHS_GRID_RU[m];
+
+    cur.push(
+      btn(label, isFuture ? "noop" : `date_month_pick:${year}:${m + 1}`)
+    );
+
+    if (cur.length === 4) {
+      rows.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length) rows.push(cur);
+
+  rows.push([btn("⬅️ Назад", "date_open")]);
+  return Markup.inlineKeyboard(rows);
 }
 
 function renderPickKeyboard({ side, part, page = 0 }) {
@@ -3001,6 +3012,102 @@ function registerReports(bot, ensureUser, logError) {
     setSt(ctx.from.id, { dateUi: { mode: "main" } });
     await showReportsList(ctx, user, { edit: true });
   });
+
+  // открыть сетку месяцев
+  bot.action("date_month:menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const year = st.periodFrom
+        ? Number(String(st.periodFrom).split("-")[0])
+        : todayLocalDate().getFullYear();
+
+      setSt(ctx.from.id, {
+        dateUi: { mode: "monthGrid", year },
+      });
+
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_month_menu", e);
+    }
+  });
+
+  // листание лет в сетке месяцев
+  bot.action(/^date_month_year:(prev|next)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const [, dir] = ctx.match;
+      const st = getSt(ctx.from.id) || {};
+      const now = todayLocalDate();
+      const currentYear = now.getFullYear();
+
+      let year = Number(st.dateUi?.year);
+      if (!Number.isFinite(year)) {
+        year = st.periodFrom
+          ? Number(String(st.periodFrom).split("-")[0])
+          : currentYear;
+      }
+
+      if (dir === "prev") year -= 1;
+      if (dir === "next") year += 1;
+
+      if (year > currentYear) year = currentYear;
+
+      setSt(ctx.from.id, { dateUi: { mode: "monthGrid", year } });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_month_year_nav", e);
+    }
+  });
+
+  // выбор месяца из сетки
+  bot.action(/^date_month_pick:(\d{4}):(\d{1,2})$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const [, yStr, mStr] = ctx.match;
+      const year = Number(yStr);
+      const month = Number(mStr); // 1..12
+
+      const now = todayLocalDate();
+      const base = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const sel = new Date(year, month - 1, 1);
+      let off =
+        (sel.getFullYear() - base.getFullYear()) * 12 +
+        (sel.getMonth() - base.getMonth());
+
+      // запрет будущего
+      if (off > 0) off = 0;
+
+      const from = new Date(year, month - 1, 1);
+      const to = new Date(year, month, 0); // последний день месяца
+      const toClamped = clampToToday(to);
+      const [f2, t2] = swapIfFromAfterTo(from, toClamped);
+
+      setSt(ctx.from.id, {
+        monthOffset: off,
+        periodPreset: "month",
+        periodFrom: toPgDate(f2),
+        periodTo: toPgDate(t2),
+        dateUi: { mode: "main" },
+      });
+
+      await savePeriodSettings(user.id, "month", toPgDate(f2), toPgDate(t2));
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("date_month_pick", e);
+    }
+  });
+
   // Листание месяцев: ← / →
   bot.action(/^date_month:(prev|next)$/, async (ctx) => {
     try {
@@ -3180,6 +3287,22 @@ function registerReports(bot, ensureUser, logError) {
     }
   });
 
+  bot.action("lk_reports_nav_no_prev", async (ctx) => {
+    try {
+      await toast(ctx, "Предыдущей страницы нет");
+    } catch (e) {
+      logError("lk_reports_nav_no_prev", e);
+    }
+  });
+
+  bot.action("lk_reports_nav_no_next", async (ctx) => {
+    try {
+      await toast(ctx, "Следующей страницы нет");
+    } catch (e) {
+      logError("lk_reports_nav_no_next", e);
+    }
+  });
+
   // Pagination (used in list/delete/edit pick). Just increments page and re-render current view.
   bot.action("lk_reports_more", async (ctx) => {
     try {
@@ -3188,6 +3311,8 @@ function registerReports(bot, ensureUser, logError) {
       if (!user) return;
 
       const st = getSt(ctx.from.id) || {};
+      if (!st.hasMore) return toast(ctx, "Следующей страницы нет.");
+
       const nextPage = (Number.isInteger(st.page) ? st.page : 0) + 1;
       setSt(ctx.from.id, { page: nextPage });
 
@@ -3228,12 +3353,17 @@ function registerReports(bot, ensureUser, logError) {
       if (!user) return;
 
       const st = getSt(ctx.from.id) || {};
-      const prevPage = Math.max(
-        0,
-        (Number.isInteger(st.page) ? st.page : 0) - 1
-      );
+      const cur = Number.isInteger(st.page) ? st.page : 0;
+      if (cur <= 0) return toast(ctx, "Предыдущей страницы нет.");
+
+      const prevPage = cur - 1;
       setSt(ctx.from.id, { page: prevPage });
 
+      // Decide by last view (аналогично как в lk_reports_more, если хочешь)
+      if (st.view === "delete")
+        return showDeleteMode(ctx, user, { edit: true });
+      if (st.view === "edit_pick")
+        return showEditPick(ctx, user, { edit: true });
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_less", e);

@@ -2093,6 +2093,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     const roleLabels = {
       super_admin: "супер-админ",
       admin: "админ",
+      worker: "сотрудник",
       user: "пользователь",
     };
 
@@ -2109,13 +2110,28 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     const workPhoneText = u.work_phone || "не указан";
     const usernameText = u.username ? `@${u.username}` : "не указан";
 
-    let text = "🧑‍💼 *Сотрудник*\n\n";
-    text += `• Имя: ${u.full_name || "не указано"}\n`;
-    text += `• Роль: ${roleText}\n`;
-    text += `• Статус: ${statusText}\n`;
-    text += `• Должность: ${positionText}\n`;
-    text += `• Рабочий номер: ${workPhoneText}\n`;
-    text += `• Username: ${usernameText}\n`;
+    const header = (statusLabels[u.staff_status] || "сотрудник").toUpperCase();
+    const sep = "────────────────────────────";
+
+    const nameVal = escHtml(u.full_name || "не указано");
+    const roleVal = escHtml(roleText);
+    const statusVal = escHtml(statusText);
+    const posVal = escHtml(positionText);
+    const phoneVal = escHtml(workPhoneText);
+    const userVal = escHtml(usernameText);
+
+    let text =
+      `🔻 <b>${escHtml(header)}</b>\n${sep}\n` +
+      `🔹 <b>Общая информация</b>\n` +
+      `• <b>Имя:</b> ${nameVal}\n` +
+      `• <b>Роль:</b> ${roleVal}\n` +
+      `• <b>Статус:</b> ${statusVal}\n` +
+      `• <b>Должность:</b> ${posVal}\n` +
+      `• <b>Рабочий номер:</b> ${phoneVal}\n` +
+      `• <b>Username:</b> ${userVal}\n` +
+      `${sep}\n` +
+      `🔹 <b>О работе</b>\n` +
+      `• <b>Следующая смена:</b> в разработке\n`;
 
     const rows = [];
 
@@ -2159,11 +2175,12 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     ]);
 
     const keyboard = Markup.inlineKeyboard(rows);
+    const extra = { ...keyboard, parse_mode: "HTML" };
 
     if (options.edit) {
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      await deliver(ctx, { text, extra }, { edit: true });
     } else {
-      await ctx.reply(text, keyboard);
+      await ctx.reply(text, extra);
     }
   }
 
@@ -2248,14 +2265,21 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
         `lk_worker_edit_position_${workerId}`
       ),
     ]);
+    // статус — пока заглушка
     rows.push([
       Markup.button.callback(
         "✏️ Изменить статус",
-        `admin_worker_change_status_${u.id}`
+        `admin_worker_change_status_stub_${u.id}`
       ),
     ]);
 
-    if (u.role !== "super_admin") {
+    // роль — показываем только супер-админу (тому, кто открыл меню)
+    const me = await pool.query(
+      `SELECT role FROM users WHERE telegram_id = $1 LIMIT 1`,
+      [ctx.from.id]
+    );
+    const isSuperAdmin = me.rows[0]?.role === "super_admin";
+    if (isSuperAdmin) {
       rows.push([
         Markup.button.callback(
           "✏️ Изменить роль",
@@ -2298,6 +2322,12 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     } catch (err) {
       logError("admin_users_interns", err);
     }
+  });
+
+  bot.action(/^admin_worker_change_status_stub_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("🚧 В разработке", { show_alert: false })
+      .catch(() => {});
   });
 
   // Сотрудники — полноценный экран

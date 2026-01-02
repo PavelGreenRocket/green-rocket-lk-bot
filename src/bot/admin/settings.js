@@ -10,7 +10,6 @@ const { registerAdminCashCollectionAccess } = require("./cashCollectionAccess");
 const { registerCashDiffSettings } = require("./cashDiffSettings");
 const { registerAdminPositions } = require("./positions");
 
-
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
 
@@ -749,6 +748,13 @@ function registerAdminSettings(bot, ensureUser, logError) {
 
       const keyboard = Markup.inlineKeyboard([
         [{ text: "🧩 Настройка должностей", callback_data: "admin_positions" }],
+        [{ text: "👑 Настройка ролей", callback_data: "admin_roles" }],
+        [
+          {
+            text: "🏷 Настройка статусов",
+            callback_data: "admin_staff_statuses",
+          },
+        ],
         [{ text: "⬅️ Назад", callback_data: "admin_settings" }],
       ]);
 
@@ -756,6 +762,64 @@ function registerAdminSettings(bot, ensureUser, logError) {
     } catch (err) {
       logError("admin_settings_users", err);
     }
+  });
+
+  bot.action("admin_roles", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const text =
+        "👑 <b>Роли</b>\n\n" +
+        "Пока это справочник-заглушка. Управление ролями будет добавлено позже.\n\n" +
+        "Выберите роль:";
+
+      const keyboard = Markup.inlineKeyboard([
+        [{ text: "user", callback_data: "admin_role_stub:user" }],
+        [{ text: "admin", callback_data: "admin_role_stub:admin" }],
+        [{ text: "super_admin", callback_data: "admin_role_stub:super_admin" }],
+        [{ text: "⬅️ Назад", callback_data: "admin_settings_users" }],
+      ]);
+
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_roles", err);
+    }
+  });
+
+  bot.action(/^admin_role_stub:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery("⏳ В разработке").catch(() => {});
+  });
+
+  bot.action("admin_staff_statuses", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const text =
+        "🏷 <b>Статусы сотрудников</b>\n\n" +
+        "Пока это справочник-заглушка. Управление статусами будет добавлено позже.\n\n" +
+        "Выберите статус:";
+
+      const keyboard = Markup.inlineKeyboard([
+        [{ text: "Кандидат", callback_data: "admin_status_stub:candidate" }],
+        [{ text: "Стажёр", callback_data: "admin_status_stub:intern" }],
+        [{ text: "Сотрудник", callback_data: "admin_status_stub:worker" }],
+        [{ text: "⬅️ Назад", callback_data: "admin_settings_users" }],
+      ]);
+
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_staff_statuses", err);
+    }
+  });
+
+  bot.action(/^admin_status_stub:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery("⏳ В разработке").catch(() => {});
   });
 
   // -----------------------------
