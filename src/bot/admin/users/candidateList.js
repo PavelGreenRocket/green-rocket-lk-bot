@@ -934,6 +934,61 @@ function calcInternshipDays(isoDate) {
 // РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ДЛЯ СПИСКА И ФИЛЬТРОВ
 // ----------------------------------------
 
+async function showWorkerPositionPicker(ctx, workerId, options = {}) {
+  const shouldEdit =
+    options.edit !== undefined
+      ? options.edit
+      : ctx.updateType === "callback_query";
+
+  const { rows } = await pool.query(
+    `SELECT id, title FROM positions WHERE is_active = TRUE ORDER BY title`
+  );
+
+  let text = "💼 *Выберите должность сотрудника:*";
+  const buttons = [];
+
+  if (!rows.length) {
+    text += "\n\n— список пуст —\n\nДобавьте должности в настройке должностей.";
+  } else {
+    for (const p of rows) {
+      buttons.push([
+        Markup.button.callback(
+          p.title,
+          `lk_worker_set_position_${workerId}_${p.id}`
+        ),
+      ]);
+    }
+  }
+
+  buttons.push([
+    Markup.button.callback("⬅️ Назад", `lk_worker_open_${workerId}`),
+  ]);
+
+  const keyboard = Markup.inlineKeyboard(buttons);
+  await deliver(
+    ctx,
+    { text, extra: { ...keyboard, parse_mode: "Markdown" } },
+    { edit: shouldEdit }
+  );
+}
+
+async function setWorkerPosition(workerId, positionId) {
+  const { rows } = await pool.query(
+    `SELECT title FROM positions WHERE id = $1 AND is_active = TRUE LIMIT 1`,
+    [positionId]
+  );
+  if (!rows.length) return { ok: false, reason: "not_found" };
+
+  const title = rows[0].title;
+
+  await pool.query(`UPDATE users SET position = $2 WHERE id = $1`, [
+    workerId,
+    title,
+  ]);
+
+  return { ok: true, title };
+}
+
 function registerCandidateListHandlers(bot, ensureUser, logError) {
   registerCandidateEditHandlers(
     bot,
@@ -942,6 +997,55 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     showCandidateCardLk,
     isRestoreModeFor
   );
+
+  // открыть выбор должности
+  bot.action(/^lk_worker_edit_position_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin) return;
+      if (admin.role !== "admin" && admin.role !== "super_admin") {
+        await ctx.answerCbQuery("Нет доступа").catch(() => {});
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      await showWorkerPositionPicker(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("lk_worker_edit_position", err);
+    }
+  });
+
+  // выбрать должность -> записать -> вернуться в карточку сотрудника
+  bot.action(/^lk_worker_set_position_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin) return;
+      if (admin.role !== "admin" && admin.role !== "super_admin") {
+        await ctx.answerCbQuery("Нет доступа").catch(() => {});
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+      const positionId = Number(ctx.match[2]);
+
+      const res = await setWorkerPosition(workerId, positionId);
+      if (!res.ok) {
+        await ctx.answerCbQuery("Должность не найдена").catch(() => {});
+        // остаёмся на выборе
+        await showWorkerPositionPicker(ctx, workerId, { edit: true });
+        return;
+      }
+
+      await ctx.answerCbQuery("✅ Должность обновлена").catch(() => {});
+      // важно: у тебя уже есть открытие карточки сотрудника по callback
+      // ниже я использую универсальный переход "lk_worker_open_<id>"
+      // если у тебя другое имя — скажи, поправлю под фактический callback.
+      await showWorkerCardLk(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("lk_worker_set_position", err);
+    }
+  });
 
   // ---------------- ОТКРЫТИЕ КАРТОЧКИ СТАЖЁРА ИЗ СПИСКА ----------------
 
@@ -2141,7 +2245,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     rows.push([
       Markup.button.callback(
         "✏️ Изменить должность",
-        `admin_worker_change_position_${u.id}`
+        `lk_worker_edit_position_${workerId}`
       ),
     ]);
     rows.push([
