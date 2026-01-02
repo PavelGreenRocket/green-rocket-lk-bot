@@ -6,6 +6,7 @@ const { registerAdminMailings } = require("./mailings");
 const { registerAdminSettings } = require("./settings");
 const { registerAdminTasks } = require("./tasks");
 const { registerAdminShiftTasks } = require("./shiftTasks");
+const { registerAdminPositions } = require("./positions");
 
 function registerAdminPanel(bot, ensureUser, logError) {
   bot.action("lk_admin_menu", async (ctx) => {
@@ -35,6 +36,7 @@ function registerAdminPanel(bot, ensureUser, logError) {
   registerAdminSettings(bot, ensureUser, logError);
   registerAdminTasks(bot, ensureUser, logError);
   registerAdminShiftTasks(bot, ensureUser, logError);
+  registerAdminPositions(bot);
 }
 
 module.exports = { registerAdminPanel };

@@ -355,10 +355,7 @@ async function showFinishScreen(ctx, user, { edit = true } = {}) {
   const head = buildClosingSummary(tpTitle, dateStr, row);
 
   const hasOpen = await hasOpenTodayTasks(user.id);
-  const question = hasOpen
-    ? "⚠️ Внимание: у вас есть незакрытые задачи за сегодня.\n\nВсё заполнено. Закрыть смену всё равно?"
-    : "Всё заполнено. Закрыть смену?";
-
+  let shiftStatus = "закрыть смену?";
   const tr = await pool.query(
     `
     SELECT id
@@ -370,8 +367,13 @@ async function showFinishScreen(ctx, user, { edit = true } = {}) {
     `,
     [Number(st.shiftId)]
   );
-
   const isTransfer = !!tr.rows[0];
+  if (isTransfer) {
+    shiftStatus = "передать смену?";
+  }
+  const question = hasOpen
+    ? `⚠️ Внимание: у вас есть незакрытые задачи за сегодня.\n\nВсё заполнено. ${shiftStatus}`
+    : `Всё заполнено. ${shiftStatus}`;
 
   const kb = Markup.inlineKeyboard([
     [

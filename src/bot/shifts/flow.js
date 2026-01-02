@@ -696,6 +696,13 @@ function registerShiftFlow(bot, ensureUser, logError) {
         logError("syncTasksFromTransferIfNeeded", e);
       }
 
+      // если смена открыта после передачи — уведомим передающего, что смена реально открыта
+      try {
+        await notifyTransferOpenedIfNeeded(ctx, st.shiftId, num, user);
+      } catch (e) {
+        logError("notifyTransferOpenedIfNeeded", e);
+      }
+
       try {
         const mod = await import("../cashDiffAlerts.js");
         const fn =
@@ -1021,6 +1028,62 @@ async function syncTasksFromTransferIfNeeded(toShiftId) {
   await pool.query(
     `UPDATE shift_transfer_requests SET tasks_synced_at = now() WHERE id = $1`,
     [Number(req.req_id)]
+  );
+}
+
+async function notifyTransferOpenedIfNeeded(
+  ctx,
+  toShiftId,
+  openingCash,
+  openerUser
+) {
+  const r = await pool.query(
+    `
+    SELECT
+      tr.id AS req_id,
+      tr.from_user_id,
+      u_from.telegram_id AS from_telegram_id,
+      tp.title AS point_title,
+      s.id AS shift_id
+    FROM shift_transfer_requests tr
+    JOIN users u_from ON u_from.id = tr.from_user_id
+    JOIN trade_points tp ON tp.id = tr.trade_point_id
+    JOIN shifts s ON s.id = tr.to_shift_id
+    WHERE tr.to_shift_id = $1
+      AND tr.status = 'completed'
+      AND tr.opened_notified_at IS NULL
+    ORDER BY tr.id DESC
+    LIMIT 1
+    `,
+    [Number(toShiftId)]
+  );
+
+  const row = r.rows[0];
+  if (!row || !row.from_telegram_id) return;
+
+  const openerName =
+    openerUser?.full_name ||
+    (openerUser?.username ? `@${openerUser.username}` : "сотрудник");
+
+  const cashStr =
+    typeof openingCash === "number" && Number.isFinite(openingCash)
+      ? openingCash.toLocaleString("ru-RU")
+      : "—";
+
+  const text =
+    `✅ *Смена принята и открыта*\n\n` +
+    `Точка: *${row.point_title}*\n` +
+    `Смена: *${row.shift_id}*\n` +
+    `Кто открыл: *${openerName}*\n` +
+    `В кассе при открытии: *${cashStr} ₽*`;
+
+  await ctx.telegram.sendMessage(row.from_telegram_id, text, {
+    parse_mode: "Markdown",
+  });
+
+  await pool.query(
+    `UPDATE shift_transfer_requests SET opened_notified_at = now() WHERE id = $1`,
+    [Number(row.req_id)]
   );
 }
 

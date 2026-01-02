@@ -8,6 +8,8 @@ const { registerAdminShiftClosingTasks } = require("./shiftClosingTasks");
 const { registerAdminResponsibles } = require("./responsibles");
 const { registerAdminCashCollectionAccess } = require("./cashCollectionAccess");
 const { registerCashDiffSettings } = require("./cashDiffSettings");
+const { registerAdminPositions } = require("./positions");
+
 
 // Состояния для создания / редактирования торговых точек
 const tradePointStates = new Map();
@@ -31,6 +33,8 @@ function registerAdminSettings(bot, ensureUser, logError) {
   registerAdminResponsibles(bot, ensureUser, logError);
   registerAdminCashCollectionAccess(bot, ensureUser, logError);
   registerCashDiffSettings(bot, ensureUser, logError);
+
+  registerAdminPositions(bot, ensureUser, logError);
 
   registerAiSettings(bot, ensureUser, logError);
   // -----------------------------
@@ -731,10 +735,33 @@ function registerAdminSettings(bot, ensureUser, logError) {
     }
   });
 
+  bot.action("admin_settings_users", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const text =
+        "👥 <b>Пользователи</b>\n\n" +
+        "Здесь настраиваются справочники, связанные с пользователями.\n" +
+        "В частности — список доступных должностей сотрудников.";
+
+      const keyboard = Markup.inlineKeyboard([
+        [{ text: "🧩 Настройка должностей", callback_data: "admin_positions" }],
+        [{ text: "⬅️ Назад", callback_data: "admin_settings" }],
+      ]);
+
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_settings_users", err);
+    }
+  });
+
   // -----------------------------
   // ЗАГЛУШКИ ДЛЯ ПРОЧИХ РАЗДЕЛОВ
   // -----------------------------
-  bot.action(/admin_settings_(academy|users|stock)/, async (ctx) => {
+  bot.action(/admin_settings_(academy|stock)/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
 

@@ -7,6 +7,7 @@ const { toast, alert } = require("../../utils/toast");
 const { registerReportImports } = require("./imports");
 const { registerReportEdit } = require("./edit");
 const { registerReportDelete } = require("./delete");
+const { registerReportMore } = require("./more");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -45,6 +46,74 @@ function fmtMoneyRub(v) {
   if (v == null || Number.isNaN(n)) return "-";
   return `${new Intl.NumberFormat("ru-RU").format(n)} ₽`;
 }
+
+function calcExpectedCash(row) {
+  const opening = Number(row.opening_cash_amount ?? 0);
+  const salesCash = Number(row.sales_cash ?? 0);
+
+  const was = row.was_cash_collection === true;
+  const cashCollection = was ? Number(row.cash_collection_amount ?? 0) : 0;
+
+  return opening + salesCash - cashCollection;
+}
+
+function calcCashDiff(row) {
+  const inDrawer = Number(row.cash_in_drawer ?? 0);
+  const expected = calcExpectedCash(row);
+  const diff = inDrawer - expected; // >0 излишек, <0 недостача
+  return { expected, diff };
+}
+
+function fmtSignedRub(diff) {
+  const n = Number(diff);
+  if (!Number.isFinite(n)) return "-";
+  const abs = Math.abs(n);
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  return `${sign}${new Intl.NumberFormat("ru-RU").format(abs)} ₽`;
+}
+
+// пороги берём так же, как в cashDiffAlerts (из последней строки)
+async function loadCashDiffThresholds() {
+  try {
+    const r = await pool.query(`
+      SELECT
+        shortage_threshold::numeric AS shortage_threshold,
+        surplus_threshold::numeric  AS surplus_threshold
+      FROM cash_diff_settings
+      ORDER BY id DESC
+      LIMIT 1
+    `);
+
+    const row = r.rows[0] || {};
+    return {
+      shortage: Number(row.shortage_threshold ?? 0),
+      surplus: Number(row.surplus_threshold ?? 0),
+    };
+  } catch (e) {
+    // если таблицы/колонок нет или ещё что-то — просто считаем пороги = 0
+    return { shortage: 0, surplus: 0 };
+  }
+}
+
+function diffMark(diff, thresholds) {
+  const d = Number(diff);
+  if (!Number.isFinite(d)) return "";
+  const shortage = Number(thresholds?.shortage ?? 0);
+  const surplus = Number(thresholds?.surplus ?? 0);
+
+  if (d < 0 && Math.abs(d) > shortage && shortage > 0) return " ❗";
+  if (d > 0 && d > surplus && surplus > 0) return " ➕";
+  return "";
+}
+
+function diffDot(diff) {
+  const d = Number(diff);
+  if (!Number.isFinite(d)) return "⚪";
+  if (d < 0) return "🔴";
+  if (d > 0) return "🟢";
+  return "⚪";
+}
+
 
 function fmtDeltaSign(diff) {
   const n = Number(diff);
@@ -116,6 +185,7 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
     }
     lines.push(`      <b>изменить:</b> /edit_${row.shift_id}`);
     lines.push(`      <b>удалить:</b> /delete_${row.shift_id}`);
+    lines.push(`      <b>подробнее:</b> /more_${row.shift_id}`);
     lines.push(""); // пустая строка перед "Сотрудник"
   }
 
@@ -3743,6 +3813,8 @@ function registerReports(bot, ensureUser, logError) {
     logError,
     showReportsList,
   });
+
+  registerReportMore(bot, { ensureUser, logError, showReportsList });
 
   registerReportImports(bot, {
     ensureUser,
