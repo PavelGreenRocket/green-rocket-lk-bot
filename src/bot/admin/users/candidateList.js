@@ -69,6 +69,22 @@ function normalizePhone(raw) {
   return s;
 }
 
+function phoneForTelegram(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+
+  // оставляем только цифры и "+"
+  let cleaned = s.replace(/[^\d+]/g, "");
+
+  // 8XXXXXXXXXX -> +7XXXXXXXXXX
+  if (/^8\d{10}$/.test(cleaned)) cleaned = "+7" + cleaned.slice(1);
+
+  // 7XXXXXXXXXX -> +7XXXXXXXXXX
+  if (/^7\d{10}$/.test(cleaned)) cleaned = "+7" + cleaned.slice(1);
+
+  return cleaned;
+}
+
 // ----------------------------------------
 // СОСТОЯНИЕ "РАСКРЫТА КАРТОЧКА" ДЛЯ СОТРУДНИКОВ
 // ----------------------------------------
@@ -328,7 +344,10 @@ async function showWaitingUsersForWorkerLink(ctx) {
   const buttons = rows.map((u) => {
     const agePart = u.age ? ` (${u.age})` : "";
     const phonePart = u.phone ? ` ${u.phone}` : "";
-    const label = `${u.full_name || "Без имени"}${agePart}${phonePart}`;
+    const nameWithAge = `${u.full_name || "не указано"}${
+      u.age ? ` (${u.age})` : ""
+    }`;
+    const label = `${nameWithAge || "Без имени"}${agePart}${phonePart}`;
     return [Markup.button.callback(label, `lk_add_worker_link_select_${u.id}`)];
   });
 
@@ -522,18 +541,19 @@ async function loadInternsForAdmin(user, filters) {
   const res = await pool.query(
     `
 SELECT
-  c.id,
-  c.name,
-  c.age,
+  u.id,
+  u.full_name,
+  u.role,
+  u.staff_status,
+  u.position,
+  u.work_phone,
+  u.username,
+  u.candidate_id,
+  c.age AS age
+FROM users u
+LEFT JOIN candidates c ON c.id = u.candidate_id
+WHERE u.id = $1
 
-  c.internship_date,
-  c.internship_time_from,
-  c.internship_time_to,
-
-  COALESCE(tp_place.title, 'не указано') AS place_title
-FROM candidates c
-  LEFT JOIN trade_points tp_place ON c.internship_point_id = tp_place.id
-WHERE ${where}
 ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
     `,
     params
@@ -997,6 +1017,70 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     showCandidateCardLk,
     isRestoreModeFor
   );
+
+  bot.action(/^admin_worker_edit_age_(\d+)$/, async (ctx) => {
+    try {
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        await ctx
+          .answerCbQuery("Нет доступа", { show_alert: true })
+          .catch(() => {});
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+
+      // Берём текущего юзера
+      const ur = await pool.query(
+        `SELECT id, full_name, candidate_id FROM users WHERE id = $1 LIMIT 1`,
+        [workerId]
+      );
+      const u = ur.rows[0];
+      if (!u) {
+        await ctx
+          .answerCbQuery("Сотрудник не найден", { show_alert: true })
+          .catch(() => {});
+        return;
+      }
+
+      let candidateId = u.candidate_id;
+
+      // ✅ Если анкеты кандидата нет — создаём "служебную" и привязываем
+      if (!candidateId) {
+        const name = (u.full_name || "Сотрудник").trim();
+
+        const cr = await pool.query(
+          `
+        INSERT INTO candidates (name, status, is_deferred, decline_reason, declined_at, admin_id)
+        VALUES ($1, 'rejected', true, 'служебная анкета для сотрудника', NOW(), $2)
+        RETURNING id
+        `,
+          [name, admin.id]
+        );
+
+        candidateId = cr.rows[0].id;
+
+        await pool.query(`UPDATE users SET candidate_id = $1 WHERE id = $2`, [
+          candidateId,
+          workerId,
+        ]);
+      }
+
+      await ctx.answerCbQuery().catch(() => {});
+
+      setWorkerEditState(ctx.from.id, {
+        userId: workerId,
+        field: "age",
+        candidateId,
+      });
+
+      await ctx.reply(
+        "🎂 Введи возраст (число).\nЧтобы очистить — отправь «-».\nДля отмены — /cancel"
+      );
+    } catch (err) {
+      logError("admin_worker_edit_age", err);
+    }
+  });
 
   // открыть выбор должности
   bot.action(/^lk_worker_edit_position_(\d+)$/, async (ctx) => {
@@ -2067,16 +2151,20 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
   async function showWorkerCardLk(ctx, workerId, options = {}) {
     const res = await pool.query(
       `
-        SELECT
-          id,
-          full_name,
-          role,
-          staff_status,
-          position,
-          work_phone,
-          username
-        FROM users
-        WHERE id = $1
+    SELECT
+  u.id,
+  u.full_name,
+  u.role,
+  u.staff_status,
+  u.position,
+  u.work_phone,
+  u.username,
+  u.candidate_id,
+  c.age AS age
+FROM users u
+LEFT JOIN candidates c ON c.id = u.candidate_id
+WHERE u.id = $1
+
       `,
       [workerId]
     );
@@ -2107,13 +2195,18 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     const statusText =
       statusLabels[u.staff_status] || u.staff_status || "не указан";
     const positionText = u.position || "не указана";
-    const workPhoneText = u.work_phone || "не указан";
+    const normalizedPhone = phoneForTelegram(u.work_phone);
+    const workPhoneText = normalizedPhone || u.work_phone || "не указан";
     const usernameText = u.username ? `@${u.username}` : "не указан";
 
     const header = (statusLabels[u.staff_status] || "сотрудник").toUpperCase();
     const sep = "────────────────────────────";
 
-    const nameVal = escHtml(u.full_name || "не указано");
+    const nameWithAge = `${u.full_name || "не указано"}${
+      u.age ? ` (${u.age})` : ""
+    }`;
+    const nameVal = escHtml(nameWithAge);
+
     const roleVal = escHtml(roleText);
     const statusVal = escHtml(statusText);
     const posVal = escHtml(positionText);
@@ -2189,16 +2282,20 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
   async function showWorkerSettingsMenu(ctx, workerId, options = {}) {
     const res = await pool.query(
       `
-        SELECT
-          id,
-          full_name,
-          role,
-          staff_status,
-          position,
-          work_phone,
-          username
-        FROM users
-        WHERE id = $1
+     SELECT
+  u.id,
+  u.full_name,
+  u.role,
+  u.staff_status,
+  u.position,
+  u.work_phone,
+  u.username,
+  u.candidate_id,
+  c.age AS age
+FROM users u
+LEFT JOIN candidates c ON c.id = u.candidate_id
+WHERE u.id = $1
+
       `,
       [workerId]
     );
@@ -2228,16 +2325,28 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     const statusText =
       statusLabels[u.staff_status] || u.staff_status || "не указан";
     const positionText = u.position || "не указана";
-    const workPhoneText = u.work_phone || "не указан";
+    const normalizedPhone = phoneForTelegram(u.work_phone);
+    const workPhoneText = normalizedPhone || u.work_phone || "не указан";
     const usernameText = u.username ? `@${u.username}` : "не указан";
 
-    let text = "⚙️ *Настройки сотрудника*\n\n";
-    text += `• Имя: ${u.full_name || "не указано"}\n`;
-    text += `• Роль: ${roleText}\n`;
-    text += `• Статус: ${statusText}\n`;
-    text += `• Должность: ${positionText}\n`;
-    text += `• Рабочий номер: ${workPhoneText}\n`;
-    text += `• Username: ${usernameText}\n`;
+    const HR = "────────────────────────────";
+
+    let text = `⚙️ <b>НАСТРОЙКИ СОТРУДНИКА</b>\n`;
+    text += `${HR}\n`;
+    text += `🔹 <b>Общая информация</b>\n`;
+    const nameWithAge = `${u.full_name || "не указано"}${
+      u.age ? ` (${u.age})` : ""
+    }`;
+    text += `• <b>Имя:</b> ${escHtml(nameWithAge)}\n`;
+
+    text += `• <b>Роль:</b> ${escHtml(roleText)}\n`;
+    text += `• <b>Статус:</b> ${escHtml(statusText)}\n`;
+    text += `• <b>Должность:</b> ${escHtml(positionText)}\n`;
+    text += `• <b>Рабочий номер:</b> ${escHtml(workPhoneText)}\n`;
+    text += `• <b>Username:</b> ${escHtml(usernameText)}\n`;
+    text += `${HR}\n`;
+    text += `🔹 <b>О работе</b>\n`;
+    text += `• <b>Следующая смена:</b> в разработке`;
 
     const rows = [];
 
@@ -2259,6 +2368,13 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
         `admin_worker_edit_name_${u.id}`
       ),
     ]);
+    rows.push([
+      Markup.button.callback(
+        "✏️ Изменить возраст",
+        `admin_worker_edit_age_${u.id}`
+      ),
+    ]);
+
     rows.push([
       Markup.button.callback(
         "✏️ Изменить должность",
@@ -2293,11 +2409,12 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
     ]);
 
     const keyboard = Markup.inlineKeyboard(rows);
+    const extra = { ...keyboard, parse_mode: "HTML" };
 
     if (options.edit) {
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      await deliver(ctx, { text, extra }, { edit: true });
     } else {
-      await ctx.reply(text, keyboard);
+      await ctx.reply(text, extra);
     }
   }
 
@@ -2647,7 +2764,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
         const isCurrent = u.role === r.code;
         rows.push([
           Markup.button.callback(
-            (isCurrent ? "✅ " : "⚪ ") + r.label,
+            (isCurrent ? "✅ " : "") + r.code,
             `admin_worker_set_role_${workerId}_${r.code}`
           ),
         ]);
@@ -2701,7 +2818,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
         return next();
       }
 
-      let text = (ctx.message.text || "").trim();
+      const text = (ctx.message.text || "").trim();
       if (!text) return;
 
       if (text.toLowerCase() === "/cancel" || text.toLowerCase() === "отмена") {
@@ -2711,6 +2828,44 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
       }
 
       const userId = state.userId;
+
+      if (state.field === "age") {
+        const candidateId = state.candidateId;
+        if (!candidateId) {
+          clearWorkerEditState(ctx.from.id);
+          await ctx.reply(
+            "У сотрудника нет анкеты кандидата — возраст менять нельзя."
+          );
+          return;
+        }
+
+        if (text === "-") {
+          await pool.query(`UPDATE candidates SET age = NULL WHERE id = $1`, [
+            candidateId,
+          ]);
+          clearWorkerEditState(ctx.from.id);
+          await ctx.reply("Возраст очищен ✅");
+          await showWorkerSettingsMenu(ctx, userId, { edit: false });
+          return;
+        }
+
+        const n = Number(text);
+        if (!Number.isInteger(n) || n < 14 || n > 90) {
+          await ctx.reply(
+            "Возраст должен быть числом от 14 до 90. Или «-» чтобы очистить, или /cancel."
+          );
+          return;
+        }
+
+        await pool.query(`UPDATE candidates SET age = $1 WHERE id = $2`, [
+          n,
+          candidateId,
+        ]);
+        clearWorkerEditState(ctx.from.id);
+        await ctx.reply("Возраст обновлён ✅");
+        await showWorkerSettingsMenu(ctx, userId, { edit: false });
+        return;
+      }
 
       if (state.field === "work_phone") {
         const value = text === "-" ? null : text;

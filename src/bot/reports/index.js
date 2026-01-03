@@ -766,7 +766,8 @@ async function loadReportsPage({ page, filters, limit }) {
   WHERE ${whereSql}
     AND sc.deleted_at IS NULL
 
-  ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
+  ORDER BY COALESCE(s.opened_at, s.closed_at) DESC NULLS LAST, s.id DESC
+
   LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
 `;
 
@@ -815,7 +816,8 @@ async function loadReportsPage({ page, filters, limit }) {
 
     WHERE ${whereSql}
 
-    ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
+    ORDER BY COALESCE(s.opened_at, s.closed_at) DESC NULLS LAST, s.id DESC
+
     LIMIT $${nextIdx} OFFSET $${nextIdx + 1}
   `;
 
@@ -1116,12 +1118,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   if (rows.length) {
     const isAnalysisFmt = format === "analysis1" || format === "analysis2";
 
-    const rowsForUi = isAnalysisFmt
-      ? [...rows].sort(
-          (a, b) =>
-            new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
-        )
-      : rows;
+    const rowsForUi = rows;
 
     const detailed = admin && Boolean(st.cashDetailed);
     const thresholds = await loadCashDiffThresholdsBestEffort();
@@ -1606,13 +1603,7 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
 
   let body2 = "Пока нет закрытых смен.";
   if (listRows.length) {
-    const rowsForUi =
-      format2 === "analysis1" || format2 === "analysis2"
-        ? [...listRows].sort(
-            (a, b) =>
-              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
-          )
-        : listRows;
+    const rowsForUi = listRows;
 
     body2 = isAnalysis2
       ? format2 === "analysis2"
@@ -1824,13 +1815,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
 
   let body2 = "Пока нет закрытых смен.";
   if (listRows.length) {
-    const rowsForUi =
-      format2 === "analysis1" || format2 === "analysis2"
-        ? [...listRows].sort(
-            (a, b) =>
-              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
-          )
-        : listRows;
+    const rowsForUi = listRows;
 
     body2 = isAnalysis2
       ? format2 === "analysis2"
@@ -1902,13 +1887,7 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
   let summaryBlock2 = null;
   let body2 = "Пока нет закрытых смен.";
   if (listRows.length) {
-    const rowsForUi =
-      format2 === "analysis1" || format2 === "analysis2"
-        ? [...listRows].sort(
-            (a, b) =>
-              new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
-          )
-        : listRows;
+    const rowsForUi = listRows;
 
     body2 = isAnalysis2
       ? format2 === "analysis2"
@@ -2165,7 +2144,8 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
       FROM shifts s
       WHERE s.user_id = $1
         AND s.status = 'closed'
-      ORDER BY s.closed_at DESC NULLS LAST, s.id DESC
+      ORDER BY COALESCE(s.opened_at, s.closed_at) DESC NULLS LAST, s.id DESC
+
       LIMIT 1
       `,
       [user.id]
