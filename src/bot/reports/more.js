@@ -49,6 +49,18 @@ function fmtMoneyPlain(v) {
   return new Intl.NumberFormat("ru-RU").format(n);
 }
 
+function fmtWorkerLine(u, { admin } = {}) {
+  const name = u?.full_name || "—";
+
+  // @username — только админам/суперадминам
+  if (admin && u?.username) return `${name} (@${u.username})`;
+
+  // телефон — только админам (на всякий, если появится в row)
+  if (admin && u?.work_phone) return `${name} (${u.work_phone})`;
+
+  return name;
+}
+
 function diffMarkTight(diff, thresholds) {
   const d = Number(diff);
   if (!Number.isFinite(d)) return "";
@@ -158,7 +170,10 @@ function diffDot(diff) {
 }
 
 // 1 смена -> подробная карточка (как “кассовый подробный” по стилю)
-function buildMoreCard(row, { admin, thresholds, openingDiff, closingDiff }) {
+function buildMoreCard(
+  row,
+  { admin, thresholds, openingDiff, closingDiff, workers }
+) {
   const lines = [];
 
   lines.push(`<b>🔻 Смена:</b> <code>${row.shift_id}</code>`);
@@ -169,20 +184,28 @@ function buildMoreCard(row, { admin, thresholds, openingDiff, closingDiff }) {
 
   // дату смены (открытия) — сюда же, как ты хотел: "Смена: 68 (31.12.2025)"
   const openedDate = row.opened_at ? fmtDateShort(row.opened_at) : "-";
-  lines.push(`<b>Дата смены:</b> ${openedDate}`);
+  lines.push(`📅 <b>Дата смены:</b> ${openedDate}`);
 
   const from = fmtTime(row.opened_at);
   const to = row.closed_at ? fmtTime(row.closed_at) : "-";
   lines.push(`<b>Время:</b> ${from} → ${to}`);
   lines.push("");
 
-  const name = row.full_name || "—";
-  const uname = admin && row.username ? ` (@${row.username})` : "";
-  lines.push(`<b>Сотрудник:</b> ${name}${uname}`);
+  const ws = Array.isArray(workers) ? workers.filter(Boolean) : null;
+
+  if (ws && ws.length > 1) {
+    lines.push(`👥 <b>Сотрудники:</b>`);
+    for (const w of ws) lines.push(fmtWorkerLine(w, { admin }));
+  } else {
+    const name = row.full_name || "—";
+    const uname = admin && row.username ? ` (@${row.username})` : "";
+    lines.push(`👤 <b>Сотрудник:</b> ${name}${uname}`);
+  }
+
   lines.push("──────────────");
 
   // блок "Начало"
-  lines.push(`🔷 <u><b>Начало смены:</b></u>`);
+  lines.push(`▶️ <u><b>Начало смены:</b></u>`);
   lines.push(
     `В кассе: ${fmtMoneyRub(row.opening_cash_amount)}${fmtParenDelta(
       openingDiff,
@@ -193,7 +216,7 @@ function buildMoreCard(row, { admin, thresholds, openingDiff, closingDiff }) {
   lines.push("");
 
   // блок "Конец"
-  lines.push(`🔷 <u><b>Конец смены:</b></u>`);
+  lines.push(`⏹️ <u><b>Конец смены:</b></u>`);
   lines.push(`<b>Продажи:</b> ${fmtMoneyRub(row.sales_total)}`);
   lines.push(`<b>Наличные:</b> ${fmtMoneyRub(row.sales_cash)}`);
   lines.push(
@@ -228,7 +251,7 @@ function buildWorkersCard(a, b, { admin, thresholds, prevEndA, prevEndB }) {
   const tp = a.trade_point_title || `Точка #${a.trade_point_id}`;
   lines.push(`<b>Точка:</b> ${tp}`);
   lines.push(
-    `<b>Дата смены:</b> ${a.opened_at ? fmtDateShort(a.opened_at) : "-"}`
+    `<b>📅 Дата смены:</b> ${a.opened_at ? fmtDateShort(a.opened_at) : "-"}`
   );
   lines.push("──────────────");
   lines.push("");
@@ -243,7 +266,7 @@ function buildWorkersCard(a, b, { admin, thresholds, prevEndA, prevEndB }) {
       `<b>Время:</b> ${fmtTime(a.opened_at)} → ${fmtTime(a.closed_at)}`
     );
     lines.push("");
-    lines.push(`🔷 <u><b>Начало смены:</b></u>`);
+    lines.push(`▶️ <u><b>Начало смены:</b></u>`);
     {
       const openingDiffA =
         prevEndA == null
@@ -258,7 +281,7 @@ function buildWorkersCard(a, b, { admin, thresholds, prevEndA, prevEndB }) {
     }
 
     lines.push("");
-    lines.push(`🔷 <u><b>Конец (передача):</b></u>`);
+    lines.push(`⏹️ <u><b>Конец (передача):</b></u>`);
     lines.push(`<b>Продажи:</b> ${fmtMoneyRub(a.sales_total)}`);
     lines.push(`<b>Наличные:</b> ${fmtMoneyRub(a.sales_cash)}`);
     {
@@ -296,7 +319,7 @@ function buildWorkersCard(a, b, { admin, thresholds, prevEndA, prevEndB }) {
       `<b>Время:</b> ${fmtTime(b.opened_at)} → ${fmtTime(b.closed_at)}`
     );
     lines.push("");
-    lines.push(`🔷 <u><b>Начало смены:</b></u>`);
+    lines.push(`▶️ <u><b>Начало смены:</b></u>`);
     {
       const openingDiffB =
         prevEndB == null
@@ -311,7 +334,7 @@ function buildWorkersCard(a, b, { admin, thresholds, prevEndA, prevEndB }) {
     }
 
     lines.push("");
-    lines.push(`🔷 <u><b>Конец смены:</b></u>`);
+    lines.push(`⏹️ <u><b>Конец смены:</b></u>`);
     lines.push(`<b>Продажи:</b> ${fmtMoneyRub(b.sales_total)}`);
     lines.push(`<b>Наличные:</b> ${fmtMoneyRub(b.sales_cash)}`);
     {
@@ -429,11 +452,36 @@ async function showMore(ctx, user, shiftId) {
   // дельта конца = cash_in_drawer - expected_end_cash
   const { diff: closingDiff } = calcCashDiff(row);
 
+  let workers = [{ full_name: row.full_name, username: row.username }];
+
+  const pair = await getTransferPair(shiftId);
+  if (pair) {
+    const a = await loadMoreRowByShiftId(Number(pair.from_shift_id));
+    const b = await loadMoreRowByShiftId(Number(pair.to_shift_id));
+
+    const list = [];
+    if (a) list.push({ full_name: a.full_name, username: a.username });
+    if (b) list.push({ full_name: b.full_name, username: b.username });
+
+    // уникализируем
+    const seen = new Set();
+    workers = list.filter((x) => {
+      const k = `${x.full_name || ""}|${x.username || ""}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+
+    if (!workers.length)
+      workers = [{ full_name: row.full_name, username: row.username }];
+  }
+
   const text = buildMoreCard(row, {
     admin,
     thresholds,
     openingDiff,
     closingDiff,
+    workers,
   });
 
   const buttons = [];
@@ -450,7 +498,7 @@ async function showMore(ctx, user, shiftId) {
   }
 
   buttons.push([
-    Markup.button.callback("⬅️ Назад к отчётам", "lk_reports_open"),
+    Markup.button.callback("⬅️ Назад к отчётам", "lk_reports_format_close"),
   ]);
 
   const kb = Markup.inlineKeyboard(buttons);

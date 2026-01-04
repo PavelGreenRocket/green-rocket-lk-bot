@@ -13,7 +13,7 @@ const { registerReportMore } = require("./more");
 const PAGE_SIZE_PICKER = 10;
 
 // Reports list page sizes
-const LIST_LIMIT_CASH = 10;
+const LIST_LIMIT_CASH = 5;
 const LIST_LIMIT_ANALYTICS = 20;
 
 // ───────────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ function userLabelCash(row, { admin }) {
   return name;
 }
 
-function renderCashCard(row, { admin, detailed, thresholds }) {
+function renderCashCard(row, { admin, detailed, thresholds, workers }) {
   const lines = [];
 
   const num = (v) => {
@@ -121,11 +121,11 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
     lines.push(""); // пустая строка перед "Сотрудник"
   }
 
-  lines.push(`<b>Сотрудник:</b> ${userLabelCash(row, { admin })}`);
+  const ws = Array.isArray(workers) ? workers.filter(Boolean) : null;
 
   const date = fmtDateShort(row.opened_at);
   const dow = fmtDowShort(row.opened_at);
-  lines.push(`<b>Дата:</b> ${date} (${dow})`);
+  lines.push(`📅 <b>Дата:</b> ${date} (${dow})`);
 
   const tp = row.trade_point_title || `Точка #${row.trade_point_id}`;
   if (admin) {
@@ -134,6 +134,15 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
     lines.push(`<b>${tp}:</b> (${from} → ${to})`);
   } else {
     lines.push(`<b>${tp}</b>`);
+  }
+
+  lines.push("");
+
+  if (ws && ws.length > 1) {
+    lines.push(`👥 <b>Сотрудники:</b>`);
+    for (const w of ws) lines.push(fmtWorkerLine(w, { admin }));
+  } else {
+    lines.push(`👤 <b>Сотрудник:</b>\n ${userLabelCash(row, { admin })}`);
   }
 
   lines.push("");
@@ -202,7 +211,7 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
   }
 
   if (detailed) {
-    lines.push(`🔷 <u><b>Начало смены:</b></u>`);
+    lines.push(`▶️ <u><b>Начало смены:</b></u>`);
     lines.push(
       `В кассе: ${fmtMoneyRub(row.opening_cash_amount)} ${startDelta}`
     );
@@ -210,8 +219,8 @@ function renderCashCard(row, { admin, detailed, thresholds }) {
   }
 
   const shiftEnd = detailed
-    ? "🔷 <u><b>Конец смены:</b></u>"
-    : "<b>Конец смены:</b>";
+    ? "⏹️ <u><b>Конец смены:</b></u>"
+    : "⏹️ <b>Конец смены:</b>";
 
   lines.push(shiftEnd);
 
@@ -703,6 +712,59 @@ function buildReportsWhere(filters) {
   return { whereSql: where.join(" AND "), values, nextIdx: i };
 }
 
+async function loadWorkersForShiftIds(shiftIds) {
+  const ids = (shiftIds || []).map((x) => Number(x)).filter(Boolean);
+  if (!ids.length) return new Map();
+
+  const r = await pool.query(
+    `
+    SELECT
+      str.from_shift_id,
+      str.to_shift_id,
+      uf.full_name AS from_full_name,
+      uf.username  AS from_username,
+      ut.full_name AS to_full_name,
+      ut.username  AS to_username
+    FROM shift_transfer_requests str
+    JOIN shifts sf ON sf.id = str.from_shift_id
+    JOIN shifts st ON st.id = str.to_shift_id
+    JOIN users uf ON uf.id = sf.user_id
+    JOIN users ut ON ut.id = st.user_id
+    WHERE str.status = 'completed'
+      AND (str.from_shift_id = ANY($1::int[]) OR str.to_shift_id = ANY($1::int[]))
+    ORDER BY str.id DESC
+    `,
+    [ids]
+  );
+
+  const map = new Map();
+
+  for (const row of r.rows || []) {
+    const workers = [
+      { full_name: row.from_full_name, username: row.from_username },
+      { full_name: row.to_full_name, username: row.to_username },
+    ];
+
+    // обе части смены должны показывать одинаковый список сотрудников
+    map.set(Number(row.from_shift_id), workers);
+    map.set(Number(row.to_shift_id), workers);
+  }
+
+  return map;
+}
+
+function fmtWorkerLine(u, { admin } = {}) {
+  const name = u?.full_name || "—";
+
+  // @username — только админам
+  if (admin && u?.username) return `${name} (@${u.username})`;
+
+  // телефон — только админам (если вдруг начнёшь прокидывать work_phone)
+  if (admin && u?.work_phone) return `${name} (${u.work_phone})`;
+
+  return name;
+}
+
 async function loadReportsPage({ page, filters, limit }) {
   const safeLimit = Math.max(1, Number(limit) || LIST_LIMIT_CASH);
   const offset = Math.max(0, page) * safeLimit;
@@ -1037,6 +1099,8 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   await purgeOldDeletedReports();
 
   const { rows, hasMore } = await loadReportsPage({ page, filters, limit });
+  const workersMap = await loadWorkersForShiftIds(rows.map((x) => x.shift_id));
+
   setSt(ctx.from.id, { hasMore });
 
   const inDateUi = Boolean(st.dateUi); // открыт выбор периода
@@ -1118,10 +1182,13 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   if (rows.length) {
     const isAnalysisFmt = format === "analysis1" || format === "analysis2";
 
-    const rowsForUi = rows;
+    const rowsForUi = isAnalysisFmt ? rows : rows.slice().reverse();
 
     const detailed = admin && Boolean(st.cashDetailed);
     const thresholds = await loadCashDiffThresholdsBestEffort();
+    const workersMap = await loadWorkersForShiftIds(
+      rows.map((r) => r.shift_id)
+    );
 
     // ✅ скрытие таблицы работает и для analysis1 и для analysis2
     if (hideTable && isAnalysisFmt) {
@@ -1137,6 +1204,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
                 admin,
                 detailed,
                 thresholds,
+                workers: workersMap.get(Number(r.shift_id)) || null,
               })
             )
             .join("\n\n");

@@ -569,9 +569,9 @@ async function getActiveShiftToday(userId) {
     FROM shifts s
     LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
     WHERE s.user_id = $1
-      AND s.opened_at::date = CURRENT_DATE
-      AND s.status IN ('opening_in_progress','opened')
-    ORDER BY s.id DESC
+     AND s.status IN ('opening_in_progress','opened','closing_in_progress')
+AND s.closed_at IS NULL
+    ORDER BY s.opened_at DESC NULLS LAST, s.id DESC
     LIMIT 1
     `,
     [userId]
@@ -1960,36 +1960,39 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
 
       res = await pool.query(
         `
-   SELECT
-  u.id,
-  u.full_name,
-  c.age AS age,
-  u.position,
+  SELECT
+    u.id,
+    u.full_name,
+    c.age AS age,
+    u.position,
+    u.qualification_status,
 
-      u.qualification_status,
+    sh.trade_point_id,
+    sh.trade_point_title
+  FROM users u
+  LEFT JOIN candidates c ON c.id = u.candidate_id
 
+  LEFT JOIN LATERAL (
+    SELECT
       s.trade_point_id,
-  COALESCE(tp.short_title, tp.title) AS trade_point_title
-FROM users u
-LEFT JOIN candidates c ON c.id = u.candidate_id
-
-    LEFT JOIN LATERAL (
-      SELECT trade_point_id
-      FROM shifts
-      WHERE user_id = u.id
-        AND opened_at::date = CURRENT_DATE
-        AND status IN ('opening_in_progress','opened','closing_in_progress')
-      ORDER BY opened_at DESC
-      LIMIT 1
-    ) s ON TRUE
-
+      tp.title AS trade_point_title
+    FROM shifts s
     LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+ WHERE s.user_id = u.id
+  AND s.status IN ('opening_in_progress','opened','closing_in_progress')
+  AND s.closed_at IS NULL
+  AND s.trade_point_id IS NOT NULL
 
-    WHERE u.staff_status = 'worker'
-      AND ($1::boolean IS FALSE OR s.trade_point_id IS NOT NULL)
-      ${qualWhere}
-    ORDER BY u.full_name
-    `,
+
+    ORDER BY s.opened_at DESC
+    LIMIT 1
+  ) sh ON TRUE
+
+  WHERE u.staff_status = 'worker'
+    AND ($1::boolean IS FALSE OR sh.trade_point_id IS NOT NULL)
+    ${qualWhere}
+  ORDER BY u.full_name
+  `,
         params
       );
     } catch (e) {
@@ -2036,7 +2039,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
 
       const onShiftTail =
         w.trade_point_id && w.trade_point_title
-          ? ` (💼 ${w.trade_point_title})`
+          ? ` - на смене ${w.trade_point_title}`
           : "";
 
       rows.push([
