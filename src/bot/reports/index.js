@@ -618,11 +618,50 @@ function fmtDateShort(ts) {
   return `${dd}.${mm}.${yy}`;
 }
 
+function fmtDateDayMonth(d) {
+  if (!d) return "—";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}.${mm}`;
+}
+
 const DOW_SHORT = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
 function fmtDowShort(ts) {
   if (!ts) return "";
   const d = new Date(ts);
   return DOW_SHORT[d.getDay()];
+}
+
+function parsePgDateToDate(s) {
+  // ожидаем YYYY-MM-DD
+  if (!s || typeof s !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  return new Date(y, mo, d);
+}
+
+function fmtPeriodRangeLabel(st) {
+  const from = parsePgDateToDate(st?.periodFrom);
+  const to = parsePgDateToDate(st?.periodTo);
+
+  if (from && to) {
+    const a = fmtDateDayMonth(from);
+    const b = fmtDateDayMonth(to);
+
+    // если один день — показываем только dd.mm
+    if (a === b) return a;
+
+    // диапазон — dd.mm-dd.mm (без пробелов, чтобы влезало)
+    return `${a}-${b}`;
+  }
+
+  if (from && !to) return `${fmtDateDayMonth(from)}-…`;
+  if (!from && to) return `…-${fmtDateDayMonth(to)}`;
+
+  return "Период";
 }
 
 function fmtTime(ts) {
@@ -1318,15 +1357,16 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   const prevCb = page > 0 ? "lk_reports_less" : "lk_reports_nav_no_prev";
   const nextCb = hasMore ? "lk_reports_more" : "lk_reports_nav_no_next";
 
+  const periodBtnText = fmtPeriodRangeLabel(st);
   buttons.push([
     Markup.button.callback("←", prevCb),
+    Markup.button.callback(periodBtnText, "lk_reports_period_open"),
     Markup.button.callback("→", nextCb),
   ]);
 
   if (admin) {
     // 2) Ряд: период | настройки | формат
     buttons.push([
-      Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
       Markup.button.callback("⚙️ Настройки", "lk_reports_settings"),
       Markup.button.callback("🎛 Формат", "lk_reports_format_open"),
     ]);
@@ -1344,7 +1384,6 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     // 2) Ряд: изменить | период
     buttons.push([
       Markup.button.callback("✏️ Изменить отчёт", "lk_reports_edit_last"),
-      Markup.button.callback("🗓️ Период", "lk_reports_period_open"),
     ]);
 
     // 3) Ряд: мои смены | точки

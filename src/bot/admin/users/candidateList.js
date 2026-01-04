@@ -1945,18 +1945,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     try {
       const f = getCandidateFilters(ctx.from.id);
 
-      // фильтр квалификации
+      // фильтр квалификации отключён (в users нет колонки qualification_status)
       let qualWhere = "";
       const params = [f.workerOnShift === true];
-      let p = 1;
-
-      if (f.workerQual && f.workerQual !== "all") {
-        params.push(f.workerQual);
-        p += 1;
-        // qualification_status — поле статуса квалификации у сотрудника:
-        // 'red' | 'yellow' | 'green'
-        qualWhere = ` AND u.qualification_status = $${p}`;
-      }
 
       res = await pool.query(
         `
@@ -1964,10 +1955,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     u.id,
     u.full_name,
     c.age AS age,
-    u.position,
-    u.qualification_status,
+   u.position,
 
-    sh.trade_point_id,
+sh.trade_point_id,
     sh.trade_point_title
   FROM users u
   LEFT JOIN candidates c ON c.id = u.candidate_id
@@ -2032,10 +2022,8 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       const ageText = w.age ? ` (${w.age})` : "";
 
       // по умолчанию 🟢, если статус квалификации не задан
-      let icon = "🟢";
-      if (w.qualification_status === "red") icon = "🔴";
-      if (w.qualification_status === "yellow") icon = "🟡";
-      if (w.qualification_status === "green") icon = "🟢";
+     let icon = "🟢";
+
 
       const onShiftTail =
         w.trade_point_id && w.trade_point_title

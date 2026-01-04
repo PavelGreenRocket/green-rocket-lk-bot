@@ -115,7 +115,6 @@ function buildCard(row, { hint, limitedUser }) {
   if (limitedUser) {
     lines.push("");
     lines.push("ℹ️ Ты можешь изменить <b>только свою последнюю смену</b>");
-    lines.push("(ограниченный список полей).");
   }
 
   lines.push("");
