@@ -898,6 +898,12 @@ function registerMore(bot, ensureUser, logError) {
             [id]
           );
 
+          // уведомления, которые создавал этот пользователь — отвязываем автора
+          await pool.query(
+            "UPDATE notifications SET created_by = NULL WHERE created_by = $1",
+            [id]
+          );
+
           // --- и только теперь пробуем удалить самого пользователя ---
           await pool.query("DELETE FROM users WHERE id = $1", [id]);
 

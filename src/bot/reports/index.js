@@ -1120,8 +1120,8 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   const page = Number.isInteger(st.page) ? st.page : 0;
   const filters = { ...(st.filters || {}) }; // сотрудники видят все смены
 
-  // Тумблер "Мои смены" (только для обычных)
-  if (!admin && st.onlyMyShifts) {
+  // Тумблер "Мои смены" (для всех ролей)
+  if (st.onlyMyShifts) {
     filters.workerIds = [user.id];
   }
 
@@ -1408,11 +1408,17 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   // helper: клавиатура админ-фильтра внутри периода
   const renderAdminFilterKeyboard = () => {
+    const onlyMy = Boolean(st2.onlyMyShifts);
+
     const rows = [
       [
         Markup.button.callback(
           "👥 По сотрудникам",
           "lk_reports_filter_workers"
+        ),
+        Markup.button.callback(
+          onlyMy ? "👤 Все смены" : "👤 Мои смены",
+          "lk_reports_only_my_toggle"
         ),
       ],
       [
@@ -1423,8 +1429,9 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
         Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
       ],
       [Markup.button.callback("🧹 Сбросить фильтр", "lk_reports_filter_clear")],
-      [Markup.button.callback("⬅️ Назад", "date_filter:close")],
+      [Markup.button.callback("⬅️ Назад", "date_back")],
     ];
+
     return Markup.inlineKeyboard(rows);
   };
 
@@ -3421,7 +3428,6 @@ function registerReports(bot, ensureUser, logError) {
       if (!user) return;
 
       // Только для обычного пользователя
-      if (isAdmin(user)) return;
 
       const st = getSt(ctx.from.id) || {};
       const next = !Boolean(st.onlyMyShifts);

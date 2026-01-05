@@ -437,6 +437,32 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
     }
   }
 
+  // 2в. Пишем/обновляем "следующую стажировку" (planned) в расписание
+  await pool.query(
+    `
+    INSERT INTO internship_schedules (
+      candidate_id,
+      user_id,
+      trade_point_id,
+      mentor_user_id,
+      planned_date,
+      planned_time_from,
+      planned_time_to,
+      status
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,'planned')
+    ON CONFLICT (candidate_id) WHERE status = 'planned'
+    DO UPDATE SET
+      user_id = EXCLUDED.user_id,
+      trade_point_id = EXCLUDED.trade_point_id,
+      mentor_user_id = EXCLUDED.mentor_user_id,
+      planned_date = EXCLUDED.planned_date,
+      planned_time_from = EXCLUDED.planned_time_from,
+      planned_time_to = EXCLUDED.planned_time_to
+    `,
+    [candidateId, linkedUserId, pointId, adminId, dateIso, timeFrom, timeTo]
+  );
+
   clearState(tgId);
 
   // 3. Если мы кого-то привязали — отправляем ему уведомление
@@ -1093,13 +1119,14 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         comment = mins !== null ? `Опоздание: ${mins} мин.` : "Опоздание";
       }
 
-      // 3) создаём сессию
-      await pool.query(
+      // 3) создаём сессию (и получаем её id)
+      const insRes = await pool.query(
         `
         INSERT INTO internship_sessions
           (user_id, day_number, started_by, trade_point_id, was_late, comment)
         VALUES
           ($1, $2, $3, $4, $5, $6)
+        RETURNING id
         `,
         [
           internUserId,
@@ -1111,25 +1138,84 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         ]
       );
 
+      const sessionId = Number(insRes.rows[0]?.id);
+
+      // 4) переводим кандидата в intern (один раз)
+      await pool.query(
+        `UPDATE candidates SET status = 'intern' WHERE id = $1`,
+        [candidateId]
+      );
+
+      // 5) planned -> started + привязка к session_id
+      //    (started → planned fallback в карточке заработает сразу)
+      await pool.query(
+        `
+        WITH moved AS (
+          UPDATE internship_schedules
+             SET status = 'started',
+                 session_id = $2,
+                 started_at = NOW(),
+                 user_id = COALESCE(user_id, $3)
+           WHERE candidate_id = $1
+             AND status = 'planned'
+           RETURNING id
+        )
+        INSERT INTO internship_schedules (
+          candidate_id,
+          user_id,
+          trade_point_id,
+          mentor_user_id,
+          planned_date,
+          planned_time_from,
+          planned_time_to,
+          status,
+          session_id,
+          started_at
+        )
+        SELECT
+          c.id,
+          $3,
+          COALESCE(c.internship_point_id, $4),
+          COALESCE(c.internship_admin_id, $5),
+          c.internship_date,
+          c.internship_time_from,
+          c.internship_time_to,
+          'started',
+          $2,
+          NOW()
+        FROM candidates c
+        WHERE c.id = $1
+          AND NOT EXISTS (SELECT 1 FROM moved)
+        `,
+        [
+          candidateId,
+          sessionId,
+          internUserId,
+          tradePointId || null,
+          mentorUserId || null,
+        ]
+      );
+
+      // ВАЖНО:
+      // НЕ обнуляем candidates.internship_* при старте.
+      // Эти поля могут временно ещё использоваться списками/старым UI.
+
       // 4) переводим кандидата в intern (если ещё не переведён)
       await pool.query(
         `UPDATE candidates SET status = 'intern' WHERE id = $1`,
         [candidateId]
       );
 
-      // очищаем "план" следующей стажировки: она стала фактом (internship_sessions)
+      // 4) переводим кандидата в intern (если ещё не переведён)
       await pool.query(
-        `
-  UPDATE candidates
-     SET internship_date = NULL,
-         internship_time_from = NULL,
-         internship_time_to = NULL,
-         internship_point_id = NULL,
-         internship_admin_id = NULL
-   WHERE id = $1
-  `,
+        `UPDATE candidates SET status = 'intern' WHERE id = $1`,
         [candidateId]
       );
+
+      // ВАЖНО:
+      // НЕ обнуляем candidates.internship_* при старте.
+      // Эти поля нужны для отображения блока "О стажировке" и для списков наставника,
+      // пока стажировка идёт.
 
       // 5) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
       const text =

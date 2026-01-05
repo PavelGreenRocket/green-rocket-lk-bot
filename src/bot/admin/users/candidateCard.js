@@ -260,9 +260,10 @@ FROM candidates c
   // хотим показывать текст как на этапе "приглашён на стажировку" (скрин 3).
   const displayStatus = options.forceCandidateStatus || cand.status;
 
-  // --- стажировка: активная сессия / кол-во завершённых ---
+  // --- стажировка: активная сессия / кол-во завершённых / план из schedules ---
   let activeInternshipSession = null;
   let finishedInternshipCount = 0;
+  let schedule = null; // started → planned fallback
 
   if (cand.lk_user_id) {
     const sRes = await pool.query(
@@ -271,7 +272,7 @@ FROM candidates c
       FROM internship_sessions
       WHERE user_id = $1
       ORDER BY id DESC
-    `,
+      `,
       [cand.lk_user_id]
     );
 
@@ -282,6 +283,35 @@ FROM candidates c
 
     activeInternshipSession =
       sessions.find((s) => !s.finished_at && !s.is_canceled) || null;
+
+    const schRes = await pool.query(
+      `
+      SELECT
+        s.*,
+        tp.title AS point_title,
+        um.full_name AS mentor_name
+      FROM internship_schedules s
+      LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+      LEFT JOIN users um ON um.id = s.mentor_user_id
+      WHERE s.candidate_id = $1
+        AND (
+          ($2::bigint IS NOT NULL AND s.session_id = $2)
+          OR ($2::bigint IS NULL AND s.status IN ('started','planned'))
+        )
+      ORDER BY
+        CASE
+          WHEN $2::bigint IS NOT NULL AND s.session_id = $2 THEN 0
+          WHEN s.status = 'started' THEN 1
+          WHEN s.status = 'planned' THEN 2
+          ELSE 3
+        END,
+        s.id DESC
+      LIMIT 1
+      `,
+      [candidateId, activeInternshipSession?.id ?? null]
+    );
+
+    schedule = schRes.rows[0] || null;
   }
 
   // режим "СТАЖЁР":
@@ -431,14 +461,28 @@ FROM candidates c
     text += "🔹 *О стажировке*\n";
 
     if (activeInternshipSession) {
-      // идёт стажировка — оставляем привычный блок по назначению
-      if (cand.internship_date) {
-        const dateLabel = formatDateWithWeekday(cand.internship_date);
-        if (cand.internship_time_from && cand.internship_time_to) {
-          text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
-            0,
-            5
-          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+      // идёт стажировка — берём данные из internship_schedules (started → planned fallback)
+      const planDate = schedule?.planned_date || cand.internship_date || null;
+      const planFrom =
+        schedule?.planned_time_from || cand.internship_time_from || null;
+      const planTo =
+        schedule?.planned_time_to || cand.internship_time_to || null;
+
+      const planPointTitle =
+        schedule?.point_title ||
+        cand.internship_point_title ||
+        cand.place_title ||
+        "не указано";
+
+      const planMentorName =
+        schedule?.mentor_name || cand.internship_admin_name || "не указан";
+
+      if (planDate) {
+        const dateLabel = formatDateWithWeekday(planDate);
+        if (planFrom && planTo) {
+          text += `• *Дата стажировки:* ${dateLabel} (с ${String(
+            planFrom
+          ).slice(0, 5)} до ${String(planTo).slice(0, 5)})\n`;
         } else {
           text += `• *Дата стажировки:* ${dateLabel}\n`;
         }
@@ -446,24 +490,31 @@ FROM candidates c
         text += "• *Дата стажировки:* не указана\n";
       }
 
-      text += `• *Место стажировки:* ${
-        cand.internship_point_title || cand.place_title || "не указано"
-      }\n`;
-      text += `• *Ответственный по стажировке:* ${
-        cand.internship_admin_name || "не указан"
-      }\n\n`;
+      text += `• *Место стажировки:* ${planPointTitle}\n`;
+      text += `• *Ответственный по стажировке:* ${planMentorName}\n\n`;
     } else {
       // стажировка завершена (нет активной сессии)
       text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
 
-      // Вариант B: если следующая стажировка уже назначена — показываем её
-      if (isInternshipScheduled) {
-        const dateLabel = formatDateWithWeekday(cand.internship_date);
-        if (cand.internship_time_from && cand.internship_time_to) {
-          text += `*Следующая стажировка:*\n• ${dateLabel} (с ${cand.internship_time_from.slice(
+      // следующая (planned) — тоже из schedules, fallback на старые поля candidates
+      const nextDate =
+        schedule?.status === "planned" ? schedule?.planned_date : null;
+      const nextFrom =
+        schedule?.status === "planned" ? schedule?.planned_time_from : null;
+      const nextTo =
+        schedule?.status === "planned" ? schedule?.planned_time_to : null;
+
+      if (nextDate || isInternshipScheduled) {
+        const d = nextDate || cand.internship_date;
+        const f = nextFrom || cand.internship_time_from;
+        const t = nextTo || cand.internship_time_to;
+
+        const dateLabel = formatDateWithWeekday(d);
+        if (f && t) {
+          text += `*Следующая стажировка:*\n• ${dateLabel} (с ${String(f).slice(
             0,
             5
-          )} до ${cand.internship_time_to.slice(0, 5)})\n`;
+          )} до ${String(t).slice(0, 5)})\n`;
         } else {
           text += `*Следующая стажировка:*\n• ${dateLabel}\n`;
         }
