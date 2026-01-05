@@ -25,6 +25,22 @@ function clearTpState(tgId) {
   tradePointStates.delete(tgId);
 }
 
+function normalizeWorkHoursInput(raw) {
+  const s = String(raw || "").trim();
+  if (s === "-" || s === "—") return null;
+
+  // допускаем 8:00-20:00 и 08:00-20:00 → нормализуем до 08:00-20:00
+  const m = /^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/.exec(s);
+  if (!m) return undefined;
+
+  const h1 = String(Math.min(23, Math.max(0, Number(m[1])))).padStart(2, "0");
+  const m1 = String(Math.min(59, Math.max(0, Number(m[2])))).padStart(2, "0");
+  const h2 = String(Math.min(23, Math.max(0, Number(m[3])))).padStart(2, "0");
+  const m2 = String(Math.min(59, Math.max(0, Number(m[4])))).padStart(2, "0");
+
+  return `${h1}:${m1}-${h2}:${m2}`;
+}
+
 function registerAdminSettings(bot, ensureUser, logError) {
   registerAdminShiftSettings(bot, ensureUser, logError);
   registerAdminShiftOpeningTasks(bot, ensureUser, logError);
@@ -161,9 +177,9 @@ function registerAdminSettings(bot, ensureUser, logError) {
   async function showTradePointCard(ctx, pointId) {
     const res = await pool.query(
       `
-        SELECT id, title, address, work_hours, landmark, is_active
-        FROM trade_points
-        WHERE id = $1
+     SELECT id, title, address, work_hours, work_hours_weekdays, work_hours_weekends, landmark, is_active
+FROM trade_points
+WHERE id = $1
       `,
       [pointId]
     );
@@ -182,13 +198,27 @@ function registerAdminSettings(bot, ensureUser, logError) {
     const landmark = tp.landmark || "не указан";
     const isActive = tp.is_active !== false;
 
-    let text = "🏬 *Торговая точка*\n\n";
-    text += `• Короткое имя: ${shortName}\n`;
-    text += `• Полный адрес: ${fullAddr}\n`;
-    text += `• Время работы: ${workHours}\n`;
-    text += `• Ориентир: ${landmark}\n`;
-    text += `• Фото ориентиров: ${photosCount} / 3\n`;
-    text += `• Статус: ${isActive ? "активна ✅" : "отключена ⚪️"}\n`;
+    let text = "🏬 <b>Торговая точка</b>\n\n";
+    text += `• <b>Короткое имя:</b> ${shortName}\n`;
+    text += `• <b>Полный адрес:</b> ${fullAddr}\n`;
+
+    const whW = tp.work_hours_weekdays || "";
+    const whE = tp.work_hours_weekends || "";
+    let whText = "не указано";
+    if (whW || whE) {
+      const parts = [];
+      if (whW) parts.push(`Будние: ${whW}`);
+      if (whE) parts.push(`Выходные: ${whE}`);
+      whText = parts.join(" / ");
+    } else if (tp.work_hours) {
+      // fallback старого поля
+      whText = tp.work_hours;
+    }
+
+    text += `• <b>Время работы:</b> ${whText}\n`;
+    text += `• <b>Ориентир:</b> ${landmark}\n`;
+    text += `• <b>Фото ориентиров:</b> ${photosCount} / 3\n`;
+    text += `• <b>Статус:</b> ${isActive ? "активна ✅" : "отключена ⚪️"}\n`;
 
     const keyboard = Markup.inlineKeyboard([
       [
@@ -227,6 +257,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
           `admin_tp_toggle_${tp.id}`
         ),
       ],
+      [Markup.button.callback("🗑 Удалить точку", `admin_tp_delete_${tp.id}`)],
       [Markup.button.callback("⬅️ К списку точек", "admin_tp_list")],
     ]);
 
@@ -467,15 +498,100 @@ function registerAdminSettings(bot, ensureUser, logError) {
         return;
 
       const pointId = Number(ctx.match[1]);
-      await startEditField(
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "Будние (Пн–Пт)",
+            `admin_tp_workhours_weekdays_${pointId}`
+          ),
+          Markup.button.callback(
+            "Выходные (Сб–Вс)",
+            `admin_tp_workhours_weekends_${pointId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "Выбрать ДН (скоро)",
+            `admin_tp_workhours_custom_${pointId}`
+          ),
+        ],
+        [Markup.button.callback("⬅️ Назад", `admin_tp_open_${pointId}`)],
+      ]);
+
+      await deliver(
         ctx,
-        pointId,
-        "work_hours",
-        "✏️ Введи новое время работы точки (или «-» чтобы очистить):"
+        {
+          text:
+            "⏰ <b>Время работы</b>\n\n" +
+            "Выбери, для каких дней задать время.\n" +
+            "Формат ввода: <code>08:00-20:00</code>\n" +
+            "Чтобы очистить — отправь <code>-</code>.",
+          extra: kb,
+        },
+        { edit: true }
       );
     } catch (err) {
-      logError("admin_tp_edit_work_hours", err);
+      logError("admin_tp_edit_work_hours_menu", err);
     }
+  });
+
+  bot.action(/^admin_tp_workhours_weekdays_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const pointId = Number(ctx.match[1]);
+      setTpState(ctx.from.id, {
+        mode: "edit_field",
+        pointId,
+        field: "work_hours_weekdays",
+      });
+
+      await deliver(
+        ctx,
+        {
+          text: "✏️ Введи время для <b>Будние (Пн–Пт)</b> в формате <code>08:00-20:00</code> (или <code>-</code> чтобы очистить):",
+        },
+        { edit: true }
+      );
+    } catch (err) {
+      logError("admin_tp_workhours_weekdays", err);
+    }
+  });
+
+  bot.action(/^admin_tp_workhours_weekends_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const pointId = Number(ctx.match[1]);
+      setTpState(ctx.from.id, {
+        mode: "edit_field",
+        pointId,
+        field: "work_hours_weekends",
+      });
+
+      await deliver(
+        ctx,
+        {
+          text: "✏️ Введи время для <b>Выходные (Сб–Вс)</b> в формате <code>08:00-20:00</code> (или <code>-</code> чтобы очистить):",
+        },
+        { edit: true }
+      );
+    } catch (err) {
+      logError("admin_tp_workhours_weekends", err);
+    }
+  });
+
+  bot.action(/^admin_tp_workhours_custom_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("Пока в разработке", { show_alert: false })
+      .catch(() => {});
   });
 
   bot.action(/^admin_tp_edit_landmark_(\d+)$/, async (ctx) => {
@@ -527,6 +643,82 @@ function registerAdminSettings(bot, ensureUser, logError) {
       await showTradePointCard(ctx, pointId);
     } catch (err) {
       logError("admin_tp_toggle", err);
+    }
+  });
+
+  // -----------------------------
+  // УДАЛЕНИЕ ТОЧКИ (с подтверждением)
+  // -----------------------------
+  bot.action(/^admin_tp_delete_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const pointId = Number(ctx.match[1]);
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🗑 Да, удалить",
+            `admin_tp_delete_confirm_${pointId}`
+          ),
+        ],
+        [Markup.button.callback("⬅️ Отмена", `admin_tp_open_${pointId}`)],
+      ]);
+
+      await deliver(
+        ctx,
+        {
+          text: "🗑 <b>Удалить точку?</b>\n\nЭто действие нельзя отменить.",
+          extra: kb,
+        },
+        { edit: true }
+      );
+    } catch (err) {
+      logError("admin_tp_delete", err);
+    }
+  });
+
+  bot.action(/^admin_tp_delete_confirm_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || (user.role !== "admin" && user.role !== "super_admin"))
+        return;
+
+      const pointId = Number(ctx.match[1]);
+
+      // 1) Запрет удаления если есть смены/история
+      const has = await pool.query(
+        `SELECT 1 FROM shifts WHERE trade_point_id = $1 LIMIT 1`,
+        [pointId]
+      );
+
+      if (has.rows.length) {
+        // тост + возврат на карточку
+        await ctx
+          .answerCbQuery("❌ Нельзя удалить: есть смены/история", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        await showTradePointCard(ctx, pointId);
+        return;
+      }
+
+      // 2) удаляем
+      await pool.query(`DELETE FROM trade_points WHERE id = $1`, [pointId]);
+
+      await ctx
+        .answerCbQuery("✅ Точка удалена", { show_alert: false })
+        .catch(() => {});
+      await showTradePointsList(ctx);
+    } catch (err) {
+      logError("admin_tp_delete_confirm", err);
+      try {
+        await ctx.answerCbQuery("⚠️ Ошибка удаления", { show_alert: false });
+      } catch (_) {}
     }
   });
 

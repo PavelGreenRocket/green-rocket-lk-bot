@@ -293,20 +293,20 @@ FROM candidates c
       FROM internship_schedules s
       LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
       LEFT JOIN users um ON um.id = s.mentor_user_id
-      WHERE s.candidate_id = $1
-        AND (
-          ($2::bigint IS NOT NULL AND s.session_id = $2)
-          OR ($2::bigint IS NULL AND s.status IN ('started','planned'))
-        )
-      ORDER BY
-        CASE
-          WHEN $2::bigint IS NOT NULL AND s.session_id = $2 THEN 0
-          WHEN s.status = 'started' THEN 1
-          WHEN s.status = 'planned' THEN 2
-          ELSE 3
-        END,
-        s.id DESC
-      LIMIT 1
+     WHERE s.candidate_id = $1
+  AND (
+    ($2::bigint IS NOT NULL AND s.session_id = $2)
+    OR ($2::bigint IS NULL AND s.status = 'planned')
+  )
+ORDER BY
+  CASE
+    WHEN $2::bigint IS NOT NULL AND s.session_id = $2 THEN 0
+    WHEN s.status = 'planned' THEN 1
+    ELSE 2
+  END,
+  s.id DESC
+LIMIT 1
+
       `,
       [candidateId, activeInternshipSession?.id ?? null]
     );
@@ -378,7 +378,7 @@ FROM candidates c
 
   let text = "";
   text += `${header}\n`;
-  text += "────────────────────────────────\n";
+  text += "────────────────────────\n";
 
   text += "🔹 *Общая информация*\n";
   text += `• *Имя:* ${cand.name || "не указано"}${agePart}\n`;
@@ -397,7 +397,7 @@ FROM candidates c
   text += `• *Желаемый график:* ${scheduleText}\n`;
   text += `• *Предыдущий опыт:* ${experienceText}\n`;
   text += `• *Общий комментарий:* ${commentText}\n\n`;
-  text += "────────────────────────────────\n";
+  text += "────────────────────────\n";
 
   // 📅 О собеседовании / Итоги собеседования
   if (!isTraineeMode) {
@@ -416,7 +416,7 @@ FROM candidates c
   if (cand.status === "rejected") {
     const reason = cand.decline_reason || "не указана";
 
-    text += "────────────────────────────────\n";
+    text += "────────────────────────\n";
     text += "ПРИЧИНА ОТКАЗА ❌\n";
     text += `Причина: ${reason}\n\n`;
   }
@@ -441,10 +441,10 @@ FROM candidates c
 
       if (cand.interview_comment) {
         text += `• *Другие замечания:* ${cand.interview_comment}\n`;
-        text += "────────────────────────────────\n";
+        text += "────────────────────────\n";
       } else {
         text += "• *Другие замечания:* замечаний нет\n";
-        text += "────────────────────────────────\n";
+        text += "────────────────────────\n";
       }
     }
   }
@@ -496,7 +496,7 @@ FROM candidates c
       // стажировка завершена (нет активной сессии)
       text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
 
-      // следующая (planned) — тоже из schedules, fallback на старые поля candidates
+      // Следующая стажировка показывается ТОЛЬКО если есть planned в internship_schedules
       const nextDate =
         schedule?.status === "planned" ? schedule?.planned_date : null;
       const nextFrom =
@@ -504,29 +504,31 @@ FROM candidates c
       const nextTo =
         schedule?.status === "planned" ? schedule?.planned_time_to : null;
 
-      if (nextDate || isInternshipScheduled) {
-        const d = nextDate || cand.internship_date;
-        const f = nextFrom || cand.internship_time_from;
-        const t = nextTo || cand.internship_time_to;
+      if (nextDate) {
+        const dateLabel = formatDateWithWeekday(nextDate);
 
-        const dateLabel = formatDateWithWeekday(d);
-        if (f && t) {
-          text += `*Следующая стажировка:*\n• ${dateLabel} (с ${String(f).slice(
-            0,
-            5
-          )} до ${String(t).slice(0, 5)})\n`;
+        const placeTitle = schedule?.point_title || "не указано";
+        const mentorName = schedule?.mentor_name || "не указан";
+
+        text += `*Следующая стажировка:*\n`;
+
+        if (nextFrom && nextTo) {
+          text += `• *Дата стажировки:* ${dateLabel} (с ${String(
+            nextFrom
+          ).slice(0, 5)} до ${String(nextTo).slice(0, 5)})\n`;
         } else {
-          text += `*Следующая стажировка:*\n• ${dateLabel}\n`;
+          text += `• *Дата стажировки:* ${dateLabel}\n`;
         }
+
+        text += `• *Место стажировки:* ${placeTitle}\n`;
+        text += `• *Ответственный по стажировке:* ${mentorName}\n`;
       } else {
         text += "*Следующая стажировка:*\n• _пока не назначена_\n";
       }
 
       text +=
-        "\n_Чтобы узнать подробнее о предыдущих стажировках,\nнажмите «🌱 данные стажировок»._\n\n";
+        "\n_Чтобы узнать подробнее о предыдущих\nстажировках, нажмите:_\n|📊*успеваемость*|➔|🌱*данные стаж..*|\n";
     }
-
-    text += "────────────────────────────────\n";
   } else {
     // Кандидатская карточка (как раньше), но НЕ "этап пройден"
     if (
@@ -728,7 +730,11 @@ FROM candidates c
           }
         } else {
           // Итоговая карточка: либо назначаем, либо начинаем (но не обе кнопки сразу)
-          if (!isInternshipScheduled) {
+          // Решаем только по internship_schedules.status='planned' (без candidates.internship_*)
+          const hasPlannedNext =
+            schedule?.status === "planned" && !!schedule?.planned_date;
+
+          if (!hasPlannedNext) {
             rows.push([
               Markup.button.callback(
                 "🗓 назначить стажировку",
@@ -1538,17 +1544,35 @@ LIMIT 1
 
       const planIcon = planPercent >= 100 ? "📈" : "📉";
 
-      // 6) План времени (только для дня 1)
+      // 6) План времени
+      // Берём план из internship_schedules по session_id (это истинный “план” для конкретного дня).
+      // Fallback — старые поля candidates.internship_* (на случай, если schedules ещё не связали).
       let planTimeText = "не указано";
-      if (
-        dayNumber === 1 &&
-        cand.internship_time_from &&
-        cand.internship_time_to
-      ) {
-        planTimeText = `с ${String(cand.internship_time_from).slice(
-          0,
-          5
-        )} до ${String(cand.internship_time_to).slice(0, 5)}`;
+
+      try {
+        const schRes = await pool.query(
+          `
+          SELECT planned_time_from, planned_time_to
+          FROM internship_schedules
+          WHERE session_id = $1
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [session.id]
+        );
+
+        const sch = schRes.rows[0] || null;
+        const from = sch?.planned_time_from || cand.internship_time_from;
+        const to = sch?.planned_time_to || cand.internship_time_to;
+
+        if (from && to) {
+          planTimeText = `с ${String(from).slice(0, 5)} до ${String(to).slice(
+            0,
+            5
+          )}`;
+        }
+      } catch (_) {
+        // оставляем "не указано"
       }
 
       // 7) Итог времени
@@ -1598,17 +1622,18 @@ LIMIT 1
       let text =
         `🔹 *Общая информация*\n` +
         `Имя: ${cand.name || "—"}${agePart} ${who}\n` +
-        "────────────────────────────────\n" +
+        "────────────────────────\n" +
         `🔹 *О стажировке ${dayNumber}*\n` +
-        `• *Дата стажировки:* ${dateLabel}\n\n` +
-        `*Время стажировки:*\n` +
-        `  • *план:* ${planTimeText}\n` +
-        `  • *итог:* с ${factFrom} до ${factTo}\n\n` +
-        `• *Место стажировки:* ${session.trade_point_title || "не указано"}\n` +
-        `• *Ответственный по стажировке:* ${mentorLine}\n\n` +
+        `*Дата и время стажировки:*\n` +
+        `  • *план:* ${dateLabel} (${planTimeText})\n` +
+        `  • *итог:* ${dateLabel} (с ${factFrom} до ${factTo})\n\n` +
+        `*Место стажировки:*\n` +
+        `  • ${session.trade_point_title || "не указано"}\n\n` +
+        `*Ответственный по стажировке:*\n` +
+        `  • ${mentorLine}\n\n` +
         `*Успеваемость стажировки:*\n` +
-        ` • *общий процент изученного:* ${overallPercent}%\n` +
-        ` • *процент по плану дня ${dayNumber}:* ${planPercent}% ${planIcon}\n\n` +
+        `  • *общий процент изученного:* ${overallPercent}%\n` +
+        `  • *процент по плану дня ${dayNumber}:* ${planPercent}% ${planIcon}\n\n` +
         `*Комментарии по стажировке ${dayNumber}:*\n`;
 
       if (!comRes.rows.length) {

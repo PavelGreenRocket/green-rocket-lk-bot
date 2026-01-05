@@ -9,6 +9,7 @@ const {
 } = require("./bot/onboarding");
 const { buildStatusText, buildMainKeyboard } = require("./bot/menu");
 const { deliver } = require("./utils/renderHelpers");
+const { startOutboxWorker } = require("./outbox/worker");
 
 const BOT_TOKEN = process.env.BOT_TOKEN_LK;
 
@@ -17,6 +18,7 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+startOutboxWorker(bot);
 
 // Простенький логгер ошибок
 function logError(tag, err) {

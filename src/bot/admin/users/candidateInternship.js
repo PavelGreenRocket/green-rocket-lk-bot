@@ -352,9 +352,18 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
 
   const { candidateId, dateIso, timeFrom, timeTo, pointId, adminId } = state;
 
-  // 1. Обновляем кандидата как приглашённого на стажировку
-  await pool.query(
-    `
+  let linkedUserId = null;
+  let linkedTelegramId = null;
+  let linkedName = null;
+
+  // ВАЖНО: все изменения БД — атомарно
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1) Обновляем кандидата как приглашённого на стажировку
+    await client.query(
+      `
       UPDATE candidates
          SET status = 'internship_invited',
              internship_date = $2,
@@ -363,50 +372,46 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
              internship_point_id = $5,
              internship_admin_id = $6
        WHERE id = $1
-    `,
-    [candidateId, dateIso, timeFrom, timeTo, pointId, adminId]
-  );
+      `,
+      [candidateId, dateIso, timeFrom, timeTo, pointId, adminId]
+    );
 
-  let linkedUserId = null;
-  let linkedTelegramId = null;
-  let linkedName = null;
-
-  // 2а. Старый вариант: привязка к уже существующему пользователю users.id
-  if (options.linkUserId) {
-    const res = await pool.query(
-      `
+    // 2а) Привязка к существующему users.id
+    if (options.linkUserId) {
+      const res = await client.query(
+        `
         UPDATE users
            SET candidate_id = $1,
                staff_status = COALESCE(staff_status, 'candidate')
          WHERE id = $2
          RETURNING id, telegram_id, full_name
-      `,
-      [candidateId, options.linkUserId]
-    );
+        `,
+        [candidateId, options.linkUserId]
+      );
 
-    if (res.rows.length) {
-      linkedUserId = res.rows[0].id;
-      linkedTelegramId = res.rows[0].telegram_id;
-      linkedName = res.rows[0].full_name;
+      if (res.rows.length) {
+        linkedUserId = res.rows[0].id;
+        linkedTelegramId = res.rows[0].telegram_id;
+        linkedName = res.rows[0].full_name;
+      }
     }
-  }
 
-  // 2б. Новый вариант: привязка из lk_waiting_users
-  if (options.waitingId) {
-    const wRes = await pool.query(
-      `
+    // 2б) Привязка из lk_waiting_users
+    if (options.waitingId) {
+      const wRes = await client.query(
+        `
         SELECT id, telegram_id, full_name, age, phone
         FROM lk_waiting_users
         WHERE id = $1
-      `,
-      [options.waitingId]
-    );
+        `,
+        [options.waitingId]
+      );
 
-    if (wRes.rows.length) {
-      const w = wRes.rows[0];
+      if (wRes.rows.length) {
+        const w = wRes.rows[0];
 
-      const userRes = await pool.query(
-        `
+        const userRes = await client.query(
+          `
           INSERT INTO users (telegram_id, full_name, role, staff_status, position, candidate_id)
           VALUES ($1, $2, 'user', 'candidate', NULL, $3)
           ON CONFLICT (telegram_id) DO UPDATE
@@ -414,246 +419,250 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
                 staff_status = 'candidate',
                 candidate_id = $3
           RETURNING id, telegram_id, full_name
-        `,
-        [w.telegram_id, w.full_name, candidateId]
-      );
+          `,
+          [w.telegram_id, w.full_name, candidateId]
+        );
 
-      const u = userRes.rows[0];
+        const u = userRes.rows[0];
 
-      linkedUserId = u.id;
-      linkedTelegramId = u.telegram_id;
-      linkedName = u.full_name;
+        linkedUserId = u.id;
+        linkedTelegramId = u.telegram_id;
+        linkedName = u.full_name;
 
-      await pool.query(
-        `
+        await client.query(
+          `
           UPDATE lk_waiting_users
              SET status = 'linked',
                  linked_user_id = $2,
                  linked_at = NOW()
            WHERE id = $1
-        `,
-        [w.id, u.id]
-      );
+          `,
+          [w.id, u.id]
+        );
+      }
     }
+
+    // 2в) Пишем/обновляем "следующую стажировку" (planned) в расписание
+    await client.query(
+      `
+      INSERT INTO internship_schedules (
+        candidate_id,
+        user_id,
+        trade_point_id,
+        mentor_user_id,
+        planned_date,
+        planned_time_from,
+        planned_time_to,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'planned')
+      ON CONFLICT (candidate_id) WHERE status = 'planned'
+      DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        trade_point_id = EXCLUDED.trade_point_id,
+        mentor_user_id = EXCLUDED.mentor_user_id,
+        planned_date = EXCLUDED.planned_date,
+        planned_time_from = EXCLUDED.planned_time_from,
+        planned_time_to = EXCLUDED.planned_time_to
+      `,
+      [candidateId, linkedUserId, pointId, adminId, dateIso, timeFrom, timeTo]
+    );
+
+    await client.query("COMMIT");
+    clearState(tgId);
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    clearState(tgId);
+
+    // важно: даём понятную ошибку админу, чтобы не было "уведомление пришло, а план не сохранился"
+    await ctx.reply("⚠️ Не удалось назначить стажировку. Попробуйте ещё раз.");
+    throw err;
+  } finally {
+    client.release();
   }
 
-  // 2в. Пишем/обновляем "следующую стажировку" (planned) в расписание
-  await pool.query(
-    `
-    INSERT INTO internship_schedules (
-      candidate_id,
-      user_id,
-      trade_point_id,
-      mentor_user_id,
-      planned_date,
-      planned_time_from,
-      planned_time_to,
-      status
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,'planned')
-    ON CONFLICT (candidate_id) WHERE status = 'planned'
-    DO UPDATE SET
-      user_id = EXCLUDED.user_id,
-      trade_point_id = EXCLUDED.trade_point_id,
-      mentor_user_id = EXCLUDED.mentor_user_id,
-      planned_date = EXCLUDED.planned_date,
-      planned_time_from = EXCLUDED.planned_time_from,
-      planned_time_to = EXCLUDED.planned_time_to
-    `,
-    [candidateId, linkedUserId, pointId, adminId, dateIso, timeFrom, timeTo]
-  );
-
-  clearState(tgId);
-
-  // 3. Если мы кого-то привязали — отправляем ему уведомление
+  // 3) Уведомления — только ПОСЛЕ успешного COMMIT
   if (linkedUserId && linkedTelegramId) {
     const cRes = await pool.query(
       `
-    SELECT
-      c.id,
-      c.name,
-      c.age,
-      c.internship_date,
-      c.internship_time_from,
-      c.internship_time_to,
-      COALESCE(tp.title, 'не указана') AS point_title,
-      COALESCE(tp.address, '') AS point_address,
-      COALESCE(tp.landmark, '') AS point_landmark,
-      COALESCE(u.full_name, 'не указан') AS mentor_name,
-      u.position    AS mentor_position,
-      u.username    AS mentor_username,
-      u.telegram_id AS mentor_telegram_id,
-      u.work_phone  AS mentor_work_phone
-    FROM candidates c
-    LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
-    LEFT JOIN users u ON u.id = c.internship_admin_id
-    WHERE c.id = $1
-  `,
+      SELECT
+        c.id,
+        c.name,
+        c.age,
+        c.internship_date,
+        c.internship_time_from,
+        c.internship_time_to,
+        COALESCE(tp.title, 'не указана') AS point_title,
+        COALESCE(tp.address, '') AS point_address,
+        COALESCE(tp.landmark, '') AS point_landmark,
+        COALESCE(u.full_name, 'не указан') AS mentor_name,
+        u.position    AS mentor_position,
+        u.username    AS mentor_username,
+        u.telegram_id AS mentor_telegram_id,
+        u.work_phone  AS mentor_work_phone
+      FROM candidates c
+      LEFT JOIN trade_points tp ON tp.id = c.internship_point_id
+      LEFT JOIN users u ON u.id = c.internship_admin_id
+      WHERE c.id = $1
+      `,
       [candidateId]
     );
-    if (!cRes.rows.length) return;
-    const c = cRes.rows[0];
 
-    let datePart = "не указана";
-    if (c && c.internship_date) {
-      const d = new Date(c.internship_date);
-      if (!Number.isNaN(d.getTime())) {
-        const dd = String(d.getDate()).padStart(2, "0");
-        const mm = String(d.getMonth() + 1).padStart(2, "0");
-        const weekday = d.toLocaleDateString("ru-RU", { weekday: "short" });
-        datePart = `${dd}.${mm} (${weekday})`;
-      }
-    }
+    if (cRes.rows.length) {
+      const c = cRes.rows[0];
 
-    const timeFromText = c?.internship_time_from || "не указано";
-    const timeToText = c?.internship_time_to || "не указано";
-
-    const pointTitle = c?.point_title || "не указана";
-    const mentorName = c?.mentor_name || "не указан";
-
-    const nameForText = c?.name || "Вы";
-
-    function escapeHtml(s) {
-      return String(s ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-    }
-
-    // Нормализация телефона (как в приглашении на собеседование)
-    let phoneDisplay = null;
-    let phoneHref = null;
-    if (c?.mentor_work_phone) {
-      const raw = String(c.mentor_work_phone);
-      let digits = raw.replace(/\D+/g, "");
-
-      if (digits.length === 11 && digits.startsWith("8")) {
-        digits = "7" + digits.slice(1);
+      let datePart = "не указана";
+      if (c && c.internship_date) {
+        const d = new Date(c.internship_date);
+        if (!Number.isNaN(d.getTime())) {
+          const dd = String(d.getDate()).padStart(2, "0");
+          const mm = String(d.getMonth() + 1).padStart(2, "0");
+          const weekday = d.toLocaleDateString("ru-RU", { weekday: "short" });
+          datePart = `${dd}.${mm} (${weekday})`;
+        }
       }
 
-      if (digits.length === 11 && digits.startsWith("7")) {
-        phoneHref = "+" + digits;
-        phoneDisplay = "+" + digits;
-      } else if (digits.length >= 10) {
-        phoneHref = "+" + digits;
-        phoneDisplay = "+" + digits;
-      } else {
-        phoneDisplay = raw.trim();
+      const timeFromText = c?.internship_time_from || "не указано";
+      const timeToText = c?.internship_time_to || "не указано";
+
+      const mentorName = c?.mentor_name || "не указан";
+      const nameForText = c?.name || "Вы";
+
+      function escapeHtml(s) {
+        return String(s ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
       }
-    }
 
-    const pointAddress = c?.point_address || "будет добавлен позже";
-    const pointLandmark = c?.point_landmark || "будет добавлен позже";
-    const mentorPosition = c?.mentor_position || "";
-    const mentorUsername = c?.mentor_username ? `@${c.mentor_username}` : "";
+      // телефон
+      let phoneDisplay = null;
+      let phoneHref = null;
+      if (c?.mentor_work_phone) {
+        const raw = String(c.mentor_work_phone);
+        let digits = raw.replace(/\D+/g, "");
 
-    let mentorLine = escapeHtml(mentorName);
+        if (digits.length === 11 && digits.startsWith("8")) {
+          digits = "7" + digits.slice(1);
+        }
 
-    let text =
-      `${escapeHtml(
-        nameForText
-      )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
-      `<b>📄 Детали стажировки</b>\n` +
-      `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
-      `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
-        timeToText
-      )}\n` +
-      `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
-      `• <b>Наставник:</b> ${mentorLine}\n`;
-
-    if (phoneDisplay) {
-      if (phoneHref) {
-        text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
-          phoneHref
-        )}">${escapeHtml(phoneDisplay)}</a>\n`;
-      } else {
-        text += `• <b>Телефон для связи:</b> ${escapeHtml(phoneDisplay)}\n`;
+        if (digits.length === 11 && digits.startsWith("7")) {
+          phoneHref = "+" + digits;
+          phoneDisplay = "+" + digits;
+        } else if (digits.length >= 10) {
+          phoneHref = "+" + digits;
+          phoneDisplay = "+" + digits;
+        } else {
+          phoneDisplay = raw.trim();
+        }
       }
-    }
 
-    const keyboardRows = [];
+      const pointAddress = c?.point_address || "будет добавлен позже";
+      const mentorLine = escapeHtml(mentorName);
 
-    // Telegram кнопка наставника (если есть telegram_id)
-    if (c?.mentor_telegram_id) {
-      const firstName = (mentorName || "Telegram").split(" ")[0] || "Telegram";
+      let text =
+        `${escapeHtml(
+          nameForText
+        )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
+        `<b>📄 Детали стажировки</b>\n` +
+        `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
+        `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
+          timeToText
+        )}\n` +
+        `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
+        `• <b>Наставник:</b> ${mentorLine}\n`;
+
+      if (phoneDisplay) {
+        if (phoneHref) {
+          text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
+            phoneHref
+          )}">${escapeHtml(phoneDisplay)}</a>\n`;
+        } else {
+          text += `• <b>Телефон для связи:</b> ${escapeHtml(phoneDisplay)}\n`;
+        }
+      }
+
+      const keyboardRows = [];
+
+      if (c?.mentor_telegram_id) {
+        const firstName =
+          (mentorName || "Telegram").split(" ")[0] || "Telegram";
+        keyboardRows.push([
+          {
+            text: `✈️ Telegram ${firstName}`,
+            url: `tg://user?id=${c.mentor_telegram_id}`,
+          },
+        ]);
+      }
+
+      keyboardRows.push([
+        { text: "🧭 Как пройти?", callback_data: "lk_internship_route" },
+        { text: "💰 По оплате", callback_data: "lk_internship_payment" },
+      ]);
+
       keyboardRows.push([
         {
-          text: `✈️ Telegram ${firstName}`,
-          url: `tg://user?id=${c.mentor_telegram_id}`,
+          text: "❌ Отказаться от стажировки",
+          callback_data: "lk_internship_decline",
         },
       ]);
-    }
 
-    // Как пройти? + По оплате
-    keyboardRows.push([
-      { text: "🧭 Как пройти?", callback_data: "lk_internship_route" },
-      { text: "💰 По оплате", callback_data: "lk_internship_payment" },
-    ]);
+      await ctx.telegram
+        .sendMessage(linkedTelegramId, text, {
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: keyboardRows },
+        })
+        .catch(() => {});
 
-    // Отказаться
-    keyboardRows.push([
-      {
-        text: "❌ Отказаться от стажировки",
-        callback_data: "lk_internship_decline",
-      },
-    ]);
+      // уведомление наставнику (как было)
+      if (c?.mentor_telegram_id) {
+        try {
+          const adminTextLines = [];
+          adminTextLines.push("🕒 *Новая запланированная стажировка*");
+          adminTextLines.push("");
+          adminTextLines.push(
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+          );
+          adminTextLines.push(`• Дата: ${datePart}`);
+          adminTextLines.push(
+            `• Время: с ${timeFromText || "не указано"} до ${
+              timeToText || "не указано"
+            }`
+          );
+          adminTextLines.push(`• Точка: ${c.point_title || "не указана"}`);
+          if (pointAddress) adminTextLines.push(`• Адрес: ${pointAddress}`);
 
-    await ctx.telegram
-      .sendMessage(linkedTelegramId, text, {
-        parse_mode: "HTML",
-        reply_markup: { inline_keyboard: keyboardRows },
-      })
-      .catch(() => {});
-
-    // Короткое уведомление наставнику
-    if (c?.mentor_telegram_id) {
-      try {
-        const adminTextLines = [];
-        adminTextLines.push("🕒 *Новая запланированная стажировка*");
-        adminTextLines.push("");
-        adminTextLines.push(
-          `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
-        );
-        adminTextLines.push(`• Дата: ${datePart}`);
-        adminTextLines.push(
-          `• Время: с ${timeFromText || "не указано"} до ${
-            timeToText || "не указано"
-          }`
-        );
-        adminTextLines.push(`• Точка: ${pointTitle}`);
-        if (pointAddress) adminTextLines.push(`• Адрес: ${pointAddress}`);
-
-        const adminKeyboard = {
-          inline_keyboard: [
-            [
-              {
-                text: "👤 Открыть кандидата",
-                callback_data: `lk_cand_open_${candidateId}`,
-              },
+          const adminKeyboard = {
+            inline_keyboard: [
+              [
+                {
+                  text: "👤 Открыть кандидата",
+                  callback_data: `lk_cand_open_${candidateId}`,
+                },
+              ],
+              [
+                {
+                  text: "📋 Мои стажировки",
+                  callback_data: "lk_admin_my_internships",
+                },
+              ],
             ],
-            [
-              {
-                text: "📋 Мои стажировки",
-                callback_data: "lk_admin_my_internships",
-              },
-            ],
-          ],
-        };
+          };
 
-        await ctx.telegram.sendMessage(
-          c.mentor_telegram_id,
-          adminTextLines.join("\n"),
-          {
-            parse_mode: "Markdown",
-            reply_markup: adminKeyboard,
-          }
-        );
-      } catch (err) {
-        console.error("[finishInternshipInvite] notify mentor error", err);
+          await ctx.telegram.sendMessage(
+            c.mentor_telegram_id,
+            adminTextLines.join("\n"),
+            {
+              parse_mode: "Markdown",
+              reply_markup: adminKeyboard,
+            }
+          );
+        } catch (e) {}
       }
     }
   }
-  // 4. Возвращаемся к карточке кандидата админу
+
+  // 4) Возвращаемся к карточке кандидата админу
   await showCandidateCardLk(ctx, candidateId, { edit: true });
 }
 
@@ -1217,7 +1226,15 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // Эти поля нужны для отображения блока "О стажировке" и для списков наставника,
       // пока стажировка идёт.
 
-      // 5) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
+      // 5) OUTBOX (academy): уведомить наставника "обучение началось" + кнопка "открыть курс"
+      // Академический worker слушает destination='academy' и event_type='internship_started'
+      await pushOutboxEvent("academy", "internship_started", {
+        mentor_telegram_id: Number(ctx.from.id),
+        intern_user_id: Number(internUserId),
+        intern_name: internName || "стажёр",
+      });
+
+      // 6) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
       const text =
         "🚀 Стажировка началась!\n\n" +
         "Нажмите кнопку ниже, чтобы перейти к обучению.";
