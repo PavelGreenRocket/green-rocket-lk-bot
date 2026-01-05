@@ -2022,8 +2022,7 @@ sh.trade_point_id,
       const ageText = w.age ? ` (${w.age})` : "";
 
       // по умолчанию 🟢, если статус квалификации не задан
-     let icon = "🟢";
-
+      let icon = "🟢";
 
       const onShiftTail =
         w.trade_point_id && w.trade_point_title
@@ -2241,7 +2240,7 @@ WHERE u.id = $1
     const expanded = isWorkerCardExpanded(ctx.from.id, u.id);
     rows.push([
       Markup.button.callback(
-        expanded ? "▾ Скрыть карточку" : "▴ Открыть карточку",
+        expanded ? "▴ Скрыть карточку" : "▾ Открыть карточку",
         `lk_worker_toggle_cards_${u.id}`
       ),
     ]);

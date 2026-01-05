@@ -13,6 +13,10 @@ const traineeCardsExpandedByTgId = new Map();
 // текущий выбранный экран в меню карточек: 'candidate' | 'trainee'
 const traineeCardsViewByTgId = new Map();
 
+// состояние экрана 🌱 Данные стажировок (по tg_id)
+// { candId, mode: 'parts'|'days'|'day'|'part', selectedDay?: number, selectedPartId?: number }
+const internshipDataStateByTgId = new Map();
+
 const internEditStates = new Map();
 
 function getTraineeCardsView(tgId) {
@@ -1264,87 +1268,20 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
-  // данные стажировок — заглушка
-  // 🌱 данные стажировок — выбор дня
+  // 🌱 данные стажировок — основной экран (части) + переключение в дни
   bot.action(/^lk_internship_data_(\d+)$/, async (ctx) => {
     try {
       const candId = Number(ctx.match[1]);
       await ctx.answerCbQuery().catch(() => {});
 
-      const cRes = await pool.query(
-        `
-        SELECT u.id AS lk_user_id
-        FROM candidates c
-        LEFT JOIN users u ON u.candidate_id = c.id
-        WHERE c.id = $1
-        LIMIT 1
-        `,
-        [candId]
-      );
-
-      const lkUserId = cRes.rows[0]?.lk_user_id || null;
-      if (!lkUserId) {
-        await ctx
-          .answerCbQuery("Пользователь не привязан", { show_alert: false })
-          .catch(() => {});
-        return;
-      }
-
-      const sRes = await pool.query(
-        `
-        SELECT day_number, finished_at, is_canceled
-        FROM internship_sessions
-        WHERE user_id = $1
-        ORDER BY day_number ASC, id ASC
-        `,
-        [lkUserId]
-      );
-
-      const sessions = sRes.rows || [];
-
-      const finishedSet = new Set();
-      let activeDay = null;
-
-      for (const s of sessions) {
-        if (s.is_canceled) continue;
-        if (s.finished_at) finishedSet.add(Number(s.day_number));
-        else activeDay = Number(s.day_number);
-      }
-
-      const finishedDays = Array.from(finishedSet).sort((a, b) => a - b);
-
-      const buttons = [];
-      const allDayButtons = [];
-
-      for (const d of finishedDays) {
-        allDayButtons.push(
-          Markup.button.callback(`${d}дн`, `lk_internship_day_${candId}_${d}`)
-        );
-      }
-      if (activeDay != null) {
-        allDayButtons.push(
-          Markup.button.callback(
-            `🎓 ${activeDay}дн`,
-            `lk_internship_day_active_${candId}_${activeDay}`
-          )
-        );
-      }
-
-      // по 3 кнопки в строку
-      for (let i = 0; i < allDayButtons.length; i += 3) {
-        buttons.push(allDayButtons.slice(i, i + 3));
-      }
-
-      buttons.push([
-        Markup.button.callback("⬅️ Назад", `lk_internship_data_back_${candId}`),
-      ]);
-
-      const kb = Markup.inlineKeyboard(buttons);
-
-      await ctx.editMessageText("Выберите день стажировки:", {
-        ...kb,
-        parse_mode: "Markdown",
+      internshipDataStateByTgId.set(ctx.from.id, {
+        candId,
+        mode: "parts",
+        selectedDay: null,
+        selectedPartId: null,
       });
+
+      await renderLkInternshipData(ctx, candId, { edit: true });
     } catch (err) {
       logError("lk_internship_data", err);
     }
@@ -1360,7 +1297,760 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
-  // клик по завершённому дню — экран-заглушка дня
+  // ▾/▴ Подробнее по дням (toggle)
+  bot.action(/^lk_internship_data_toggle_days_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      const st = internshipDataStateByTgId.get(ctx.from.id) || {
+        candId,
+        mode: "parts",
+      };
+
+      const nextMode =
+        st.mode === "days" || st.mode === "day" ? "parts" : "days";
+      internshipDataStateByTgId.set(ctx.from.id, {
+        ...st,
+        candId,
+        mode: nextMode,
+        selectedPartId: null,
+      });
+
+      await renderLkInternshipData(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_data_toggle_days", err);
+    }
+  });
+
+  // выбор дня (внутри режима "days") — меняем ТЕКСТ на данные дня, но кнопки дней остаются
+  bot.action(/^lk_internship_data_day_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      const dayNumber = Number(ctx.match[2]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const st = internshipDataStateByTgId.get(ctx.from.id) || {
+        candId,
+        mode: "days",
+      };
+      internshipDataStateByTgId.set(ctx.from.id, {
+        ...st,
+        candId,
+        mode: "day",
+        selectedDay: dayNumber,
+        selectedPartId: null,
+      });
+
+      await renderLkInternshipData(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_data_day", err);
+    }
+  });
+
+  // выбор части — режим просмотра этапов (view-only)
+  bot.action(/^lk_internship_data_part_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      const partId = Number(ctx.match[2]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const st = internshipDataStateByTgId.get(ctx.from.id) || {
+        candId,
+        mode: "parts",
+      };
+      internshipDataStateByTgId.set(ctx.from.id, {
+        ...st,
+        candId,
+        mode: "part",
+        selectedPartId: partId,
+      });
+
+      await renderLkInternshipData(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_data_part", err);
+    }
+  });
+
+  // ⬅️ к списку частей
+  bot.action(/^lk_internship_data_part_back_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+      const st = internshipDataStateByTgId.get(ctx.from.id) || {
+        candId,
+        mode: "parts",
+      };
+
+      internshipDataStateByTgId.set(ctx.from.id, {
+        ...st,
+        candId,
+        mode: "parts",
+        selectedPartId: null,
+      });
+
+      await renderLkInternshipData(ctx, candId, { edit: true });
+    } catch (err) {
+      logError("lk_internship_data_part_back", err);
+    }
+  });
+
+  // клик по этапу в режиме просмотра части
+  // клик по этапу в режиме просмотра части
+  bot.action(/^lk_internship_data_step_(\d+)_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      const stepId = Number(ctx.match[1]);
+      const candId = Number(ctx.match[2]);
+      const partId = Number(ctx.match[3]);
+      // достаём user_id по кандидату
+      const uRes = await pool.query(
+        `
+        SELECT u.id AS user_id
+        FROM candidates c
+        LEFT JOIN users u ON u.candidate_id = c.id
+        WHERE c.id = $1
+        LIMIT 1
+        `,
+        [candId]
+      );
+      const userId = uRes.rows[0]?.user_id;
+      if (!userId) {
+        await ctx
+          .answerCbQuery("Пользователь не привязан", { show_alert: false })
+          .catch(() => {});
+        return;
+      }
+
+      // тип шага
+      const stRes = await pool.query(
+        `SELECT id, step_type FROM internship_steps WHERE id = $1 LIMIT 1`,
+        [stepId]
+      );
+      const stepType = stRes.rows[0]?.step_type;
+
+      // найдём "факт выполнения" по пользователю (overall): если когда-либо passed=true
+      const rRes = await pool.query(
+        `
+        SELECT r.is_passed, r.media_file_id
+        FROM internship_step_results r
+        JOIN internship_sessions s ON s.id = r.session_id
+        WHERE s.user_id = $1
+          AND s.is_canceled = FALSE
+          AND r.step_id = $2
+        ORDER BY r.is_passed DESC, r.checked_at DESC
+        LIMIT 1
+        `,
+        [userId, stepId]
+      );
+
+      const row = rRes.rows[0] || null;
+      const isPassed = row?.is_passed === true;
+
+      if (!isPassed) {
+        await ctx
+          .answerCbQuery("этап ещё не пройден", { show_alert: false })
+          .catch(() => {});
+        return;
+      }
+
+      if (stepType === "photo" || stepType === "video") {
+        const fileId = row?.media_file_id;
+
+        // если медиа не прикреплено — просто тост
+        if (!fileId) {
+          await ctx
+            .answerCbQuery("медиа не прикреплено", { show_alert: false })
+            .catch(() => {});
+          return;
+        }
+
+        // fallback: если вдруг сюда попали (URL-кнопка не отрисовалась), покажем ссылку
+        const academyUser =
+          process.env.ACADEMY_BOT_USERNAME || "barista_academy_bot";
+        const url = `https://t.me/${academyUser}?start=media_${candId}_${stepId}`;
+
+        const kb = Markup.inlineKeyboard([
+          [Markup.button.url("📎 Открыть медиа в академии", url)],
+          [
+            Markup.button.callback(
+              "⬅️ Назад к этапам",
+              `lk_internship_data_part_${candId}_${partId}`
+            ),
+          ],
+          [
+            Markup.button.callback(
+              "⬅️ Назад в карточку",
+              `lk_internship_data_back_${candId}`
+            ),
+          ],
+        ]);
+
+        await ctx.answerCbQuery().catch(() => {});
+        await ctx
+          .reply("📎 Медиа доступно в академии. Нажмите кнопку ниже:", {
+            ...kb,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      // simple
+      await ctx
+        .answerCbQuery("этот этап пройден", { show_alert: false })
+        .catch(() => {});
+    } catch (err) {
+      logError("lk_internship_data_step", err);
+      await ctx.answerCbQuery("ошибка", { show_alert: false }).catch(() => {});
+    }
+  });
+
+  // -------- helpers --------
+  function escapeHtml(s) {
+    return String(s || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  async function renderLkInternshipData(ctx, candId, { edit = true } = {}) {
+    // 1) кандидат + user_id
+    const candRes = await pool.query(
+      `
+      SELECT
+        c.id,
+        c.name,
+        c.age,
+        c.phone,
+        u.id AS user_id
+      FROM candidates c
+      LEFT JOIN users u ON u.candidate_id = c.id
+      WHERE c.id = $1
+      LIMIT 1
+      `,
+      [candId]
+    );
+
+    if (!candRes.rows.length) {
+      await ctx.reply("Кандидат не найден.");
+      return;
+    }
+
+    const cand = candRes.rows[0];
+    const userId = cand.user_id;
+
+    const st = internshipDataStateByTgId.get(ctx.from.id) || {
+      candId,
+      mode: "parts",
+    };
+    const mode = st.mode || "parts";
+
+    // 2) завершённые дни (только finished, без canceled)
+    let finishedDays = [];
+    if (userId) {
+      const sRes = await pool.query(
+        `
+        SELECT day_number, finished_at, is_canceled
+        FROM internship_sessions
+        WHERE user_id = $1
+        ORDER BY day_number ASC, id ASC
+        `,
+        [userId]
+      );
+
+      const set = new Set();
+      for (const s of sRes.rows || []) {
+        if (s.is_canceled) continue;
+        if (s.finished_at) set.add(Number(s.day_number));
+      }
+      finishedDays = Array.from(set).sort((a, b) => a - b);
+    }
+
+    const finishedCount = finishedDays.length;
+
+    // 3) общий процент изученного (по всем шагам)
+    const totalStepsRes = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM internship_steps`
+    );
+    const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
+
+    let overallPercent = 0;
+    if (userId && totalSteps > 0) {
+      const passedAllRes = await pool.query(
+        `
+        SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+        FROM internship_step_results r
+        JOIN internship_sessions s ON s.id = r.session_id
+        WHERE s.user_id = $1
+          AND s.is_canceled = FALSE
+          AND r.is_passed = TRUE
+        `,
+        [userId]
+      );
+      const passedAll = passedAllRes.rows[0]?.cnt || 0;
+      overallPercent = Math.round((passedAll / totalSteps) * 100);
+    }
+
+    const agePart = cand.age ? ` (${cand.age})` : "";
+    const phonePart = cand.phone ? ` ${escapeHtml(cand.phone)}` : "";
+
+    let text =
+      `<u><b>🌱 Данные стажировок</b></u>\n\n` +
+      `• Имя: ${escapeHtml(cand.name || "—")}${agePart}${phonePart}\n` +
+      `• Всего завершённых стажировок (дней): ${finishedCount}\n` +
+      `• общий процент изученного: ${overallPercent}%\n` +
+      `────────────────────────\n\n`;
+
+    // 4) строим клавиатуру по режимам
+    const buttons = [];
+
+    // ---- MODE: parts (дашборд) ----
+    if (mode === "parts") {
+      text += `Выбери часть, чтобы посмотреть этапы:\n`;
+
+      // список частей с прогрессом done/total по overall
+      const partsRes = await pool.query(
+        `SELECT id, title, order_index FROM internship_parts ORDER BY order_index ASC, id ASC`
+      );
+
+      for (const p of partsRes.rows || []) {
+        const totalRes = await pool.query(
+          `SELECT COUNT(*)::int AS cnt FROM internship_steps WHERE part_id = $1`,
+          [p.id]
+        );
+        const total = totalRes.rows[0]?.cnt || 0;
+
+        let done = 0;
+        if (userId && total > 0) {
+          const doneRes = await pool.query(
+            `
+            SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+            FROM internship_step_results r
+            JOIN internship_sessions s ON s.id = r.session_id
+            JOIN internship_steps st ON st.id = r.step_id
+            WHERE s.user_id = $1
+              AND s.is_canceled = FALSE
+              AND r.is_passed = TRUE
+              AND st.part_id = $2
+            `,
+            [userId, p.id]
+          );
+          done = doneRes.rows[0]?.cnt || 0;
+        }
+
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        const icon =
+          total > 0 && done === total ? "✅" : done > 0 ? "🟡" : "⚪";
+
+        buttons.push([
+          Markup.button.callback(
+            `${icon} Часть: ${p.title} — ${done}/${total} этапов (${pct}%)`,
+            `lk_internship_data_part_${candId}_${p.id}`
+          ),
+        ]);
+      }
+
+      buttons.push([
+        Markup.button.callback(
+          "▾ Подробнее по дням",
+          `lk_internship_data_toggle_days_${candId}`
+        ),
+      ]);
+
+      buttons.push([
+        Markup.button.callback(
+          "⬅️ назад в карточку",
+          `lk_internship_data_back_${candId}`
+        ),
+      ]);
+    }
+
+    // ---- MODE: days list (раскрытие) ----
+    if (mode === "days") {
+      // в этом режиме подсказка про части исчезает (как ты просил)
+      buttons.push([
+        Markup.button.callback(
+          "▴ Подробнее по дням",
+          `lk_internship_data_toggle_days_${candId}`
+        ),
+      ]);
+
+      // кнопки дней (по 3 в ряд)
+      const dayBtns = finishedDays.map((d) =>
+        Markup.button.callback(
+          `${d}дн`,
+          `lk_internship_data_day_${candId}_${d}`
+        )
+      );
+
+      for (let i = 0; i < dayBtns.length; i += 3) {
+        buttons.push(dayBtns.slice(i, i + 3));
+      }
+
+      buttons.push([
+        Markup.button.callback(
+          "⬅️ назад в карточку",
+          `lk_internship_data_back_${candId}`
+        ),
+      ]);
+    }
+
+    // ---- MODE: конкретный день (текст дня + дни остаются) ----
+    // ---- MODE: конкретный день (текст дня + дни остаются) ----
+    if (mode === "day") {
+      const dayNumber = Number(st.selectedDay);
+
+      // 1) session выбранного дня
+      let session = null;
+      if (userId) {
+        const sesRes = await pool.query(
+          `
+          SELECT
+            s.*,
+            tp.title AS trade_point_title,
+            mentor.full_name AS mentor_name,
+            mentor.username AS mentor_username
+          FROM internship_sessions s
+          LEFT JOIN trade_points tp ON tp.id = s.trade_point_id
+          LEFT JOIN users mentor ON mentor.id = s.started_by
+          WHERE s.user_id = $1
+            AND s.day_number = $2
+            AND s.is_canceled = FALSE
+          ORDER BY s.id DESC
+          LIMIT 1
+          `,
+          [userId, dayNumber]
+        );
+        session = sesRes.rows[0] || null;
+      }
+
+      if (!session) {
+        text += `<b>Данные дня ${dayNumber}</b>\n`;
+        text += `• День не найден или ещё не завершён\n\n`;
+      } else {
+        // 2) Комментарии по сессии
+        const comRes = await pool.query(
+          `
+          SELECT id, comment
+          FROM internship_session_comments
+          WHERE session_id = $1
+          ORDER BY id ASC
+          `,
+          [session.id]
+        );
+
+        // 3) план времени из internship_schedules по session_id (fallback на candidates)
+        let planTimeText = "не указано";
+        try {
+          const schRes = await pool.query(
+            `
+            SELECT planned_time_from, planned_time_to
+            FROM internship_schedules
+            WHERE session_id = $1
+            ORDER BY id DESC
+            LIMIT 1
+            `,
+            [session.id]
+          );
+          const sch = schRes.rows[0] || null;
+          const from = sch?.planned_time_from || cand.internship_time_from;
+          const to = sch?.planned_time_to || cand.internship_time_to;
+          if (from && to) {
+            planTimeText = `с ${String(from).slice(0, 5)} до ${String(to).slice(
+              0,
+              5
+            )}`;
+          }
+        } catch (_) {}
+
+        // 4) итог времени
+        const fmtTime = (d) =>
+          d
+            ? new Date(d).toLocaleTimeString("ru-RU", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "не указано";
+
+        const fmtDate = (d) =>
+          d
+            ? new Date(d).toLocaleDateString("ru-RU", {
+                day: "2-digit",
+                month: "2-digit",
+              })
+            : "не указано";
+
+        const factFrom = session.started_at
+          ? fmtTime(session.started_at)
+          : "не указано";
+        const factTo = session.finished_at
+          ? fmtTime(session.finished_at)
+          : "не указано";
+        const dateLabel = session.started_at
+          ? fmtDate(session.started_at)
+          : "не указано";
+
+        // 5) наставник
+        let mentorLine = session.mentor_name || "не указан";
+        if (session.mentor_username)
+          mentorLine += ` (@${session.mentor_username})`;
+
+        // 6) % по плану дня N (накопительно)
+        const sectionsRes = await pool.query(
+          `
+          SELECT s.id, s.duration_days, s.order_index, p.order_index AS part_order
+          FROM internship_sections s
+          JOIN internship_parts p ON p.id = s.part_id
+          WHERE s.duration_days IS NOT NULL
+          ORDER BY p.order_index ASC, s.order_index ASC
+          `
+        );
+
+        const dayToSteps = new Map(); // day -> [step_id]
+        let cursorDay = 1;
+
+        for (const sec of sectionsRes.rows) {
+          const dur = Number(sec.duration_days || 0);
+          if (!dur || dur < 1) continue;
+
+          const stepsRes = await pool.query(
+            `
+            SELECT id
+            FROM internship_steps
+            WHERE section_id = $1
+            ORDER BY order_index ASC, id ASC
+            `,
+            [sec.id]
+          );
+          const stepIds = stepsRes.rows.map((r) => Number(r.id));
+
+          const k = dur;
+          const n = stepIds.length;
+          let idx = 0;
+
+          for (let i = 0; i < k; i++) {
+            const remaining = n - idx;
+            const remainingBuckets = k - i;
+            const take =
+              remainingBuckets > 0
+                ? Math.ceil(remaining / remainingBuckets)
+                : remaining;
+
+            const chunk = stepIds.slice(idx, idx + take);
+            idx += take;
+
+            const d = cursorDay;
+            const prev = dayToSteps.get(d) || [];
+            dayToSteps.set(d, prev.concat(chunk));
+
+            cursorDay += 1;
+          }
+        }
+
+        const plannedStepIds = (dayToSteps.get(dayNumber) || []).filter(
+          Boolean
+        );
+        const plannedTotal = plannedStepIds.length;
+
+        let plannedPassed = 0;
+        if (userId && plannedTotal > 0) {
+          const passPlanRes = await pool.query(
+            `
+            SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+            FROM internship_step_results r
+            JOIN internship_sessions s ON s.id = r.session_id
+            WHERE s.user_id = $1
+              AND s.is_canceled = FALSE
+              AND r.is_passed = TRUE
+              AND r.step_id = ANY($2::int[])
+            `,
+            [userId, plannedStepIds]
+          );
+          plannedPassed = passPlanRes.rows[0]?.cnt || 0;
+        }
+
+        const planPercent =
+          plannedTotal > 0
+            ? Math.round((plannedPassed / plannedTotal) * 100)
+            : 0;
+        const planIcon = planPercent >= 100 ? "📈" : "📉";
+
+        // 7) Текст (HTML) — как “старый экран дня”, но внутри 🌱 Данные стажировок
+        text += `<b>О стажировке ${dayNumber}</b>\n`;
+        text += `<b>Дата и время стажировки:</b>\n`;
+        text += `  • <b>план:</b> ${escapeHtml(dateLabel)} (${escapeHtml(
+          planTimeText
+        )})\n`;
+        text += `  • <b>итог:</b> ${escapeHtml(dateLabel)} (с ${escapeHtml(
+          factFrom
+        )} до ${escapeHtml(factTo)})\n\n`;
+
+        text += `<b>Место стажировки:</b>\n`;
+        text += `  • ${escapeHtml(
+          session.trade_point_title || "не указано"
+        )}\n\n`;
+
+        text += `<b>Ответственный по стажировке:</b>\n`;
+        text += `  • ${escapeHtml(mentorLine)}\n\n`;
+
+        text += `<b>Успеваемость стажировки:</b>\n`;
+        text += `  • <b>общий процент изученного:</b> ${overallPercent}%\n`;
+        text += `  • <b>процент по плану дня ${dayNumber}:</b> ${planPercent}% ${planIcon}\n\n`;
+
+        text += `<b>Комментарии по стажировке ${dayNumber}:</b>\n`;
+        if (!comRes.rows.length) {
+          text += `  — пока нет\n`;
+        } else {
+          let i = 1;
+          for (const c of comRes.rows) {
+            text += `  ${i}. ${escapeHtml(c.comment)}\n`;
+            i += 1;
+          }
+        }
+        text += `\n`;
+      }
+
+      // кнопки (дни остаются + ✅ на выбранном)
+      buttons.push([
+        Markup.button.callback(
+          "▴ Подробнее по дням",
+          `lk_internship_data_toggle_days_${candId}`
+        ),
+      ]);
+
+      const dayBtns = finishedDays.map((d) => {
+        const label = d === dayNumber ? `✅${d}дн` : `${d}дн`;
+        return Markup.button.callback(
+          label,
+          `lk_internship_data_day_${candId}_${d}`
+        );
+      });
+
+      for (let i = 0; i < dayBtns.length; i += 3) {
+        buttons.push(dayBtns.slice(i, i + 3));
+      }
+
+      buttons.push([
+        Markup.button.callback(
+          "⬅️ назад в карточку",
+          `lk_internship_data_back_${candId}`
+        ),
+      ]);
+    }
+
+    // ---- MODE: выбранная часть (просмотр этапов) ----
+    if (mode === "part") {
+      const partId = Number(st.selectedPartId);
+
+      const partRes = await pool.query(
+        `SELECT id, title FROM internship_parts WHERE id = $1 LIMIT 1`,
+        [partId]
+      );
+      const partTitle = partRes.rows[0]?.title || `#${partId}`;
+
+      text += `часть: <b>${escapeHtml(partTitle)}</b>\n`;
+
+      // список шагов части + кто/когда отметил (overall)
+      const stepsRes = await pool.query(
+        `
+        SELECT id, title, step_type, order_index
+        FROM internship_steps
+        WHERE part_id = $1
+        ORDER BY order_index ASC, id ASC
+        `,
+        [partId]
+      );
+
+      const academyUser =
+        process.env.ACADEMY_BOT_USERNAME || "barista_academy_bot";
+
+      for (const s of stepsRes.rows || []) {
+        // находим лучший факт по пользователю: TRUE приоритетнее, затем по времени
+        let passedRow = null;
+        if (userId) {
+          const rRes = await pool.query(
+            `
+            SELECT
+              r.is_passed,
+              r.checked_at,
+              r.media_file_id,
+              u.full_name AS checker_name
+            FROM internship_step_results r
+            JOIN internship_sessions ses ON ses.id = r.session_id
+            LEFT JOIN users u ON u.id = r.checked_by
+            WHERE ses.user_id = $1
+              AND ses.is_canceled = FALSE
+              AND r.step_id = $2
+            ORDER BY r.is_passed DESC, r.checked_at DESC
+            LIMIT 1
+            `,
+            [userId, s.id]
+          );
+          passedRow = rRes.rows[0] || null;
+        }
+
+        const isPassed = passedRow?.is_passed === true;
+
+        const typeIcon =
+          s.step_type === "photo"
+            ? "📷"
+            : s.step_type === "video"
+            ? "🎥"
+            : "⚪";
+        const statusIcon = isPassed ? "✅" : "❌";
+
+        let suffix = "";
+        if (isPassed && passedRow?.checker_name && passedRow?.checked_at) {
+          const dt = new Date(passedRow.checked_at);
+          const dd = String(dt.getDate()).padStart(2, "0");
+          const mm = String(dt.getMonth() + 1).padStart(2, "0");
+          const hh = String(dt.getHours()).padStart(2, "0");
+          const mi = String(dt.getMinutes()).padStart(2, "0");
+          suffix = ` (${escapeHtml(
+            passedRow.checker_name
+          )}, ${dd}.${mm}, ${hh}:${mi})`;
+        }
+
+        const label = `${statusIcon} ${typeIcon} ${s.title}${suffix}`;
+        const isMedia = s.step_type === "photo" || s.step_type === "video";
+        const hasMedia = Boolean(passedRow?.media_file_id);
+
+        // ✅ photo/video + пройдено + есть media_file_id → сразу URL на академию
+        if (isPassed && isMedia && hasMedia) {
+          const url = `https://t.me/${academyUser}?start=media_${candId}_${s.id}`;
+          buttons.push([Markup.button.url(label, url)]);
+        } else {
+          // всё остальное остаётся callback (тосты/проверки)
+          buttons.push([
+            Markup.button.callback(
+              label,
+              `lk_internship_data_step_${s.id}_${candId}_${partId}`
+            ),
+          ]);
+        }
+      }
+
+      buttons.push([
+        Markup.button.callback(
+          "⬅️ к списку частей",
+          `lk_internship_data_part_back_${candId}`
+        ),
+      ]);
+      buttons.push([
+        Markup.button.callback(
+          "⬅️ назад в карточку",
+          `lk_internship_data_back_${candId}`
+        ),
+      ]);
+    }
+
+    const kb = Markup.inlineKeyboard(buttons);
+
+    if (edit) {
+      await ctx.editMessageText(text, { parse_mode: "HTML", ...kb });
+    } else {
+      await ctx.reply(text, { parse_mode: "HTML", ...kb });
+    }
+  }
+
   // клик по завершённому дню — экран деталей дня стажировки
   bot.action(/^lk_internship_day_(\d+)_(\d+)$/, async (ctx) => {
     try {
@@ -1528,14 +2218,17 @@ LIMIT 1
       if (plannedTotal > 0) {
         const passPlanRes = await pool.query(
           `
-          SELECT COUNT(*)::int AS cnt
-          FROM internship_step_results
-          WHERE session_id = $1
-            AND is_passed = TRUE
-            AND step_id = ANY($2::int[])
+          SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+          FROM internship_step_results r
+          JOIN internship_sessions s ON s.id = r.session_id
+          WHERE s.user_id = $1
+            AND s.is_canceled = FALSE
+            AND r.is_passed = TRUE
+            AND r.step_id = ANY($2::int[])
           `,
-          [session.id, plannedStepIds]
+          [userId, plannedStepIds]
         );
+
         plannedPassed = passPlanRes.rows[0]?.cnt || 0;
       }
 
@@ -1544,9 +2237,8 @@ LIMIT 1
 
       const planIcon = planPercent >= 100 ? "📈" : "📉";
 
-      // 6) План времени
-      // Берём план из internship_schedules по session_id (это истинный “план” для конкретного дня).
       // Fallback — старые поля candidates.internship_* (на случай, если schedules ещё не связали).
+      // 6) План времени (берём из internship_schedules по session_id, fallback на candidates)
       let planTimeText = "не указано";
 
       try {
