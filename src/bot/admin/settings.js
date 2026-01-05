@@ -776,7 +776,24 @@ WHERE id = $1
         }
 
         if (state.step === "work_hours") {
-          state.data.work_hours = text === "-" ? null : text;
+          const raw = text === "-" ? null : text;
+
+          // Если формат строго 08:00-20:00 — пишем в новые поля тоже
+          let whNorm = null;
+          if (raw !== null) {
+            const norm = normalizeWorkHoursInput(raw);
+            if (norm === undefined) {
+              // не строгий формат — оставим как “свободный текст” только в старом поле
+              whNorm = null;
+            } else {
+              whNorm = norm; // нормализованная строка или null
+            }
+          }
+
+          state.data.work_hours = raw; // старое поле оставляем для совместимости
+          state.data.work_hours_weekdays = whNorm;
+          state.data.work_hours_weekends = whNorm;
+
           state.step = "landmark";
           setTpState(tgId, state);
           await ctx.reply(
@@ -792,15 +809,56 @@ WHERE id = $1
 
           await pool.query(
             `
-              INSERT INTO trade_points (title, address, work_hours, landmark, is_active)
-              VALUES ($1, $2, $3, $4, true)
+            INSERT INTO trade_points (title, address, work_hours, work_hours_weekdays, work_hours_weekends, landmark, is_active)
+VALUES ($1, $2, $3, $4, $5, $6, true)
+
             `,
-            [title, address, work_hours, landmark]
+            [
+              title,
+              address,
+              work_hours,
+              state.data.work_hours_weekdays ?? null,
+              state.data.work_hours_weekends ?? null,
+              landmark,
+            ]
           );
 
           clearTpState(tgId);
           await ctx.reply("Торговая точка добавлена ✅");
           await showTradePointsList(ctx);
+          return;
+        }
+      }
+
+      // ------- EDIT FIELD (work_hours_weekdays / work_hours_weekends) -------
+      if (state.mode === "edit_field") {
+        const pointId = state.pointId;
+        const field = state.field;
+
+        if (
+          field === "work_hours_weekdays" ||
+          field === "work_hours_weekends"
+        ) {
+          const norm = normalizeWorkHoursInput(text);
+
+          if (norm === undefined) {
+            await ctx.reply(
+              "Неверный формат. Введи так: 08:00-20:00\nИли отправь '-' чтобы очистить."
+            );
+            return;
+          }
+
+          await pool.query(
+            `UPDATE trade_points SET ${field} = $1 WHERE id = $2`,
+            [
+              norm, // norm может быть null (если отправили '-')
+              pointId,
+            ]
+          );
+
+          clearTpState(tgId);
+          await ctx.reply("Время работы обновлено ✅");
+          await showTradePointCard(ctx, pointId);
           return;
         }
       }
