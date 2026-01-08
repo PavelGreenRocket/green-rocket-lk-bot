@@ -42,6 +42,82 @@ async function getActiveInternshipCandidate(userId) {
   return res.rows[0] || null;
 }
 
+async function getPlannedInternshipScheduleForUser(userId) {
+  const res = await pool.query(
+    `
+      SELECT
+        s.id,
+        s.status,
+        s.planned_date        AS internship_date,
+        s.planned_time_from   AS internship_time_from,
+        s.planned_time_to     AS internship_time_to,
+
+        tp.title    AS internship_point_name,
+        tp.address  AS internship_point_address,
+        tp.landmark AS internship_point_landmark,
+
+        mentor.full_name    AS internship_admin_name,
+        mentor.position     AS internship_admin_position,
+        mentor.username     AS internship_admin_username,
+        mentor.telegram_id  AS internship_admin_telegram_id,
+        mentor.work_phone   AS internship_admin_work_phone
+
+      FROM users u
+      JOIN internship_schedules s
+        ON s.candidate_id = u.candidate_id
+      LEFT JOIN trade_points tp
+        ON tp.id = s.trade_point_id
+      LEFT JOIN users mentor
+        ON mentor.id = s.mentor_user_id
+      WHERE u.id = $1
+        AND s.status = 'planned'
+      ORDER BY s.id DESC
+      LIMIT 1
+    `,
+    [userId]
+  );
+
+  return res.rows[0] || null;
+}
+
+async function getPlannedInternshipScheduleForUser(userId) {
+  const res = await pool.query(
+    `
+    SELECT
+      s.id,
+      s.status,
+      s.planned_date        AS internship_date,
+      s.planned_time_from   AS internship_time_from,
+      s.planned_time_to     AS internship_time_to,
+
+      tp.title   AS internship_point_name,
+      tp.address AS internship_point_address,
+      tp.landmark AS internship_point_landmark,
+
+      mentor.full_name   AS internship_admin_name,
+      mentor.position    AS internship_admin_position,
+      mentor.username    AS internship_admin_username,
+      mentor.telegram_id AS internship_admin_telegram_id,
+      mentor.work_phone  AS internship_admin_work_phone
+
+    FROM users u
+    JOIN internship_schedules s
+      ON s.candidate_id = u.candidate_id
+    LEFT JOIN trade_points tp
+      ON tp.id = s.trade_point_id
+    LEFT JOIN users mentor
+      ON mentor.id = s.mentor_user_id
+    WHERE u.id = $1
+      AND s.status = 'planned'
+    ORDER BY s.id DESC
+    LIMIT 1
+    `,
+    [userId]
+  );
+
+  return res.rows[0] || null;
+}
+
 // Красиво форматируем дату стажировки: 09.12 (вт)
 function formatDateRu(date) {
   if (!date) return "не указана";
@@ -136,13 +212,24 @@ function buildInternshipDetailsText(candidate, userNameFallback = "Вы") {
  * withReadButton = true → показываем кнопку "Прочитал"
  */
 async function showInternshipDetails(ctx, user, { withReadButton, edit } = {}) {
-  const candidate = await getActiveInternshipCandidate(user.id);
+  let candidate = await getActiveInternshipCandidate(user.id);
 
-  // если стажировки нет (или уже не активна) — просто сообщение и выход
+  // fallback: берём назначенную стажировку из internship_schedules
+  if (!candidate) {
+    candidate = await getPlannedInternshipScheduleForUser(user.id);
+  }
+
+  // если стажировка не назначена — тост (если кнопка), либо сообщение (если /start)
   if (!candidate || candidate.status === "rejected") {
-    await ctx.answerCbQuery().catch(() => {});
+    if (ctx.updateType === "callback_query") {
+      await ctx.answerCbQuery().catch(() => {});
+    }
     await ctx.reply("У вас нет активного приглашения на стажировку.");
     return;
+  }
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCbQuery().catch(() => {});
   }
 
   const text = buildInternshipDetailsText(candidate, user.full_name || "Вы");

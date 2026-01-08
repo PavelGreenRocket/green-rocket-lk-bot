@@ -298,6 +298,108 @@ function registerShiftFlow(bot, ensureUser, logError) {
         return;
       }
 
+      // Стажёр может открыть смену ТОЛЬКО если стажировка назначена (есть planned)
+      if (staffStatus === "intern") {
+        if (!user.candidate_id) {
+          await toast(ctx, "Стажировка не назначена");
+          return;
+        }
+
+        const schRes = await pool.query(
+          `
+          SELECT s.id, s.trade_point_id, s.mentor_user_id,
+                 s.planned_date, s.planned_time_from, s.planned_time_to,
+                 u.telegram_id AS mentor_telegram_id
+          FROM internship_schedules s
+          LEFT JOIN users u ON u.id = s.mentor_user_id
+          WHERE s.candidate_id = $1 AND s.status = 'planned'
+          ORDER BY s.id DESC
+          LIMIT 1
+          `,
+          [user.candidate_id]
+        );
+
+        if (!schRes.rows.length) {
+          await toast(ctx, "Стажировка не назначена");
+          return;
+        }
+
+        const planned = schRes.rows[0];
+
+        // Авто-старт стажировки при открытии смены (если ещё нет активной сессии)
+        const activeSessionRes = await pool.query(
+          `
+          SELECT id
+          FROM internship_sessions
+          WHERE user_id = $1 AND finished_at IS NULL AND is_canceled = false
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [user.id]
+        );
+
+        if (!activeSessionRes.rows.length) {
+          const daysRes = await pool.query(
+            `SELECT COALESCE(intern_days_completed, 0) AS d, training_completed_at FROM users WHERE id = $1`,
+            [user.id]
+          );
+          const daysDone = daysRes.rows[0]?.d ?? 0;
+          const trainingCompletedAt =
+            daysRes.rows[0]?.training_completed_at ?? null;
+          const dayNumber = daysDone + 1;
+
+          // was_late: если текущий момент позже planned_time_from
+          let wasLate = false;
+          try {
+            if (planned?.planned_time_from) {
+              const now = new Date();
+              const [hh, mm] = String(planned.planned_time_from).split(":");
+              const plannedStart = new Date(now);
+              plannedStart.setHours(Number(hh || 0), Number(mm || 0), 0, 0);
+              wasLate = now.getTime() > plannedStart.getTime();
+            }
+          } catch (_) {}
+
+          const sesRes = await pool.query(
+            `
+            INSERT INTO internship_sessions (user_id, day_number, started_by, trade_point_id, was_late)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            `,
+            [user.id, dayNumber, user.id, planned.trade_point_id, wasLate]
+          );
+
+          const sessionId = sesRes.rows[0].id;
+
+          // привязываем сессию к назначенной стажировке
+          await pool.query(
+            `
+            UPDATE internship_schedules
+            SET status = 'started', session_id = $2
+            WHERE id = $1 AND status = 'planned'
+            `,
+            [planned.id, sessionId]
+          );
+
+          // Сообщение в академию об открытии курса — только если курс ещё не пройден
+          if (!trainingCompletedAt && planned.mentor_telegram_id) {
+            await pool.query(
+              `
+              INSERT INTO outbox_events (destination, event_type, payload)
+              VALUES ('academy', 'internship_started', $1::jsonb)
+              `,
+              [
+                JSON.stringify({
+                  intern_user_id: user.id,
+                  intern_name: user.full_name || "Стажёр",
+                  mentor_telegram_id: planned.mentor_telegram_id,
+                }),
+              ]
+            );
+          }
+        }
+      }
+
       const active = await getActiveShift(user.id);
 
       // Пока закрытие смены сделаем позже: если смена уже есть — просто алерт
@@ -828,10 +930,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
           `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
           [st.shiftId, user.id]
         );
-        await pool.query(
-          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
-          [st.shiftId, user.id]
-        );
+    
         clearShiftState(ctx.from.id);
 
         // ✅ сразу показываем экран задач на сегодня
@@ -882,10 +981,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
           `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
           [st.shiftId, user.id]
         );
-        await pool.query(
-          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
-          [st.shiftId, user.id]
-        );
+      
         clearShiftState(ctx.from.id);
 
         // ✅ сразу показываем экран задач на сегодня
@@ -936,11 +1032,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
           [st.shiftId, user.id]
         );
         clearShiftState(ctx.from.id);
-        await pool.query(
-          `UPDATE shifts SET status='opened' WHERE id=$1 AND user_id=$2`,
-          [st.shiftId, user.id]
-        );
-        clearShiftState(ctx.from.id);
+      
 
         const shown = await showHandoverAfterOpenIfAny(
           ctx,

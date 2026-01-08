@@ -57,16 +57,61 @@ function extractPhotoAndClean(rawText) {
   const m = text.match(/\[\[photo:([^\]]+)\]\]/);
   if (m && m[1]) photoFileId = m[1].trim();
 
+  // SOC marker: [[soc:tp=79]]
+  let socTradePointId = null;
+  const soc = text.match(/\[\[soc:tp=(\d+)\]\]/);
+  if (soc && soc[1]) socTradePointId = Number(soc[1]);
+
   // remove service markers from visible text
   text = text
     .replace(/\[\[photo:[^\]]+\]\]/g, "")
+    .replace(/\[\[soc:tp=\d+\]\]/g, "")
     .replace(CAT_UNCOMPLETED, "")
     .replace(CAT_COMPLAINTS, "");
 
   // also remove ugly "[complaints]" / "[uncompleted_tasks]" if где-то осталось
   text = text.replace(/\[[a-z_]+\]/gi, "");
 
-  return { text: text.trim(), photoFileId };
+  return { text: text.trim(), photoFileId, socTradePointId };
+}
+
+// --- Shift Opening Control (SOC) helpers (for UI button state)
+async function getSocState(tpId) {
+  const r = await pool.query(
+    `
+    SELECT soc.muted_until, soc.muted_by_user_id,
+           u.full_name, u.username, u.work_phone
+    FROM shift_opening_control soc
+    LEFT JOIN users u ON u.id = soc.muted_by_user_id
+    WHERE soc.trade_point_id = $1
+    LIMIT 1
+    `,
+    [Number(tpId)]
+  );
+
+  const row = r.rows[0] || {};
+  const now = new Date();
+
+  const mu = row.muted_until ? new Date(row.muted_until) : null;
+  const mutedActive =
+    mu && !Number.isNaN(mu.getTime()) && mu.getTime() > now.getTime();
+
+  if (!mutedActive) return { mode: "claim" };
+
+  const msLeft = mu.getTime() - now.getTime();
+  const minsLeft = Math.max(0, Math.ceil(msLeft / 60000));
+
+  return {
+    mode: "in_progress",
+    muted_until: row.muted_until,
+    mins_left: minsLeft,
+    who: {
+      id: row.muted_by_user_id ? Number(row.muted_by_user_id) : null,
+      full_name: row.full_name || null,
+      username: row.username || null,
+      work_phone: row.work_phone || null,
+    },
+  };
 }
 async function getUnreadAnyAtOffset(userId, offset) {
   const r = await pool.query(
@@ -401,7 +446,11 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
     return showUserHub(ctx, user, { edit });
   }
 
-  const { text: cleanBody, photoFileId } = extractPhotoAndClean(n.text);
+  const {
+    text: cleanBody,
+    photoFileId,
+    socTradePointId,
+  } = extractPhotoAndClean(n.text);
 
   const total = Math.max(1, Number(unreadTotal || 0));
   const cur = Math.min(total, Number(offset || 0) + 1);
@@ -443,8 +492,29 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
     ]);
   }
 
+  if (socTradePointId) {
+    const soc = await getSocState(socTradePointId).catch(() => ({
+      mode: "claim",
+    }));
+    if (soc.mode === "in_progress") {
+      rows.push([
+        Markup.button.callback(
+          "⏳ В процессе решения",
+          `lk_soc_info_${socTradePointId}`
+        ),
+      ]);
+    } else {
+      rows.push([
+        Markup.button.callback(
+          "🛠 Решаю проблему",
+          `lk_soc_claim_${socTradePointId}`
+        ),
+      ]);
+    }
+  }
+
   rows.push([Markup.button.callback("✅ Прочитано", "lk_notif_unread_read")]);
-  rows.push([Markup.button.callback("📚 История", "lk_notif_history_menu")]);
+  rows.push([Markup.button.callback("📜 История", "lk_notif_history_menu")]);
   rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
   const keyboard = Markup.inlineKeyboard(rows);
@@ -1545,6 +1615,160 @@ function registerNotifications(bot, ensureUser, logError) {
       await showUserHub(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_notifications", err);
+    }
+  });
+
+  // SOC: show "in progress" details (when muted)
+  bot.action(/^lk_soc_info_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const tpId = Number(ctx.match[1]);
+
+      const soc = await getSocState(tpId);
+
+      if (soc.mode !== "in_progress") {
+        await ctx
+          .answerCbQuery(
+            "Сейчас по этой точке нет активного процесса решения.",
+            {
+              show_alert: true,
+            }
+          )
+          .catch(() => {});
+        return;
+      }
+
+      const nm = soc.who?.full_name || "кто-то";
+      const un = soc.who?.username ? `@${soc.who.username}` : "—";
+      const ph = soc.who?.work_phone ? soc.who.work_phone : "—";
+      const mins = soc.mins_left ?? null;
+
+      const msg =
+        `⏳ В процессе решения\n\n` +
+        `Кто решает: ${nm}\n` +
+        `Username: ${un}\n` +
+        `Телефон: ${ph}` +
+        (mins != null ? `\n\nОсталось примерно: ${mins} мин.` : "");
+
+      await ctx.answerCbQuery(msg, { show_alert: true }).catch(() => {});
+    } catch (e) {
+      logError?.("lk_soc_info", e);
+      await ctx
+        .answerCbQuery("⚠️ Ошибка", { show_alert: true })
+        .catch(() => {});
+    }
+  });
+
+  bot.action(/^lk_soc_claim_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const tpId = Number(ctx.match[1]);
+
+      // создаём строку для точки если её нет (чтобы было куда писать mute)
+      await pool.query(
+        `
+      INSERT INTO shift_opening_control (trade_point_id, enabled, threshold_minutes, repeat_minutes, created_at)
+      VALUES ($1, true, 1, 10, NOW())
+      ON CONFLICT (trade_point_id) DO NOTHING
+      `,
+        [tpId]
+      );
+
+      // если уже стоит mute и он активен — покажем кто решает
+      const cur = await pool.query(
+        `
+      SELECT soc.muted_until, soc.muted_by_user_id, u.full_name, u.username, u.work_phone
+      FROM shift_opening_control soc
+      LEFT JOIN users u ON u.id = soc.muted_by_user_id
+      WHERE soc.trade_point_id = $1
+      LIMIT 1
+      `,
+        [tpId]
+      );
+      const row = cur.rows[0] || {};
+      if (row.muted_until) {
+        const mu = new Date(row.muted_until);
+        if (!Number.isNaN(mu.getTime()) && mu > new Date()) {
+          const nm = row.full_name || "кто-то";
+          const un = row.username ? `@${row.username}` : "—";
+          const ph = row.work_phone ? row.work_phone : "—";
+          await ctx
+            .answerCbQuery(`Уже решает: ${nm} (${un}, ${ph})`, {
+              show_alert: true,
+            })
+            .catch(() => {});
+          return;
+        }
+      }
+
+      // ставим mute на 1 час + фиксируем кто решает
+      await pool.query(
+        `
+      UPDATE shift_opening_control
+      SET muted_until = NOW() + interval '1 hour',
+          muted_by_user_id = $2,
+          muted_at = NOW()
+      WHERE trade_point_id = $1
+      `,
+        [tpId, user.id]
+      );
+
+      // получаем ответственных по точке (включая global), кроме нажавшего
+      const rs = await pool.query(
+        `
+      SELECT DISTINCT user_id
+      FROM responsible_assignments
+      WHERE kind = 'shift_opening_control'
+        AND is_active = true
+        AND (trade_point_id = $1 OR trade_point_id IS NULL)
+      `,
+        [tpId]
+      );
+      const recipients = rs.rows
+        .map((x) => Number(x.user_id))
+        .filter((id) => id && id !== Number(user.id));
+
+      // данные того, кто нажал
+      const u = await pool.query(
+        `SELECT full_name, username, work_phone FROM users WHERE id=$1 LIMIT 1`,
+        [user.id]
+      );
+      const who = u.rows[0] || {};
+      const name = who.full_name || "Без имени";
+      const uname = who.username ? `@${who.username}` : "—";
+      const phone = who.work_phone ? who.work_phone : "—";
+
+      if (recipients.length) {
+        const txt =
+          `🛠 *Проблема по открытию смены взята в работу*\n\n` +
+          `Кто решает: *${name}*\n` +
+          `Username: ${uname}\n` +
+          `Телефон: ${phone}\n\n` +
+          `⏸ Уведомления по этой точке приостановлены на *1 час*.\n` +
+          `Если за час смена не будет открыта — уведомления возобновятся автоматически.`;
+
+        await insertNotificationAndFanout({
+          createdBy: null,
+          text: txt,
+          recipientUserIds: recipients,
+        });
+      }
+
+      await ctx
+        .answerCbQuery("⏳ Ожидание решения! Уведомления временно отключены")
+        .catch(() => {});
+
+      // перерисуем текущий экран уведомлений (чтобы кнопка не мешала)
+      await showUserHub(ctx, user, { edit: true });
+    } catch (e) {
+      logError?.("lk_soc_claim", e);
+      await ctx.answerCbQuery("⚠️ Ошибка").catch(() => {});
     }
   });
 

@@ -7,6 +7,15 @@ const { showInterviewDetails } = require("./interviewUser");
 const { showInternshipDetails } = require("./internshipUser");
 const { registerReports } = require("./reports");
 
+// ===== Helpers =====
+
+function normStaffStatus(raw) {
+  // В БД у вас дефолт 'employee', ранее в коде часто использовали 'worker'
+  if (!raw) return "employee";
+  if (raw === "worker") return "employee";
+  return raw;
+}
+
 async function getActiveShift(userId) {
   const sres = await pool.query(
     `
@@ -24,6 +33,25 @@ async function getActiveShift(userId) {
   );
   return sres.rows[0] || null;
 }
+
+/**
+ * Возвращает объект:
+ * { status: string|null, decline_reason: string|null, is_deferred: boolean|null }
+ */
+async function getCandidateRow(user) {
+  if (!user?.candidate_id) return null;
+  const res = await pool.query(
+    `SELECT status, is_deferred, decline_reason FROM candidates WHERE id = $1`,
+    [user.candidate_id]
+  );
+  return res.rows[0] || null;
+}
+
+function isAdminRole(role) {
+  return role === "admin" || role === "super_admin";
+}
+
+// ===== Screens =====
 
 async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
   const activeShift = await getActiveShift(user.id);
@@ -60,9 +88,7 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
     rows.push([Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle")]);
   }
 
-  // ✅ ДОБАВЬ ВОТ ЭТО (перед "В меню")
   rows.push([Markup.button.callback("📊 Отчёты", "lk_reports")]);
-
   rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
   await deliver(
@@ -76,9 +102,7 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
 }
 
 async function showToolsMenu(ctx, user, { edit = true } = {}) {
-  const staffStatus = user.staff_status || "worker";
-  const role = user.role || "user";
-
+  const staffStatus = normStaffStatus(user.staff_status);
   const rows = [];
 
   // Академия
@@ -109,24 +133,21 @@ async function showToolsMenu(ctx, user, { edit = true } = {}) {
   );
 }
 
+// ===== Menus =====
+
 async function buildMainKeyboard(user) {
-  const staffStatus = user.staff_status || "worker";
+  const staffStatus = normStaffStatus(user.staff_status);
   const role = user.role || "user";
 
-  if (staffStatus === "candidate" && !user.candidate_id) {
-    return null;
-  }
+  // Если кандидат без candidate_id — меню не показываем
+  if (staffStatus === "candidate" && !user.candidate_id) return null;
 
-  // Особая клавиатура для кандидата
+  // Кандидатские экраны (инвайты) — управляются /start напрямую, тут клавиатура не нужна
+  // Но на всякий случай оставим кнопки, если когда-то захотите показывать не напрямую.
   if (staffStatus === "candidate" && user.candidate_id) {
-    const res = await pool.query(
-      "SELECT status, is_deferred, decline_reason FROM candidates WHERE id = $1",
-      [user.candidate_id]
-    );
-    const cand = res.rows[0];
+    const cand = await getCandidateRow(user);
 
-    // 1) Собеседование
-    if (cand && cand.status === "invited") {
+    if (cand?.status === "invited") {
       return Markup.inlineKeyboard([
         [
           Markup.button.callback(
@@ -143,8 +164,7 @@ async function buildMainKeyboard(user) {
       ]);
     }
 
-    // 2) Стажировка
-    if (cand && cand.status === "internship_invited") {
+    if (cand?.status === "internship_invited") {
       return Markup.inlineKeyboard([
         [
           Markup.button.callback(
@@ -160,52 +180,35 @@ async function buildMainKeyboard(user) {
         ],
       ]);
     }
+
     return null;
   }
 
-  // Обычная клавиатура (смены, Академия, склад, ИИ, уведомления и т.п.)
+  // ===== Обычное меню ЛК (для employee/admin/intern с открытым доступом) =====
   const buttons = [];
-
-  // 1) Смена (открыть/закрыть) + задачи (только если смена активна)
-  let activeShift = null;
-  try {
-    const sres = await pool.query(
-      `
-        SELECT id, status
-        FROM shifts
-        WHERE user_id = $1
-          AND opened_at::date = CURRENT_DATE
-          AND status IN ('opening_in_progress','opened','closing_in_progress')
-          AND trade_point_id IS NOT NULL
-        ORDER BY opened_at DESC
-        LIMIT 1
-      `,
-      [user.id]
-    );
-    activeShift = sres.rows[0] || null;
-  } catch (e) {
-    // если таблица shifts ещё не подключена/пусто — не ломаем меню
-    activeShift = null;
-  }
 
   buttons.push([
     Markup.button.callback("👤 Профиль / Смена", "lk_profile_shift"),
   ]);
-
-  // 📦 Рабочие инструменты (Академия/Склад/ИИ)
   buttons.push([
     Markup.button.callback("📦 Рабочие инструменты", "lk_tools_menu"),
   ]);
 
-  // 4) Уведомления (+ бейдж)
   const unread = await countUnreadNotifications(user.id);
   const notifLabel =
     unread > 0 ? `🔔 Уведомления (${unread})` : "🔔 Уведомления";
   buttons.push([Markup.button.callback(notifLabel, "lk_notifications")]);
 
-  // 6) Кнопка "Собеседования (N) ❗" — только для admin / super_admin,
-  //    и только если есть запланированные собеседования
-  if (role === "admin" || role === "super_admin") {
+  // Детали стажировки — отображаем в меню стажёра (с доступом),
+  // и можете оставить также для кандидата-инвайта, если когда-то решите показывать меню.
+  if (staffStatus === "intern") {
+    buttons.push([
+      Markup.button.callback("📄 Детали стажировки", "lk_internship_details"),
+    ]);
+  }
+
+  // Админ: собеседования
+  if (isAdminRole(role)) {
     const res = await pool.query(
       `
         SELECT COUNT(*) AS cnt
@@ -215,28 +218,19 @@ async function buildMainKeyboard(user) {
       `,
       [user.id]
     );
-
     const interviewsCount = Number(res.rows[0]?.cnt || 0);
-
     if (interviewsCount > 0) {
       buttons.push([
         Markup.button.callback(
           `❗ Собеседования (${interviewsCount})`,
-          "lk_admin_my_interviews" // было "admin_users_candidates"
+          "lk_admin_my_interviews"
         ),
       ]);
     }
   }
 
-  // 7) Детали стажировки — только для стажёров
-  if (staffStatus === "intern") {
-    buttons.push([
-      Markup.button.callback("📄 Детали стажировки", "lk_internship_details"),
-    ]);
-  }
-
-  // 8) Админ-панель — только для admin / super_admin
-  if (role === "admin" || role === "super_admin") {
+  // Админ-панель
+  if (isAdminRole(role)) {
     buttons.push([Markup.button.callback("⚙️ Админ-панель", "lk_admin_menu")]);
   }
 
@@ -244,18 +238,14 @@ async function buildMainKeyboard(user) {
 }
 
 async function buildStatusText(user) {
-  const staffStatus = user.staff_status || "worker";
-  const position = user.position || "";
+  const staffStatus = normStaffStatus(user.staff_status);
   const role = user.role || "user";
   const name = user.full_name || "Гость";
+  const position = user.position || "";
 
-  // ✅ Кандидат: текст зависит от candidates.status
+  // Кандидат: текст зависит от candidates.status
   if (staffStatus === "candidate" && user.candidate_id) {
-    const res = await pool.query(
-      "SELECT status, is_deferred FROM candidates WHERE id = $1",
-      [user.candidate_id]
-    );
-    const cand = res.rows[0];
+    const cand = await getCandidateRow(user);
 
     if (cand?.status === "invited") {
       return (
@@ -269,17 +259,12 @@ async function buildStatusText(user) {
     if (cand?.status === "internship_invited") {
       return (
         `${name}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
-        "Стажировка ещё не началась, поэтому личный кабинет пока закрыт.\n" +
-        "Он откроется автоматически в момент старта.\n\n" +
-        "🔔 За 2 часа до начала вы получите уведомление, " +
-        "где нужно будет подтвердить присутствие - до этого ничего делать не нужно.\n\n"
+        "Стажировка ещё не началась, поэтому личный кабинет пока закрыт.\n\n" +
+        "Нажмите «📄 Детали стажировки», чтобы посмотреть дату, время и место."
       );
     }
 
-    // ✅ rejected (и отложенные тоже rejected+is_deferred=true):
-    // меню НЕ открываем, показываем “закрыто”
     if (cand?.status === "rejected") {
-      // если отказался сам — показываем “вы отказались…”
       if (cand.decline_reason === "отказался сам") {
         return (
           "❌ Вы отказались от собеседования.\n\n" +
@@ -287,14 +272,9 @@ async function buildStatusText(user) {
           "Если это ошибка — свяжитесь, пожалуйста, с руководителем."
         );
       }
-
-      return (
-        "❌ К сожалению, мы не готовы продолжить с вами сотрудничество.\n\n" +
-        "Спасибо, что нашли время!"
-      );
+      return "❌ К сожалению, мы не готовы продолжить с вами сотрудничество.\n\nСпасибо, что нашли время!";
     }
 
-    // interviewED (“ожидают решения”) — тоже без меню, нейтрально
     if (cand?.status === "interviewed") {
       return (
         `${name}, спасибо за собеседование!\n\n` +
@@ -303,55 +283,33 @@ async function buildStatusText(user) {
       );
     }
 
-    // запасной вариант на прочие статусы
     return "Личный кабинет пока закрыт.";
   }
 
-  // Дальше — обычный текст (включая кандидата на стажировку)
+  // Обычный ЛК текст
   let statusLine = "";
-  if (staffStatus === "intern") {
-    statusLine = "<b>Статус:</b> 🎓 стажёр";
-  } else if (staffStatus === "worker") {
+  if (staffStatus === "intern") statusLine = "<b>Статус:</b> 🎓 стажёр";
+  else if (staffStatus === "employee")
     statusLine = "<b>Статус:</b> 👨‍💼 сотрудник";
-  } else if (staffStatus === "candidate") {
-    statusLine = "<b>Статус:</b> 🧩 кандидат";
-  } else {
-    statusLine = `<b>Статус:</b> ${staffStatus}`;
-  }
+  else statusLine = `<b>Статус:</b> ${staffStatus}`;
+
+  let positionLine = "";
+  if (position) positionLine = `<b>Должность:</b> ${position}\n`;
 
   let roleLine = "";
   if (role === "admin") roleLine = "<b>Роль:</b> админ\n";
-  else if (role === "super_admin") roleLine = "<b>Роль:</b> супер-админ\n";
-
-  let positionLine = "";
-  if (position) {
-    let posLabel = position;
-    if (position === "barista") posLabel = "бариста";
-    if (position === "point_admin") posLabel = "администратор точки";
-    if (position === "senior_admin") posLabel = "старший администратор";
-    if (position === "quality_manager") posLabel = "менеджер по качеству";
-    if (position === "manager") posLabel = "управляющий";
-
-    positionLine = `<b>Должность:</b> ${posLabel}\n`;
-  }
+  if (role === "super_admin") roleLine = "<b>Роль:</b> супер-админ\n";
 
   let text = `<b>Имя:</b> ${name}\n`;
-
-  if (role === "super_admin") {
-    text += `${statusLine}\n`;
-    if (roleLine) {
-      text += roleLine;
-    }
-  }
-
-  if (positionLine) {
-    text += `${positionLine}\n`;
-  }
-
-  text += "Личный кабинет активен";
+  text += `${statusLine}\n`;
+  if (roleLine) text += roleLine;
+  if (positionLine) text += positionLine;
+  text += "\nЛичный кабинет активен";
 
   return text;
 }
+
+// ===== Register =====
 
 function registerMenu(bot, ensureUser, logError) {
   // /start
@@ -360,30 +318,31 @@ function registerMenu(bot, ensureUser, logError) {
       const user = await ensureUser(ctx);
       if (!user) return;
 
-      // ✅ если кандидат приглашён — сразу нужный экран (без промежуточного меню)
-      if (user.staff_status === "candidate" && user.candidate_id) {
-        const res = await pool.query(
-          "SELECT status FROM candidates WHERE id = $1",
-          [user.candidate_id]
-        );
-        const cand = res.rows[0];
+      const staffStatus = normStaffStatus(user.staff_status);
+      const cand = await getCandidateRow(user);
 
-        // 1) invited → детали собеседования
-        if (cand?.status === "invited") {
-          await showInterviewDetails(ctx, user, { edit: false });
-          return;
-        }
-
-        // 2) internship_invited → детали стажировки (скрин 2)
-        if (cand?.status === "internship_invited") {
-          await showInternshipDetails(ctx, user, {
-            withReadButton: false,
-            edit: false,
-          });
-          return;
-        }
+      // 1) Кандидат, приглашён на собеседование -> всегда экран скрин 1
+      if (staffStatus === "candidate" && cand?.status === "invited") {
+        await showInterviewDetails(ctx, user, { edit: false });
+        return;
       }
 
+      // 2) Стажёр (intern) ИЛИ кандидат, приглашён на стажировку, и ЛК ещё закрыт -> всегда экран скрин 2
+      //    ЛК "закрыт" считаем только для стажёра: lk_enabled !== true
+      //    Для кандидата internship_invited — ЛК всегда закрыт до старта, и тоже должен показывать скрин 2.
+      const needsInternshipScreen =
+        (staffStatus === "intern" && user.lk_enabled !== true) ||
+        (staffStatus === "candidate" && cand?.status === "internship_invited");
+
+      if (needsInternshipScreen) {
+        await showInternshipDetails(ctx, user, {
+          withReadButton: false,
+          edit: false,
+        });
+        return;
+      }
+
+      // 3) Иначе — обычный ЛК
       const text = await buildStatusText(user);
       const keyboard = await buildMainKeyboard(user);
       await deliver(
@@ -396,6 +355,48 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
+  // Переход из уведомления "доступ открыт"
+  bot.action("lk_open_menu", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      // При клике — поведение такое же как /start
+      const staffStatus = normStaffStatus(user.staff_status);
+      const cand = await getCandidateRow(user);
+
+      if (staffStatus === "candidate" && cand?.status === "invited") {
+        await showInterviewDetails(ctx, user, { edit: false });
+        return;
+      }
+
+      const needsInternshipScreen =
+        (staffStatus === "intern" && user.lk_enabled !== true) ||
+        (staffStatus === "candidate" && cand?.status === "internship_invited");
+
+      if (needsInternshipScreen) {
+        await showInternshipDetails(ctx, user, {
+          withReadButton: false,
+          edit: false,
+        });
+        return;
+      }
+
+      const text = await buildStatusText(user);
+      const keyboard = await buildMainKeyboard(user);
+
+      await deliver(
+        ctx,
+        { text, extra: { ...(keyboard || {}), parse_mode: "HTML" } },
+        { edit: false }
+      );
+    } catch (err) {
+      logError("lk_open_menu", err);
+    }
+  });
+
+  // Меню инструментов
   bot.action("lk_tools_menu", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -407,20 +408,39 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
-  // Кнопка "Назад в меню"
+  // Назад в меню
   bot.action("lk_main_menu", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
+
+      const staffStatus = normStaffStatus(user.staff_status);
+      const cand = await getCandidateRow(user);
+
+      if (staffStatus === "candidate" && cand?.status === "invited") {
+        await showInterviewDetails(ctx, user, { edit: false });
+        return;
+      }
+
+      const needsInternshipScreen =
+        (staffStatus === "intern" && user.lk_enabled !== true) ||
+        (staffStatus === "candidate" && cand?.status === "internship_invited");
+
+      if (needsInternshipScreen) {
+        await showInternshipDetails(ctx, user, {
+          withReadButton: false,
+          edit: false,
+        });
+        return;
+      }
+
       const text = await buildStatusText(user);
       const keyboard = await buildMainKeyboard(user);
+
       await deliver(
         ctx,
-        {
-          text,
-          extra: { ...(keyboard || {}), parse_mode: "HTML" },
-        },
+        { text, extra: { ...(keyboard || {}), parse_mode: "HTML" } },
         { edit: true }
       );
     } catch (err) {
@@ -428,7 +448,7 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
-  // 👤 Профиль / Смена
+  // Профиль / смена
   bot.action("lk_profile_shift", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -445,13 +465,16 @@ function registerMenu(bot, ensureUser, logError) {
     try {
       const user = await ensureUser(ctx);
       if (!user) return;
-      const staffStatus = user.staff_status || "worker";
+
+      const staffStatus = normStaffStatus(user.staff_status);
 
       if (staffStatus === "candidate") {
         await ctx
           .answerCbQuery(
             "Доступ к обучению откроется после начала стажировки.",
-            { show_alert: true }
+            {
+              show_alert: true,
+            }
           )
           .catch(() => {});
       } else {
@@ -464,12 +487,13 @@ function registerMenu(bot, ensureUser, logError) {
     }
   });
 
-  // Склад
+  // Склад закрыт
   bot.action("lk_warehouse_locked", async (ctx) => {
     try {
       const user = await ensureUser(ctx);
       if (!user) return;
-      const staffStatus = user.staff_status || "worker";
+
+      const staffStatus = normStaffStatus(user.staff_status);
 
       if (staffStatus === "candidate") {
         await ctx
@@ -487,6 +511,7 @@ function registerMenu(bot, ensureUser, logError) {
       logError("lk_warehouse_locked", err);
     }
   });
+
   registerReports(bot, ensureUser, logError);
 }
 

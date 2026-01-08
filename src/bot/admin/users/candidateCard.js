@@ -229,7 +229,9 @@ async function showCandidateCardLk(ctx, candidateId, options = {}) {
 u_intern.telegram_id AS internship_admin_tg_id,
 u_link.id           AS lk_user_id,
         u_link.full_name    AS lk_user_name,
-        u_link.telegram_id  AS lk_user_telegram_id
+        u_link.telegram_id  AS lk_user_telegram_id,
+         COALESCE(u_link.lk_enabled, false) AS lk_user_lk_enabled
+
 
 FROM candidates c
         LEFT JOIN trade_points tp_place    ON c.point_id            = tp_place.id
@@ -576,6 +578,24 @@ LIMIT 1
 
   // --- SUBSCREEN: настройки стажёра ---
   if (options.internSubscreen === "settings") {
+    rows.push([
+      Markup.button.callback(
+        "⬆️ Повысить до сотрудника",
+        `lk_intern_settings_promote_${cand.id}`
+      ),
+    ]);
+
+    const lkEnabled = !!cand.lk_user_lk_enabled;
+
+    rows.push([
+      Markup.button.callback(
+        lkEnabled ? "🔒 Закрыть доступ в ЛК" : "🔓 Открыть доступ в ЛК",
+        lkEnabled
+          ? `lk_intern_settings_close_lk_${cand.id}`
+          : `lk_intern_settings_open_lk_${cand.id}`
+      ),
+    ]);
+
     rows.push([
       Markup.button.callback(
         "✏️ Изменить карточку",
@@ -1125,6 +1145,154 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
+  bot.action(/^lk_intern_settings_open_lk_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      // найдём привязанного юзера (стажёра)
+      const r = await pool.query(
+        `
+        SELECT u.id AS user_id, u.telegram_id
+        FROM users u
+        WHERE u.candidate_id = $1
+        LIMIT 1
+        `,
+        [candidateId]
+      );
+
+      const u = r.rows[0];
+      if (!u?.user_id || !u?.telegram_id) {
+        await ctx.reply("❌ Не найден привязанный пользователь (telegram_id).");
+        return;
+      }
+
+      // ✅ включаем доступ в ЛК
+      await pool.query(`UPDATE users SET lk_enabled = true WHERE id = $1`, [
+        u.user_id,
+      ]);
+
+      // уведомление стажёру
+      await ctx.telegram.sendMessage(
+        Number(u.telegram_id),
+        "✅ Доступ в личный кабинет открыт.\n\nНажмите кнопку ниже или отправьте /start.",
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "🏠 Перейти в личный кабинет",
+              "lk_open_menu"
+            ),
+          ],
+        ])
+      );
+
+      await ctx
+        .answerCbQuery("✅ Доступ в ЛК открыт", { show_alert: false })
+        .catch(() => {});
+
+      // обновим экран настроек (остаемся в карточке стажёра → настройки)
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+        internSubscreen: "settings",
+      });
+    } catch (err) {
+      logError("lk_intern_settings_open_lk", err);
+    }
+  });
+
+  bot.action(/^lk_intern_settings_close_lk_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      const r = await pool.query(
+        `
+      SELECT u.id AS user_id, u.telegram_id
+      FROM users u
+      WHERE u.candidate_id = $1
+      LIMIT 1
+      `,
+        [candidateId]
+      );
+
+      const u = r.rows[0];
+      if (!u?.user_id) {
+        await ctx
+          .answerCbQuery("❌ Не найден привязанный пользователь", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      await pool.query(`UPDATE users SET lk_enabled = false WHERE id = $1`, [
+        u.user_id,
+      ]);
+
+      if (u.telegram_id) {
+        await ctx.telegram
+          .sendMessage(
+            Number(u.telegram_id),
+            "🔒 Доступ в личный кабинет закрыт."
+          )
+          .catch(() => {});
+      }
+
+      await ctx
+        .answerCbQuery("🔒 Доступ в ЛК закрыт", { show_alert: false })
+        .catch(() => {});
+
+      await showCandidateCardLk(ctx, candidateId, {
+        edit: true,
+        forceMode: "trainee",
+        internSubscreen: "settings",
+      });
+    } catch (err) {
+      logError("lk_intern_settings_close_lk", err);
+    }
+  });
+
+  bot.action(/^lk_intern_settings_promote_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      await deliver(
+        ctx,
+        {
+          text:
+            "⬆️ Повышение до сотрудника\n\n" +
+            "Повышаем только тогда, когда стажёр уже может работать полностью самостоятельно без контроля наставника.\n\n" +
+            "Пока это заглушка (в следующем этапе сделаем реальное повышение).",
+          extra: Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "⬅️ Назад",
+                `lk_intern_settings_back_${candidateId}`
+              ),
+            ],
+          ]),
+        },
+        { edit: true }
+      );
+    } catch (err) {
+      logError("lk_intern_settings_promote", err);
+    }
+  });
+
   // не кликабельные заголовки меню
   bot.action(/^lk_noop$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
@@ -1520,7 +1688,9 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         c.name,
         c.age,
         c.phone,
-        u.id AS user_id
+        u.id AS user_id,
+u.intern_control_mode,
+u.training_completed_at
       FROM candidates c
       LEFT JOIN users u ON u.candidate_id = c.id
       WHERE c.id = $1
@@ -1595,9 +1765,26 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     let text =
       `<u><b>🌱 Данные стажировок</b></u>\n\n` +
       `• Имя: ${escapeHtml(cand.name || "—")}${agePart}${phonePart}\n` +
-      `• Всего завершённых стажировок (дней): ${finishedCount}\n` +
-      `• общий процент изученного: ${overallPercent}%\n` +
-      `────────────────────────\n\n`;
+      `• Всего завершённых стажировок (дней): ${finishedCount}\n`;
+    const controlMode = cand.intern_control_mode || null;
+
+    const overallLine =
+      overallPercent >= 100
+        ? `• общий процент изученного: 100% ✅\n`
+        : `• общий процент изученного: ${overallPercent}%\n`;
+
+    text += overallLine;
+
+    if (overallPercent >= 100) {
+      if (controlMode === "full_control") {
+        text += `• стажёр всё ещё не может работать самостоятельно (полный контроль)\n`;
+      } else {
+        // default = supervised
+        text += `• работа самостоятельно под контролем\n`;
+      }
+    }
+
+    text += `────────────────────────\n\n`;
 
     // 4) строим клавиатуру по режимам
     const buttons = [];
@@ -1893,8 +2080,9 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
 
         text += `<b>Успеваемость стажировки:</b>\n`;
         text += `  • <b>общий процент изученного:</b> ${overallPercent}%\n`;
-        text += `  • <b>процент по плану дня ${dayNumber}:</b> ${planPercent}% ${planIcon}\n\n`;
-
+        if (overallPercent < 100) {
+          text += `  • <b>процент по плану дня ${dayNumber}:</b> ${planPercent}% ${planIcon}\n\n`;
+        }
         text += `<b>Комментарии по стажировке ${dayNumber}:</b>\n`;
         if (!comRes.rows.length) {
           text += `  — пока нет\n`;

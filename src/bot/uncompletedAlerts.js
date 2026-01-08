@@ -16,17 +16,19 @@ function formatIsoDateRu(iso) {
 async function getResponsibles(tradePointId) {
   const r = await pool.query(
     `
-    SELECT u.id, u.telegram_id, u.full_name
-    FROM  responsible_assignments r
-    JOIN users u ON u.id = r.user_id
-    WHERE r.trade_point_id = $1
-      AND r.kind = 'uncompleted_tasks'
-      AND r.is_active = true
-      AND u.telegram_id IS NOT NULL
-    ORDER BY u.full_name
-    `,
+  SELECT DISTINCT u.id, u.telegram_id
+  FROM responsible_assignments r
+  JOIN users u ON u.id = r.user_id
+  WHERE r.kind = 'uncompleted_tasks'
+    AND r.is_active = true
+    AND (
+      r.trade_point_id = $1
+      OR r.trade_point_id IS NULL
+    )
+  `,
     [tradePointId]
   );
+
   return r.rows.map((x) => ({
     id: Number(x.id),
     telegram_id: Number(x.telegram_id),

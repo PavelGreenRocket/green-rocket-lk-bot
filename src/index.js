@@ -10,6 +10,9 @@ const {
 const { buildStatusText, buildMainKeyboard } = require("./bot/menu");
 const { deliver } = require("./utils/renderHelpers");
 const { startOutboxWorker } = require("./outbox/worker");
+const {
+  startShiftOpeningControlWatcher,
+} = require("./bot/shifts/shiftOpeningControlWatcher");
 
 const BOT_TOKEN = process.env.BOT_TOKEN_LK;
 
@@ -19,6 +22,7 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 startOutboxWorker(bot);
+startShiftOpeningControlWatcher({ intervalMs: 60_000, logError });
 
 // Простенький логгер ошибок
 function logError(tag, err) {

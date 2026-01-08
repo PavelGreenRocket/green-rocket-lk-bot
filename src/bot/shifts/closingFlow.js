@@ -663,6 +663,7 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
   });
 
   const {
+    createAlert,
     moveSingleTasksToDate,
     deleteSingleTasks,
   } = require("../../bot/uncompletedAlerts");
@@ -1466,6 +1467,113 @@ function registerShiftClosingFlow(bot, ensureUser, logError) {
       const st = getSt(ctx.from.id);
       if (!st?.shiftId) return;
 
+      // Если смену закрывает стажёр — автоматически завершаем текущую стажировку (сессию)
+      if ((user.staff_status || "worker") === "intern") {
+        const activeSesRes = await pool.query(
+          `
+          SELECT id, day_number
+          FROM internship_sessions
+          WHERE user_id = $1
+            AND finished_at IS NULL
+            AND is_canceled = false
+          ORDER BY id DESC
+          LIMIT 1
+          `,
+          [user.id]
+        );
+
+        if (activeSesRes.rows.length) {
+          const sessionId = Number(activeSesRes.rows[0].id);
+          const dayNumber = Number(activeSesRes.rows[0].day_number);
+
+          // 1) закрываем сессию стажировки
+          await pool.query(
+            `
+            UPDATE internship_sessions
+            SET finished_at = NOW()
+            WHERE id = $1 AND finished_at IS NULL
+            `,
+            [sessionId]
+          );
+
+          // 2) фиксируем кол-во пройденных дней стажировки у юзера
+          await pool.query(
+            `
+            UPDATE users
+            SET intern_days_completed = GREATEST(COALESCE(intern_days_completed,0), $2)
+            WHERE id = $1
+            `,
+            [user.id, dayNumber]
+          );
+
+          // 3) обновляем schedule (started -> finished) + берём ментора для уведомления
+          let scheduleRow = null;
+
+          const schBySessionRes = await pool.query(
+            `
+            SELECT s.id, s.candidate_id, s.mentor_user_id, mu.telegram_id AS mentor_telegram_id
+            FROM internship_schedules s
+            LEFT JOIN users mu ON mu.id = s.mentor_user_id
+            WHERE s.session_id = $1
+            ORDER BY s.id DESC
+            LIMIT 1
+            `,
+            [sessionId]
+          );
+
+          if (schBySessionRes.rows.length) {
+            scheduleRow = schBySessionRes.rows[0];
+          } else if (user.candidate_id) {
+            const schStartedRes = await pool.query(
+              `
+              SELECT s.id, s.candidate_id, s.mentor_user_id, mu.telegram_id AS mentor_telegram_id
+              FROM internship_schedules s
+              LEFT JOIN users mu ON mu.id = s.mentor_user_id
+              WHERE s.candidate_id = $1 AND s.status = 'started'
+              ORDER BY s.id DESC
+              LIMIT 1
+              `,
+              [user.candidate_id]
+            );
+            if (schStartedRes.rows.length) scheduleRow = schStartedRes.rows[0];
+          }
+
+          if (scheduleRow?.id) {
+            await pool.query(
+              `
+              UPDATE internship_schedules
+              SET status = 'finished',
+                  finished_at = NOW()
+              WHERE id = $1 AND status = 'started'
+              `,
+              [Number(scheduleRow.id)]
+            );
+          }
+
+          // 4) уведомление в ЛК (через outbox), что стажировка завершена
+          // (обрабатывается существующим воркером, как и "internship_finished" из академии)
+          const mentorTg = Number(scheduleRow?.mentor_telegram_id || 0);
+          if (mentorTg) {
+            await pool.query(
+              `
+              INSERT INTO outbox_events (destination, event_type, payload)
+              VALUES ('lk', 'internship_finished', $1::jsonb)
+              `,
+              [
+                JSON.stringify({
+                  session_id: sessionId,
+                  intern_user_id: user.id,
+                  intern_name: user.full_name || "стажёр",
+                  candidate_id:
+                    user.candidate_id || scheduleRow?.candidate_id || null,
+                  mentor_telegram_id: mentorTg,
+                }),
+              ]
+            );
+          }
+        }
+      }
+
       // 1) добиваем состояние (если надо) и закрываем смену
       await pool.query(
         `
@@ -1476,6 +1584,16 @@ WHERE id = $1
 `,
         [Number(st.shiftId)]
       );
+
+      // 1.1) если закрыли смену с невыполненными задачами — уведомляем ответственных
+      try {
+        const hasOpen = await hasOpenTodayTasks(user.id);
+        if (hasOpen) {
+          await createAlert(bot, { shiftId: Number(st.shiftId) });
+        }
+      } catch (e) {
+        logError("uncompleted_tasks_alert", e);
+      }
 
       // ==== если это закрытие по передаче смены — завершаем transfer и уведомляем B
       try {

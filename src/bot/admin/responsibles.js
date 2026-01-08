@@ -30,6 +30,182 @@ async function loadPoints() {
   return r.rows;
 }
 
+async function loadPointWorkHours(tradePointId) {
+  if (tradePointId == null) return null;
+  const r = await pool.query(
+    `SELECT work_hours_weekdays, work_hours_weekends, work_hours
+     FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getControlRow(tradePointId) {
+  if (tradePointId == null) {
+    const r = await pool.query(
+      `SELECT * FROM shift_opening_control
+       WHERE trade_point_id IS NULL
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    return r.rows[0] || null;
+  }
+  const r = await pool.query(
+    `SELECT * FROM shift_opening_control WHERE trade_point_id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getEffectiveControl(tradePointId) {
+  // точка -> иначе global -> иначе дефолт
+  const specific =
+    tradePointId == null ? null : await getControlRow(tradePointId);
+  if (specific) return { row: specific, source: "specific" };
+
+  const global = await getControlRow(null);
+  if (global) return { row: global, source: "global" };
+
+  return {
+    row: { trade_point_id: null, enabled: true, threshold_minutes: 1 },
+    source: "default",
+  };
+}
+
+function fmtWorkHours(whRow) {
+  if (!whRow) return "—";
+  const w = (whRow.work_hours_weekdays || "").trim();
+  const e = (whRow.work_hours_weekends || "").trim();
+  if (w || e) {
+    const parts = [];
+    if (w) parts.push(`Будни: ${w}`);
+    if (e) parts.push(`Выходные: ${e}`);
+    return parts.join(" / ");
+  }
+  return (whRow.work_hours || "").trim() || "—";
+}
+
+function isValidMinutesText(t) {
+  const n = Number(String(t || "").trim());
+  return Number.isInteger(n) && n >= 0 && n <= 600;
+}
+async function loadPointWorkHours(tradePointId) {
+  if (tradePointId == null) return null;
+  const r = await pool.query(
+    `SELECT work_hours_weekdays, work_hours_weekends, work_hours
+     FROM trade_points WHERE id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getControlRow(tradePointId) {
+  if (tradePointId == null) {
+    const r = await pool.query(
+      `SELECT * FROM shift_opening_control
+       WHERE trade_point_id IS NULL
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    return r.rows[0] || null;
+  }
+  const r = await pool.query(
+    `SELECT * FROM shift_opening_control WHERE trade_point_id=$1 LIMIT 1`,
+    [tradePointId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getEffectiveControl(tradePointId) {
+  // точка -> иначе global -> иначе дефолт
+  const specific =
+    tradePointId == null ? null : await getControlRow(tradePointId);
+  if (specific) return { row: specific, source: "specific" };
+
+  const global = await getControlRow(null);
+  if (global) return { row: global, source: "global" };
+
+  return {
+    row: { trade_point_id: null, enabled: true, threshold_minutes: 1 },
+    source: "default",
+  };
+}
+async function upsertControl(tradePointId, patch) {
+  // patch: { enabled?, threshold_minutes?, repeat_minutes? }
+  const enabled = patch.enabled === undefined ? null : Boolean(patch.enabled);
+  const thr =
+    patch.threshold_minutes === undefined
+      ? null
+      : Number(patch.threshold_minutes);
+
+  const rep =
+    patch.repeat_minutes === undefined ? null : Number(patch.repeat_minutes);
+
+  if (tradePointId == null) {
+    // global row: update existing else insert
+    const cur = await getControlRow(null);
+    if (cur?.id) {
+      await pool.query(
+        `UPDATE shift_opening_control
+         SET enabled = COALESCE($1, enabled),
+             threshold_minutes = COALESCE($2, threshold_minutes),
+             repeat_minutes = COALESCE($3, repeat_minutes)
+          WHERE id = $4`,
+        [
+          enabled,
+          Number.isFinite(thr) ? thr : null,
+          Number.isFinite(rep) ? rep : null,
+          cur.id,
+        ]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO shift_opening_control (trade_point_id, enabled, threshold_minutes, repeat_minutes)
+   VALUES (NULL, COALESCE($1,true), COALESCE($2,1), COALESCE($3,10))`,
+        [
+          enabled,
+          Number.isFinite(thr) ? thr : null,
+          Number.isFinite(rep) ? rep : null,
+        ]
+      );
+    }
+    return;
+  }
+
+  await pool.query(
+    `INSERT INTO shift_opening_control (trade_point_id, enabled, threshold_minutes, repeat_minutes)
+   VALUES ($1, COALESCE($2,true), COALESCE($3,1), COALESCE($4,10))
+   ON CONFLICT (trade_point_id)
+   DO UPDATE SET enabled = COALESCE($2, shift_opening_control.enabled),
+                 threshold_minutes = COALESCE($3, shift_opening_control.threshold_minutes),
+                 repeat_minutes = COALESCE($4, shift_opening_control.repeat_minutes)`,
+    [
+      tradePointId,
+      enabled,
+      Number.isFinite(thr) ? thr : null,
+      Number.isFinite(rep) ? rep : null,
+    ]
+  );
+}
+
+function fmtWorkHours(whRow) {
+  if (!whRow) return "—";
+  const w = (whRow.work_hours_weekdays || "").trim();
+  const e = (whRow.work_hours_weekends || "").trim();
+  if (w || e) {
+    const parts = [];
+    if (w) parts.push(`Будни: ${w}`);
+    if (e) parts.push(`Выходные: ${e}`);
+    return parts.join(" / ");
+  }
+  return (whRow.work_hours || "").trim() || "—";
+}
+
+function isValidMinutesText(t) {
+  const n = Number(String(t || "").trim());
+  return Number.isInteger(n) && n >= 0 && n <= 600;
+}
+
 async function loadResp(tradePointId, kind) {
   const r = await pool.query(
     `
@@ -61,10 +237,14 @@ async function loadUsersForPick(q) {
 }
 
 function kindLabel(kind) {
-  if (kind === "uncompleted_tasks") return "📝 Невыполненные задачи";
-  if (kind === "complaints") return "☁  Жалобы на прошлую смену";
-  if (kind === "cash_diff") return "💸 Контроль недостач/излишек";
-  return "—";
+  if (kind === "uncompleted_tasks")
+    return "📝 Ответственные — невыполненные задачи";
+  if (kind === "complaints")
+    return "💬 Ответственные — жалобы на прошлую смену";
+  if (kind === "cash_diff")
+    return "💸 Ответственные — контроль недостач/излишек";
+  if (kind === "shift_opening_control") return "🚀 Контроль открытия смены";
+  return kind;
 }
 
 async function showRoot(ctx) {
@@ -92,6 +272,12 @@ async function showRoot(ctx) {
       {
         text: "💸 контроль недостач/излишек",
         callback_data: "admin_resp_kind_cash_diff",
+      },
+    ],
+    [
+      {
+        text: "🚀 контроль открытия смены",
+        callback_data: "admin_resp_kind_shift_opening_control",
       },
     ],
     [
@@ -143,6 +329,23 @@ async function showPointCard(ctx, kind, tradePointId) {
 
   let text = `${kindLabel(kind)}\n\n` + `📍 Точка: <b>${title}</b>\n\n`;
 
+  if (kind === "shift_opening_control") {
+    const wh = await loadPointWorkHours(tradePointId);
+    const eff = await getEffectiveControl(tradePointId);
+
+    text += `🕒 Время работы: ${fmtWorkHours(wh)}\n`;
+    text += `⏱ Порог опоздания: <b>${eff.row.threshold_minutes}</b> мин.\n`;
+    text += `🔁 Периодичность: <b>${eff.row.repeat_minutes ?? 10}</b> мин.\n`;
+    text += `🔔 Уведомления: <b>${
+      eff.row.enabled ? "включены" : "выключены"
+    }</b>\n`;
+
+    if (tradePointId !== null && eff.source === "global") {
+      text += `\n<i>(используется настройка “Все точки”)</i>\n`;
+    }
+    text += `\n`;
+  }
+
   if (!resp.length) {
     text += "Пока нет назначенных ответственных.\n";
   } else {
@@ -169,6 +372,33 @@ async function showPointCard(ctx, kind, tradePointId) {
   }
 
   const tpKey = tradePointId === null ? "all" : String(tradePointId);
+
+  if (kind === "shift_opening_control") {
+    const eff = await getEffectiveControl(tradePointId);
+    const tpKey2 = tradePointId === null ? "all" : String(tradePointId);
+
+    kb.push([
+      {
+        text: eff.row.enabled
+          ? "🔕 выключить уведомления"
+          : "🔔 включить уведомления",
+        callback_data: `admin_soc_toggle_${tpKey2}`,
+      },
+    ]);
+    kb.push([
+      {
+        text: "✏️ изменить порог",
+        callback_data: `admin_soc_threshold_${tpKey2}`,
+      },
+    ]);
+
+    kb.push([
+      {
+        text: "⏱ периодичность уведомления",
+        callback_data: `admin_soc_repeat_${tpKey2}`,
+      },
+    ]);
+  }
 
   kb.push([
     {
@@ -211,6 +441,149 @@ async function showPickUser(ctx, kind, tradePointId) {
 }
 
 function registerAdminResponsibles(bot, ensureUser, logError) {
+  bot.action(/^admin_soc_toggle_(\d+|all)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const raw = ctx.match[1];
+      const tpId = raw === "all" ? null : Number(raw);
+
+      const eff = await getEffectiveControl(tpId);
+      await upsertControl(tpId, { enabled: !eff.row.enabled });
+
+      await ctx.answerCbQuery("✅ Сохранено").catch(() => {});
+      await showPointCard(ctx, "shift_opening_control", tpId);
+    } catch (e) {
+      logError("admin_soc_toggle", e);
+    }
+  });
+
+  bot.action(/^admin_soc_threshold_(\d+|all)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const raw = ctx.match[1];
+      const tpId = raw === "all" ? null : Number(raw);
+
+      stSet(ctx.from.id, {
+        step: "soc_threshold",
+        kind: "shift_opening_control",
+        tradePointId: tpId,
+      });
+
+      const eff = await getEffectiveControl(tpId);
+      const text =
+        "✏️ <b>Изменить порог опоздания</b>\n\n" +
+        `Текущий порог: <b>${eff.row.threshold_minutes}</b> мин.\n\n` +
+        "Отправьте числом количество минут (0–600).";
+
+      const backKey = tpId === null ? "all" : String(tpId);
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            `admin_resp_point_shift_opening_control_${backKey}`
+          ),
+        ],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
+    } catch (e) {
+      logError("admin_soc_threshold", e);
+    }
+  });
+
+  bot.action(/^admin_soc_repeat_(\d+|all)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const raw = ctx.match[1];
+      const tpId = raw === "all" ? null : Number(raw);
+
+      stSet(ctx.from.id, {
+        step: "soc_repeat",
+        kind: "shift_opening_control",
+        tradePointId: tpId,
+      });
+
+      const eff = await getEffectiveControl(tpId);
+      const cur = eff.row.repeat_minutes ?? 10;
+
+      const text =
+        "⏱ <b>Периодичность уведомления</b>\n\n" +
+        `Текущее значение: <b>${cur}</b> мин.\n\n` +
+        "Отправьте числом количество минут (1–600).";
+
+      const backKey = tpId === null ? "all" : String(tpId);
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            `admin_resp_point_shift_opening_control_${backKey}`
+          ),
+        ],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
+    } catch (e) {
+      logError("admin_soc_repeat", e);
+    }
+  });
+
+  // ловим текст только когда ждём порог
+  bot.on("text", async (ctx, next) => {
+    try {
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return next();
+
+      const st = stGet(ctx.from.id);
+      if (!st || (st.step !== "soc_threshold" && st.step !== "soc_repeat"))
+        return next();
+
+      const raw = (ctx.message?.text || "").trim();
+      const n = Number(raw);
+      const ok =
+        Number.isInteger(n) &&
+        (st.step === "soc_threshold" ? n >= 0 && n <= 600 : n >= 1 && n <= 600);
+      if (!ok) {
+        await ctx
+          .reply(
+            st.step === "soc_threshold"
+              ? "❌ Введите целое число минут (0–600)."
+              : "❌ Введите целое число минут (1–600)."
+          )
+          .catch(() => {});
+        return;
+      }
+
+      const tpId = st.tradePointId ?? null;
+      if (st.step === "soc_threshold") {
+        await upsertControl(tpId, { threshold_minutes: n });
+      } else {
+        await upsertControl(tpId, { repeat_minutes: n });
+      }
+
+      stClear(ctx.from.id);
+      await ctx
+        .reply(
+          st.step === "soc_threshold"
+            ? "✅ Порог сохранён."
+            : "✅ Периодичность сохранена."
+        )
+        .catch(() => {});
+      await showPointCard(ctx, "shift_opening_control", tpId);
+    } catch (e) {
+      logError("admin_soc_threshold_text", e);
+      return next();
+    }
+  });
+
   bot.action("admin_resp_root", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -224,7 +597,7 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   });
 
   bot.action(
-    /^admin_resp_kind_(uncompleted_tasks|complaints|cash_diff)$/,
+    /^admin_resp_kind_(uncompleted_tasks|complaints|cash_diff|shift_opening_control)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
@@ -240,7 +613,7 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   );
 
   bot.action(
-    /^admin_resp_point_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
+    /^admin_resp_point_(uncompleted_tasks|complaints|cash_diff|shift_opening_control)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
@@ -258,7 +631,7 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
   );
 
   bot.action(
-    /^admin_resp_add_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
+    /^admin_resp_add_(uncompleted_tasks|complaints|cash_diff|shift_opening_control)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
@@ -304,14 +677,14 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
 
       stClear(ctx.from.id);
       await ctx.answerCbQuery("✅ Назначено").catch(() => {});
-      await showPointCard(ctx, st.kind, Number(st.tradePointId));
+      await showPointCard(ctx, st.kind, st.tradePointId ?? null);
     } catch (e) {
       logError("admin_resp_pick", e);
     }
   });
 
   bot.action(
-    /^admin_resp_del_(\d+)_(uncompleted_tasks|complaints|cash_diff)_(\d+|all)$/,
+    /^admin_resp_del_(\d+)_(uncompleted_tasks|complaints|cash_diff|shift_opening_control)_(\d+|all)$/,
     async (ctx) => {
       try {
         await ctx.answerCbQuery().catch(() => {});
