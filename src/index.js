@@ -36,9 +36,20 @@ async function ensureUser(ctx) {
   // 1. Пытаемся найти полноценного пользователя
   const res = await pool.query(
     `
-      SELECT id, full_name, role, staff_status, position, candidate_id
-      FROM users
-      WHERE telegram_id = $1
+    SELECT
+  id,
+  full_name,
+  role,
+  staff_status,
+  position,
+  candidate_id,
+  lk_enabled,
+  training_completed_at,
+  training_total_steps_at_completion,
+  post_training_can_work_under_control
+FROM users
+WHERE telegram_id = $1
+
     `,
     [tgId]
   );

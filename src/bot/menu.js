@@ -332,7 +332,8 @@ function registerMenu(bot, ensureUser, logError) {
       //    Для кандидата internship_invited — ЛК всегда закрыт до старта, и тоже должен показывать скрин 2.
       const needsInternshipScreen =
         (staffStatus === "intern" && user.lk_enabled !== true) ||
-        (staffStatus === "candidate" && cand?.status === "internship_invited");
+        (staffStatus === "candidate" &&
+          (cand?.status === "internship_invited" || cand?.status === "intern"));
 
       if (needsInternshipScreen) {
         await showInternshipDetails(ctx, user, {

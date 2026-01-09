@@ -1689,7 +1689,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         c.age,
         c.phone,
         u.id AS user_id,
-u.intern_control_mode,
+u.post_training_can_work_under_control,
 u.training_completed_at
       FROM candidates c
       LEFT JOIN users u ON u.candidate_id = c.id
@@ -1762,11 +1762,17 @@ u.training_completed_at
     const agePart = cand.age ? ` (${cand.age})` : "";
     const phonePart = cand.phone ? ` ${escapeHtml(cand.phone)}` : "";
 
+
+let  internshipName = "🌱 Данные стажировок";
+
+if (mode === "day") {
+  internshipName = `🌱 Данные стажировок — день ${st.selectedDay}`;
+}
     let text =
-      `<u><b>🌱 Данные стажировок</b></u>\n\n` +
+      `<u><b>${internshipName}</b></u>\n\n` +
       `• Имя: ${escapeHtml(cand.name || "—")}${agePart}${phonePart}\n` +
       `• Всего завершённых стажировок (дней): ${finishedCount}\n`;
-    const controlMode = cand.intern_control_mode || null;
+    const canWorkUnderControl = cand.post_training_can_work_under_control; // boolean | null
 
     const overallLine =
       overallPercent >= 100
@@ -1776,11 +1782,13 @@ u.training_completed_at
     text += overallLine;
 
     if (overallPercent >= 100) {
-      if (controlMode === "full_control") {
+      if (canWorkUnderControl === false) {
         text += `• стажёр всё ещё не может работать самостоятельно (полный контроль)\n`;
-      } else {
-        // default = supervised
+      } else if (canWorkUnderControl === true) {
         text += `• работа самостоятельно под контролем\n`;
+      } else {
+        // null — наставник ещё не выбрал режим
+        text += `• режим контроля не выбран наставником\n`;
       }
     }
 
@@ -1881,8 +1889,7 @@ u.training_completed_at
     }
 
     // ---- MODE: конкретный день (текст дня + дни остаются) ----
-    // ---- MODE: конкретный день (текст дня + дни остаются) ----
-    if (mode === "day") {
+    if (mode === "day") { 
       const dayNumber = Number(st.selectedDay);
 
       // 1) session выбранного дня
@@ -2061,7 +2068,7 @@ u.training_completed_at
         const planIcon = planPercent >= 100 ? "📈" : "📉";
 
         // 7) Текст (HTML) — как “старый экран дня”, но внутри 🌱 Данные стажировок
-        text += `<b>О стажировке ${dayNumber}</b>\n`;
+        text += `<b>О стажировке</b>\n`;
         text += `<b>Дата и время стажировки:</b>\n`;
         text += `  • <b>план:</b> ${escapeHtml(dateLabel)} (${escapeHtml(
           planTimeText

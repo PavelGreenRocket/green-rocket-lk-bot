@@ -266,8 +266,11 @@ async function showInternshipDetails(ctx, user, { withReadButton, edit } = {}) {
     ),
   ]);
 
-  // В меню
-  rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+
+  // В меню — показываем только если доступ в ЛК открыт
+  if (user.lk_enabled === true) {
+    rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
+  }
 
   const keyboard = Markup.inlineKeyboard(rows);
 
@@ -384,9 +387,13 @@ function registerInternshipUser(bot, ensureUser, logError, showMainMenu) {
       text += `Адрес: ${escapeHtml(address)}\n`;
       text += `Ориентир: ${escapeHtml(landmark)}\n`;
 
-      const keyboard = Markup.inlineKeyboard([
-        [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
-      ]);
+    const keyboard = Markup.inlineKeyboard([
+  [
+    user.lk_enabled === true
+      ? Markup.button.callback("⬅️ В меню", "lk_main_menu")
+      : Markup.button.callback("⬅️ Назад", "lk_internship_details"),
+  ],
+]);
 
       await deliver(
         ctx,

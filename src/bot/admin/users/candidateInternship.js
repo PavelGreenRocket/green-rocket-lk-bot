@@ -245,15 +245,9 @@ async function askLinkUser(ctx, candidateId) {
     });
 }
 
-async function askLinkUserOrFinish(ctx, candidateId) {
-  // проверяем, есть ли уже пользователь, привязанный к этому кандидату
+async function askLinkUserOrFinish(ctx, candidateId, ensureUser) {
   const res = await pool.query(
-    `
-      SELECT id
-      FROM users
-      WHERE candidate_id = $1
-      LIMIT 1
-    `,
+    `SELECT id FROM users WHERE candidate_id = $1 LIMIT 1`,
     [candidateId]
   );
 
@@ -261,18 +255,20 @@ async function askLinkUserOrFinish(ctx, candidateId) {
   if (!st) return;
 
   if (res.rows.length) {
-    // пользователь уже привязан — сразу заканчиваем приглашение
     const existingUserId = res.rows[0].id;
-    await finishInternshipInvite(ctx, ctx.from.id, {
+
+    // Берём админа из ensureUser, чтобы корректно решить показывать ли "В меню"
+    const adminUser = await ensureUser(ctx);
+
+    await finishInternshipInvite(ctx, ctx.from.id, adminUser, {
       linkUserId: existingUserId,
     });
   } else {
-    // пользователя ещё нет — показываем экран выбора способа привязки
     await askLinkUser(ctx, candidateId);
   }
 }
 
-async function showExistingUsersForLink(ctx, candidateId) {
+async function showExistingUsersForLink(ctx, candidateId, ensureUser) {
   const { rows } = await pool.query(
     `
       SELECT id, full_name, age, phone, created_at
@@ -287,7 +283,11 @@ async function showExistingUsersForLink(ctx, candidateId) {
       "Пока нет новых пользователей, которые вошли в Личный кабинет.\n" +
         "Можно будет привязать человека позже из настроек кандидата."
     );
-    await finishInternshipInvite(ctx, ctx.from.id, { linkUserId: null });
+    const adminUser = await ensureUser(ctx);
+    await finishInternshipInvite(ctx, ctx.from.id, adminUser, {
+      linkUserId: null,
+    });
+
     return;
   }
 
@@ -346,7 +346,7 @@ async function pushOutboxEvent(destination, eventType, payload) {
   );
 }
 
-async function finishInternshipInvite(ctx, tgId, options = {}) {
+async function finishInternshipInvite(ctx, tgId, user, options = {}) {
   const state = getState(tgId);
   if (!state) return;
 
@@ -607,6 +607,16 @@ async function finishInternshipInvite(ctx, tgId, options = {}) {
         },
       ]);
 
+      // В меню — показываем только если доступ в ЛК открыт
+      if (user.lk_enabled === true) {
+        keyboardRows.push([
+          {
+            text: "⬅️ В меню",
+            callback_data: "lk_main_menu",
+          },
+        ]);
+      }
+
       await ctx.telegram
         .sendMessage(linkedTelegramId, text, {
           parse_mode: "HTML",
@@ -807,7 +817,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
 
       // 🔁 здесь новая логика
-      await askLinkUserOrFinish(ctx, st.candidateId);
+      await askLinkUserOrFinish(ctx, st.candidateId, ensureUser);
     } catch (err) {
       logError("lk_cand_invite_admin", err);
     }
@@ -837,7 +847,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       if (!st || st.candidateId !== candidateId) return;
       setState(ctx.from.id, { step: "link_existing" });
       await ctx.answerCbQuery().catch(() => {});
-      await showExistingUsersForLink(ctx, candidateId);
+      await showExistingUsersForLink(ctx, candidateId, ensureUser);
     } catch (err) {
       logError("lk_cand_invite_link_existing", err);
     }
@@ -852,7 +862,8 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       if (!st || st.candidateId !== candidateId) return;
 
       await ctx.answerCbQuery().catch(() => {});
-      await finishInternshipInvite(ctx, ctx.from.id, { waitingId });
+      const adminUser = await ensureUser(ctx);
+      await finishInternshipInvite(ctx, ctx.from.id, adminUser, { waitingId });
     } catch (err) {
       logError("lk_cand_invite_link_select", err);
     }
@@ -865,7 +876,10 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       const st = getState(ctx.from.id);
       if (!st || st.candidateId !== candidateId) return;
       await ctx.answerCbQuery().catch(() => {});
-      await finishInternshipInvite(ctx, ctx.from.id, { linkUserId: null });
+      const adminUser = await ensureUser(ctx);
+      await finishInternshipInvite(ctx, ctx.from.id, adminUser, {
+        linkUserId: null,
+      });
     } catch (err) {
       logError("lk_cand_invite_link_later", err);
     }
@@ -1151,8 +1165,24 @@ function registerCandidateInternship(bot, ensureUser, logError) {
 
       // 4) переводим кандидата в intern (один раз)
       await pool.query(
-        `UPDATE candidates SET status = 'intern' WHERE id = $1`,
+        `
+  UPDATE candidates
+     SET status = 'intern'
+   WHERE id = $1
+     AND status IN ('internship_invited', 'intern')
+  `,
         [candidateId]
+      );
+
+      // 4.1) переводим пользователя (users) в intern — КЛЮЧЕВО для /start и ЛК
+      await pool.query(
+        `
+  UPDATE users
+     SET staff_status = 'intern'
+   WHERE id = $1
+     AND staff_status = 'candidate'
+  `,
+        [internUserId]
       );
 
       // 5) planned -> started + привязка к session_id

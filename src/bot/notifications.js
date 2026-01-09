@@ -423,7 +423,7 @@ async function showUserHub(ctx, user, { edit = true } = {}) {
   if (unreadTotal <= 0) {
     const text = "🔔 *Уведомления*\n\nСейчас нет новых уведомлений.";
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback("📚 История", "lk_notif_history_menu")],
+      [Markup.button.callback("📜 История", "lk_notif_history_menu")],
       [Markup.button.callback("⬅️ В меню", "lk_main_menu")],
     ]);
 

@@ -270,7 +270,7 @@ async function showStatusChooser(ctx, user) {
     "Выбери *новый статус* (staff_status) для себя.\n\n" +
     "Это влияет на то, как ЛК показывает тебе интерфейс.";
 
-  const statuses = ["candidate", "intern", "worker", "none"];
+  const statuses = ["candidate", "intern", "employee", "none"];
   const current = user.staff_status || "none";
 
   const buttons = statuses.map((s) => {
@@ -573,6 +573,7 @@ function registerMore(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       let newStatus = ctx.match[1];
       if (newStatus === "none") newStatus = null;
+      if (newStatus === "worker") newStatus = "employee"; // на случай старых кнопок/коллбеков
 
       const user = await ensureUser(ctx);
       if (!user) return;

@@ -1935,6 +1935,9 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     await showDeferredCandidates(ctx, { edit: true });
   });
 
+
+  
+
   // ----- СПИСОК СОТРУДНИКОВ -----
 
   async function showWorkersListLk(ctx, currentUser, options = {}) {
@@ -2240,7 +2243,7 @@ WHERE u.id = $1
     const expanded = isWorkerCardExpanded(ctx.from.id, u.id);
     rows.push([
       Markup.button.callback(
-        expanded ? "▴ Скрыть карточку" : "▾ Открыть карточку",
+        expanded ? "▴ Скрыть карточку" : " Открыть карточку",
         `lk_worker_toggle_cards_${u.id}`
       ),
     ]);

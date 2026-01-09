@@ -32,12 +32,170 @@ function fmtRuDate(iso) {
   return `${dd}.${mm}`;
 }
 
+function parseAnyDateToISO(input) {
+  const s = String(input || "").trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // DD.MM.YYYY
+  const ru = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (ru) {
+    const dd = ru[1].padStart(2, "0");
+    const mm = ru[2].padStart(2, "0");
+    return `${ru[3]}-${mm}-${dd}`;
+  }
+
+  // DD.MM (текущий год)
+  const ruShort = s.match(/^(\d{1,2})\.(\d{1,2})$/);
+  if (ruShort) {
+    const year = new Date().getFullYear();
+    const dd = ruShort[1].padStart(2, "0");
+    const mm = ruShort[2].padStart(2, "0");
+    return `${year}-${mm}-${dd}`;
+  }
+
+  return null;
+}
+
+async function searchUsersForWho(query, forwardFromTgId = null) {
+  if (forwardFromTgId) {
+    const r = await pool.query(
+      `SELECT id, full_name, username, work_phone FROM users WHERE telegram_id = $1 LIMIT 10`,
+      [forwardFromTgId]
+    );
+    return r.rows;
+  }
+
+  const q = String(query || "").trim();
+  if (!q) return [];
+
+  // @username
+  const u = q.startsWith("@") ? q.slice(1) : null;
+  if (u) {
+    const r = await pool.query(
+      `
+        SELECT id, full_name, username, work_phone
+        FROM users
+        WHERE lower(username) = lower($1)
+        ORDER BY id DESC
+        LIMIT 10
+      `,
+      [u]
+    );
+    return r.rows;
+  }
+
+  // phone (digits >= 5)
+  const digits = q.replace(/\D/g, "");
+  if (digits.length >= 5) {
+    const r = await pool.query(
+      `
+        SELECT id, full_name, username, work_phone
+        FROM users
+        WHERE regexp_replace(coalesce(work_phone, ''), '\\D', '', 'g') LIKE '%' || $1 || '%'
+        ORDER BY id DESC
+        LIMIT 10
+      `,
+      [digits]
+    );
+    return r.rows;
+  }
+
+  // name search
+  const r = await pool.query(
+    `
+      SELECT id, full_name, username, work_phone
+      FROM users
+      WHERE full_name ILIKE '%' || $1 || '%'
+         OR username ILIKE '%' || $1 || '%'
+      ORDER BY full_name NULLS LAST, id DESC
+      LIMIT 10
+    `,
+    [q]
+  );
+  return r.rows;
+}
+
+function formatUserLabel(u) {
+  const name = u.full_name || u.username || String(u.id);
+  const uname = u.username ? `@${u.username}` : "";
+  return `${name}${uname ? " (" + uname + ")" : ""}`;
+}
+
 function fmtShortDate(v) {
   if (!v) return "";
   const d = v instanceof Date ? v : new Date(v);
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   return `${dd}.${mm}`;
+}
+
+function fmtShortDateYY(v) {
+  if (!v) return "";
+  const d = v instanceof Date ? v : new Date(v);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}.${mm}.${yy}`;
+}
+
+function nextScheduleDate(r, from = new Date()) {
+  // считаем "следующий день" строго ПОСЛЕ сегодняшнего
+  const base = new Date(from);
+  base.setHours(0, 0, 0, 0);
+  base.setDate(base.getDate() + 1);
+
+  if (r.schedule_type === "single") {
+    if (!r.single_date) return null;
+    const d = new Date(r.single_date);
+    d.setHours(0, 0, 0, 0);
+    return d >= base ? d : null;
+  }
+
+  if (r.schedule_type === "every_x_days") {
+    if (!r.start_date || !r.every_x_days) return null;
+    const start = new Date(r.start_date);
+    start.setHours(0, 0, 0, 0);
+    const step = Number(r.every_x_days) || 1;
+
+    // если start уже после base
+    if (start >= base) return start;
+
+    const diffDays = Math.floor((base - start) / (24 * 3600 * 1000));
+    const k = Math.ceil(diffDays / step);
+    const next = new Date(start);
+    next.setDate(start.getDate() + k * step);
+    return next;
+  }
+
+  if (r.schedule_type === "weekly") {
+    const mask = Number(r.weekdays_mask) || 0;
+
+    // маппинг как в scheduleLabel: пн=1, вт=2, ср=4, чт=8, пт=16, сб=32, вс=64
+    const jsDayToBit = (jsDay) => {
+      // JS: 0 вс ... 6 сб
+      if (jsDay === 1) return 1; // пн
+      if (jsDay === 2) return 2; // вт
+      if (jsDay === 3) return 4; // ср
+      if (jsDay === 4) return 8; // чт
+      if (jsDay === 5) return 16; // пт
+      if (jsDay === 6) return 32; // сб
+      return 64; // вс (0)
+    };
+
+    for (let i = 0; i < 21; i++) {
+      const d = new Date(base);
+      d.setDate(base.getDate() + i);
+      const bit = jsDayToBit(d.getDay());
+      if (mask & bit) return d;
+    }
+    return null;
+  }
+
+  return null;
 }
 
 function escHtml(s) {
@@ -208,6 +366,48 @@ async function loadAssignmentsForPoint(pointId) {
   return r.rows;
 }
 
+async function loadDoneInfoMap(pointId, dateISO, assignmentIds) {
+  if (!assignmentIds.length) return new Map();
+
+  const r = await pool.query(
+    `
+    SELECT DISTINCT ON (ti.assignment_id)
+      ti.assignment_id,
+      ti.id AS task_instance_id,
+      ti.user_id AS done_by_user_id,
+      ti.done_at,
+      u.full_name AS done_by_name,
+      u.username AS done_by_username,
+      u.work_phone AS done_by_phone,
+      ans.answer_text,
+      ans.answer_number,
+      ans.file_id,
+      ans.file_type
+    FROM task_instances ti
+    LEFT JOIN users u ON u.id = ti.user_id
+    LEFT JOIN LATERAL (
+      SELECT answer_text, answer_number, file_id, file_type
+      FROM task_instance_answers
+      WHERE task_instance_id = ti.id
+      ORDER BY created_at DESC
+      LIMIT 1
+    ) ans ON TRUE
+    WHERE ti.trade_point_id = $1
+      AND ti.for_date = $2
+      AND ti.status = 'done'
+      AND ti.assignment_id = ANY($3::bigint[])
+    ORDER BY ti.assignment_id, ti.done_at DESC NULLS LAST
+    `,
+    [pointId, dateISO, assignmentIds]
+  );
+
+  const map = new Map();
+  for (const row of r.rows) {
+    map.set(Number(row.assignment_id), row);
+  }
+  return map;
+}
+
 function typeEmoji(answerType) {
   if (answerType === "photo") return "📷";
   if (answerType === "video") return "🎥";
@@ -259,10 +459,10 @@ function timeLabel(r) {
 }
 
 async function buildDatePicker(dateISO) {
-  // 14 дней: сегодня + 13 (в таймзоне БД)
+  // 61 день: 30 дней назад .. сегодня .. 30 дней вперёд (в таймзоне БД)
   const r = await pool.query(`
     SELECT (CURRENT_DATE + offs)::text AS d
-    FROM generate_series(0, 13) AS offs
+    FROM generate_series(-30, 30) AS offs
   `);
 
   const btns = r.rows.map(({ d }) => {
@@ -271,10 +471,17 @@ async function buildDatePicker(dateISO) {
   });
 
   const rows = [];
-  for (let i = 0; i < btns.length; i += 7) rows.push(btns.slice(i, i + 7));
+  for (let i = 0; i < btns.length; i += 2) {
+    rows.push(btns.slice(i, i + 2));
+  }
+
+  rows.push([
+    Markup.button.callback("✍️ Ввести дату", "admin_shift_tasks_date_input"),
+  ]);
   rows.push([
     Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_back"),
   ]);
+
   return Markup.inlineKeyboard(rows);
 }
 
@@ -284,7 +491,8 @@ function buildTasksText(
   shiftInfo,
   items,
   mode,
-  deleteSelectedIds
+  deleteSelectedIds,
+  doneMap
 ) {
   let text = `📋 <b>Задачи смены</b>\n\n`;
   text += `• Точка: <b>${escHtml(pointTitle)}</b>\n`;
@@ -315,19 +523,26 @@ function buildTasksText(
 
   items.forEach((r, idx) => {
     const n = idx + 1;
-    const creator = r.creator_name ? ` (${r.creator_name})` : "";
     const mark = scheduleMark(r.schedule_type);
 
-    // В режиме удаления: выбранные перечёркиваем
-    const title = selectedSet.has(Number(r.assignment_id))
+    const doneInfo = doneMap?.get(Number(r.assignment_id));
+    const isDone = !!doneInfo;
+
+    const statusMark = isDone ? "✅" : "▫️";
+    const who =
+      isDone && doneInfo.done_by_name
+        ? ` (${escHtml(doneInfo.done_by_name)})`
+        : "";
+    const op = ` /t${n}`;
+
+    const printableTitle = selectedSet.has(Number(r.assignment_id))
       ? `<s>${escHtml(r.title)}</s>`
       : escHtml(r.title);
+
     if (mode === "delete") {
-      text += `${n}. ${mark} ${title}${escHtml(creator)}\n`;
+      text += `${n}. ${mark} ${printableTitle}\n`;
     } else {
-      text += `${n}. ${mark} <code>${escHtml(r.title)}</code>${escHtml(
-        creator
-      )}\n`;
+      text += `${statusMark} ${mark} ${printableTitle}${who}${op}\n`;
     }
   });
 
@@ -407,6 +622,10 @@ function buildAddKeyboard(st) {
   const timeLabel =
     a.timeMode === "deadline" ? `до ${a.deadlineTime || "??:??"}` : "нет";
 
+  const whoLabel = a.forUserId
+    ? `👤 Для кого? (${a.forUserName || "выбран"})`
+    : "👥 Для кого? (все)";
+
   const rows = [
     [
       Markup.button.callback(
@@ -420,6 +639,7 @@ function buildAddKeyboard(st) {
         "admin_shift_tasks_add_period"
       ),
     ],
+    [Markup.button.callback(whoLabel, "admin_shift_tasks_add_forwho")],
     [
       Markup.button.callback(
         `⏱ Ограничение по времени (${timeLabel})`,
@@ -747,13 +967,21 @@ async function renderPointScreen(ctx, adminUser) {
   if (st.filter === "scheduled")
     items = items.filter((r) => r.schedule_type !== "single");
 
+  // запоминаем порядок для /tN
+  setSt(ctx.from.id, {
+    opAssignments: items.map((x) => Number(x.assignment_id)),
+  });
+  const assignmentIds = items.map((x) => Number(x.assignment_id));
+  const doneMap = await loadDoneInfoMap(st.pointId, st.dateISO, assignmentIds);
+
   const text = buildTasksText(
     point.title,
     st.dateISO,
     shiftInfo,
     items,
     st.mode,
-    st.deleteSelected
+    st.deleteSelected,
+    doneMap
   );
 
   let keyboard;
@@ -797,12 +1025,15 @@ async function renderScheduledCard(ctx, user, assignmentId) {
       a.is_active,
       a.created_by_user_id,
       u.full_name AS creator_name,
+      u.username AS creator_username,
+u.work_phone AS creator_phone,
       s.schedule_type,
       s.start_date,
       s.weekdays_mask,
       s.every_x_days,
       s.time_mode,
       s.deadline_time,
+        s.single_date,
       t.title,
       t.answer_type
     FROM task_assignments a
@@ -825,15 +1056,38 @@ async function renderScheduledCard(ctx, user, assignmentId) {
   const status = row.is_active ? "включена ✅" : "выключена ⚪️";
 
   let text = `⚙️ <b>Задача по расписанию</b>\n\n`;
-  text += `Задача: <b>${escHtml(row.title)}</b>${escHtml(creator)}\n`;
+  text += `Задача: <b>${escHtml(row.title)}</b>\n`;
+
+  // создатель отдельной строкой
+  const creatorParts = [];
+  if (row.creator_name) creatorParts.push(escHtml(row.creator_name));
+  if (row.creator_username)
+    creatorParts.push(`@${escHtml(row.creator_username)}`);
+  if (row.creator_phone) creatorParts.push(escHtml(row.creator_phone));
+  text += `Создал задачу: <b>${
+    creatorParts.length ? creatorParts.join(" / ") : "—"
+  }</b>\n`;
+
   text += `Статус: <b>${status}</b>\n`;
   text += `Периодичность: <b>${escHtml(scheduleLabel(row))}</b>\n`;
+
+  // следующий день выполнения
+  const nextD = nextScheduleDate(row);
+  text += `Следующий день выполнения: <b>${
+    nextD ? fmtShortDateYY(nextD) : "—"
+  }</b>\n`;
 
   const kb = Markup.inlineKeyboard([
     [
       Markup.button.callback(
         "🔁 Поменять периодичность",
         `admin_shift_tasks_sched_period_${row.assignment_id}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "👥/👤 Пользователи задачи",
+        `admin_shift_tasks_sched_users_${row.assignment_id}`
       ),
     ],
     [
@@ -854,7 +1108,646 @@ async function renderScheduledCard(ctx, user, assignmentId) {
   await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
+async function renderSchedUsersScreenA(ctx, assignmentId) {
+  const rr = await pool.query(
+    `
+    SELECT u.id, u.full_name, u.username, u.work_phone
+    FROM task_assignment_targets tat
+    JOIN users u ON u.id = tat.user_id
+    WHERE tat.assignment_id = $1
+    ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
+    `,
+    [assignmentId]
+  );
+
+  const selected = rr.rows; // если пусто -> "для всех"
+
+  let text = `👥/👤 <b>Пользователи задачи</b>\n\n`;
+  const rows = [];
+
+  if (!selected.length) {
+    text += `Сейчас: <b>для всех</b>\n`;
+  } else {
+    text += `Выбраны пользователи (нажмите чтобы удалить):\n`;
+    selected.forEach((u, idx) => {
+      const parts = [];
+      if (u.full_name) parts.push(u.full_name);
+      if (u.username) parts.push(`@${u.username}`);
+      if (u.work_phone) parts.push(u.work_phone);
+      rows.push([
+        Markup.button.callback(
+          `✅ ${idx + 1}. ${parts.join(" / ")}`,
+          `admin_shift_tasks_sched_users_rm_confirm_${assignmentId}_${u.id}`
+        ),
+      ]);
+    });
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "➕ Добавить пользователя",
+      `admin_shift_tasks_sched_users_add_${assignmentId}_p1`
+    ),
+  ]);
+
+  if (selected.length) {
+    rows.push([
+      Markup.button.callback(
+        "👥 Сделать для всех",
+        `admin_shift_tasks_sched_users_all_${assignmentId}`
+      ),
+    ]);
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_shift_tasks_sched_card_${assignmentId}`
+    ),
+  ]);
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
+
+async function renderSchedUsersScreenB(ctx, assignmentId, page, query) {
+  const limit = 10;
+  const p = Math.max(1, Number(page) || 1);
+  const offset = (p - 1) * limit;
+
+  const sel = await pool.query(
+    `SELECT user_id FROM task_assignment_targets WHERE assignment_id = $1`,
+    [assignmentId]
+  );
+  const selectedSet = new Set(sel.rows.map((r) => Number(r.user_id)));
+
+  const q = (query || "").trim();
+  const qq = q.startsWith("@") ? q.slice(1) : q;
+
+  let where = "";
+  const params = [];
+  if (qq) {
+    where = `WHERE (username IS NOT NULL AND username ILIKE $1)
+          OR (full_name IS NOT NULL AND full_name ILIKE $1)
+          OR (work_phone IS NOT NULL AND work_phone ILIKE $1)`;
+    params.push(`%${qq}%`);
+  }
+
+  const list = await pool.query(
+    `
+    SELECT id, full_name, username, work_phone
+    FROM users
+    ${where}
+    ORDER BY full_name NULLS LAST, username NULLS LAST, id
+    LIMIT ${limit} OFFSET ${offset}
+    `,
+    params
+  );
+
+  let text =
+    `👤 <b>Добавить пользователей</b>\n\n` +
+    `Для быстрого поиска введите @username, телефон или часть имени.\n` +
+    `Можно также переслать сообщение пользователя.\n\n`;
+
+  if (qq) text += `Фильтр: <b>${escHtml(q)}</b>\n\n`;
+
+  const rows = [];
+
+  if (!list.rows.length) {
+    text += `Ничего не найдено.\n`;
+  } else {
+    list.rows.forEach((u) => {
+      const parts = [];
+      if (u.full_name) parts.push(u.full_name);
+      if (u.username) parts.push(`@${u.username}`);
+      if (u.work_phone) parts.push(u.work_phone);
+
+      const mark = selectedSet.has(Number(u.id)) ? "✅ " : "";
+      rows.push([
+        Markup.button.callback(
+          `${mark}${parts.join(" / ") || `id:${u.id}`}`,
+          `admin_shift_tasks_sched_users_toggle_${assignmentId}_${u.id}_p${p}`
+        ),
+      ]);
+    });
+  }
+
+  // пагинация
+  const nav = [];
+  if (p > 1)
+    nav.push(
+      Markup.button.callback(
+        "⬅️",
+        `admin_shift_tasks_sched_users_add_${assignmentId}_p${p - 1}`
+      )
+    );
+  nav.push(Markup.button.callback(`стр. ${p}`, "noop"));
+  nav.push(
+    Markup.button.callback(
+      "➡️",
+      `admin_shift_tasks_sched_users_add_${assignmentId}_p${p + 1}`
+    )
+  );
+  rows.push(nav);
+
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_shift_tasks_sched_users_${assignmentId}`
+    ),
+  ]);
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+
+  // сохраняем состояние поиска (чтобы text handler знал куда применять)
+  setSt(ctx.from.id, {
+    step: "sched_users_search",
+    schedUsers: { assignmentId, page: p },
+  });
+}
+
+async function renderCreateUsersScreenA(ctx) {
+  const st = getSt(ctx.from.id);
+  const ids = (st?.add?.targetUserIds || []).map(Number);
+
+  let text = `👥/👤 <b>Пользователи задачи</b>\n\n`;
+  const rows = [];
+
+  if (!ids.length) {
+    text += `Сейчас: <b>для всех</b>\n`;
+  } else {
+    const rr = await pool.query(
+      `
+      SELECT id, full_name, username, work_phone
+      FROM users
+      WHERE id = ANY($1::int[])
+      ORDER BY full_name NULLS LAST, username NULLS LAST, id
+      `,
+      [ids]
+    );
+
+    text += `Выбраны пользователи (нажмите чтобы удалить):\n`;
+    rr.rows.forEach((u, idx) => {
+      const parts = [];
+      if (u.full_name) parts.push(u.full_name);
+      if (u.username) parts.push(`@${u.username}`);
+      if (u.work_phone) parts.push(u.work_phone);
+
+      rows.push([
+        Markup.button.callback(
+          `✅ ${idx + 1}. ${parts.join(" / ")}`,
+          `admin_shift_tasks_add_users_rm_confirm_${u.id}`
+        ),
+      ]);
+    });
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "➕ Добавить пользователя",
+      "admin_shift_tasks_add_users_add_p1"
+    ),
+  ]);
+
+  if (ids.length) {
+    rows.push([
+      Markup.button.callback(
+        "👥 Сделать для всех",
+        "admin_shift_tasks_add_users_all"
+      ),
+    ]);
+  }
+
+  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_add_back")]);
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
+
+async function renderCreateUsersScreenB(ctx, page, query) {
+  const st = getSt(ctx.from.id);
+  if (!st?.add) return;
+
+  const selectedSet = new Set((st.add.targetUserIds || []).map(Number));
+
+  const limit = 10;
+  const p = Math.max(1, Number(page) || 1);
+  const offset = (p - 1) * limit;
+
+  const q = (query || "").trim();
+  const qq = q.startsWith("@") ? q.slice(1) : q;
+
+  let where = "";
+  const params = [];
+  if (qq) {
+    where = `WHERE (username IS NOT NULL AND username ILIKE $1)
+          OR (full_name IS NOT NULL AND full_name ILIKE $1)
+          OR (work_phone IS NOT NULL AND work_phone ILIKE $1)`;
+    params.push(`%${qq}%`);
+  }
+
+  const list = await pool.query(
+    `
+    SELECT id, full_name, username, work_phone
+    FROM users
+    ${where}
+    ORDER BY full_name NULLS LAST, username NULLS LAST, id
+    LIMIT ${limit} OFFSET ${offset}
+    `,
+    params
+  );
+
+  let text =
+    `👤 <b>Добавить пользователей</b>\n\n` +
+    `Для быстрого поиска введите @username, телефон или часть имени.\n` +
+    `Можно также переслать сообщение пользователя.\n\n`;
+
+  if (qq) text += `Фильтр: <b>${escHtml(q)}</b>\n\n`;
+
+  const rows = [];
+
+  list.rows.forEach((u) => {
+    const parts = [];
+    if (u.full_name) parts.push(u.full_name);
+    if (u.username) parts.push(`@${u.username}`);
+    if (u.work_phone) parts.push(u.work_phone);
+
+    const mark = selectedSet.has(Number(u.id)) ? "✅ " : "";
+    rows.push([
+      Markup.button.callback(
+        `${mark}${parts.join(" / ") || `id:${u.id}`}`,
+        `admin_shift_tasks_add_users_toggle_${u.id}_p${p}`
+      ),
+    ]);
+  });
+
+  const nav = [];
+  if (p > 1)
+    nav.push(
+      Markup.button.callback("⬅️", `admin_shift_tasks_add_users_add_p${p - 1}`)
+    );
+  nav.push(Markup.button.callback(`стр. ${p}`, "noop"));
+  nav.push(
+    Markup.button.callback("➡️", `admin_shift_tasks_add_users_add_p${p + 1}`)
+  );
+  rows.push(nav);
+
+  rows.push([
+    Markup.button.callback("⬅️ Назад", "admin_shift_tasks_add_forwho"),
+  ]);
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+
+  setSt(ctx.from.id, {
+    step: "create_users_search",
+    createUsers: { page: p },
+    createUsersQuery: q,
+  });
+}
+
 function registerAdminShiftTasks(bot, ensureUser, logError) {
+  // -----------------------------
+  // SCHEDULE USERS (targets)
+  // -----------------------------
+  async function renderSchedUsers(ctx, user, assignmentId) {
+    const r = await pool.query(
+      `
+    SELECT u.id, u.full_name, u.username, u.work_phone
+    FROM task_assignment_targets tat
+    JOIN users u ON u.id = tat.user_id
+    WHERE tat.assignment_id = $1
+    ORDER BY u.full_name NULLS LAST, u.username NULLS LAST, u.id
+    `,
+      [assignmentId]
+    );
+
+    let text = `👥/👤 <b>Пользователи задачи</b>\n\n`;
+
+    if (!r.rows.length) {
+      text += `Сейчас: <b>для всех</b>\n`;
+    } else {
+      text += `Сейчас выбраны:\n`;
+      r.rows.forEach((u, idx) => {
+        const parts = [];
+        if (u.full_name) parts.push(escHtml(u.full_name));
+        if (u.username) parts.push(`@${escHtml(u.username)}`);
+        if (u.work_phone) parts.push(escHtml(u.work_phone));
+        text += `${idx + 1}. ${parts.join(" / ")}\n`;
+      });
+    }
+
+    const rows = [];
+
+    if (r.rows.length) {
+      // кнопки удаления каждого выбранного
+      const delBtns = r.rows.map((u, idx) =>
+        Markup.button.callback(
+          `❌ ${idx + 1}`,
+          `admin_shift_tasks_sched_users_rm_${assignmentId}_${u.id}`
+        )
+      );
+      for (let i = 0; i < delBtns.length; i += 6)
+        rows.push(delBtns.slice(i, i + 6));
+
+      rows.push([
+        Markup.button.callback(
+          "👥 Сделать для всех",
+          `admin_shift_tasks_sched_users_all_${assignmentId}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "➕ Добавить пользователя",
+        `admin_shift_tasks_sched_users_add_${assignmentId}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        `admin_shift_tasks_sched_card_${assignmentId}`
+      ),
+    ]);
+
+    const kb = Markup.inlineKeyboard(rows);
+    await deliver(ctx, { text, extra: kb }, { edit: true });
+  }
+
+  bot.action(/^admin_shift_tasks_sched_users_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      await renderSchedUsersScreenA(ctx, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_sched_users_all_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Теперь для всех ✅").catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      await pool.query(
+        `DELETE FROM task_assignment_targets WHERE assignment_id = $1`,
+        [assignmentId]
+      );
+      await renderSchedUsersScreenA(ctx, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users_all", e);
+    }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_sched_users_rm_confirm_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const targetUserId = Number(ctx.match[2]);
+
+        const kb = Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "🗑 Удалить",
+              `admin_shift_tasks_sched_users_rm_${assignmentId}_${targetUserId}`
+            ),
+          ],
+          [
+            Markup.button.callback(
+              "⬅️ Назад",
+              `admin_shift_tasks_sched_users_${assignmentId}`
+            ),
+          ],
+        ]);
+
+        await deliver(
+          ctx,
+          { text: "🗑 <b>Удалить пользователя из задачи?</b>", extra: kb },
+          { edit: true }
+        );
+      } catch (e) {
+        logError("admin_shift_tasks_sched_users_rm_confirm", e);
+      }
+    }
+  );
+
+  bot.action(/^admin_shift_tasks_sched_users_rm_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Удалено ✅").catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const targetUserId = Number(ctx.match[2]);
+
+      await pool.query(
+        `DELETE FROM task_assignment_targets WHERE assignment_id = $1 AND user_id = $2`,
+        [assignmentId, targetUserId]
+      );
+
+      await renderSchedUsersScreenA(ctx, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users_rm", e);
+    }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_sched_users_add_(\d+)_p(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const page = Number(ctx.match[2]);
+
+        await renderSchedUsersScreenB(ctx, assignmentId, page, "");
+      } catch (e) {
+        logError("admin_shift_tasks_sched_users_add", e);
+      }
+    }
+  );
+
+  bot.action(
+    /^admin_shift_tasks_sched_users_toggle_(\d+)_(\d+)_p(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const targetUserId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]);
+
+        const ex = await pool.query(
+          `SELECT 1 FROM task_assignment_targets WHERE assignment_id = $1 AND user_id = $2 LIMIT 1`,
+          [assignmentId, targetUserId]
+        );
+
+        if (ex.rows.length) {
+          await pool.query(
+            `DELETE FROM task_assignment_targets WHERE assignment_id = $1 AND user_id = $2`,
+            [assignmentId, targetUserId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO task_assignment_targets (assignment_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [assignmentId, targetUserId]
+          );
+        }
+
+        // перерисовываем ту же страницу
+        const st = getSt(ctx.from.id);
+        const q = st?.schedUsersQuery || "";
+        await renderSchedUsersScreenB(ctx, assignmentId, page, q);
+      } catch (e) {
+        logError("admin_shift_tasks_sched_users_toggle", e);
+      }
+    }
+  );
+
+  bot.action("noop", async (ctx) => ctx.answerCbQuery().catch(() => {}));
+
+  bot.action(
+    /^admin_shift_tasks_sched_users_pick_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery("Добавлено ✅").catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const targetUserId = Number(ctx.match[2]);
+
+        await pool.query(
+          `
+      INSERT INTO task_assignment_targets (assignment_id, user_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+          [assignmentId, targetUserId]
+        );
+
+        // выходим из input-step
+        setSt(ctx.from.id, { step: null });
+
+        await renderSchedUsers(ctx, user, assignmentId);
+      } catch (e) {
+        logError("admin_shift_tasks_sched_users_pick", e);
+      }
+    }
+  );
+
+  bot.action(/^admin_shift_tasks_sched_users_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await renderSchedUsers(ctx, user, Number(ctx.match[1]));
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_sched_users_all_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Теперь для всех ✅").catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      const assignmentId = Number(ctx.match[1]);
+
+      await pool.query(
+        `DELETE FROM task_assignment_targets WHERE assignment_id = $1`,
+        [assignmentId]
+      );
+      await renderSchedUsers(ctx, user, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users_all", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_sched_users_rm_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const targetUserId = Number(ctx.match[2]);
+
+      await pool.query(
+        `DELETE FROM task_assignment_targets WHERE assignment_id = $1 AND user_id = $2`,
+        [assignmentId, targetUserId]
+      );
+
+      await renderSchedUsers(ctx, user, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users_rm", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_sched_users_add_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+
+      setSt(ctx.from.id, {
+        step: "sched_users_input",
+        schedUsers: { assignmentId },
+      });
+
+      await deliver(
+        ctx,
+        {
+          text:
+            "👤 Введите @username, телефон или часть имени.\n" +
+            "Можно также переслать сообщение пользователя.",
+          extra: Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "⬅️ Назад",
+                `admin_shift_tasks_sched_users_${assignmentId}`
+              ),
+            ],
+          ]),
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("admin_shift_tasks_sched_users_add", e);
+    }
+  });
+
   // entry
   bot.action("admin_shift_tasks", async (ctx) => {
     try {
@@ -874,6 +1767,153 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       await renderPickPoint(ctx);
     } catch (e) {
       logError("admin_shift_tasks", e);
+    }
+  });
+
+  // /tN — открыть карточку задачи из списка (отдельным сообщением)
+  async function sendOpTaskCard(ctx, st, assignmentId) {
+    const r = await pool.query(
+      `
+        SELECT
+          a.id AS assignment_id,
+          a.created_by_user_id,
+          cu.full_name AS creator_name,
+          cu.username AS creator_username,
+          cu.work_phone AS creator_phone,
+          t.title,
+          t.answer_type
+        FROM task_assignments a
+        JOIN task_templates t ON t.id = a.template_id
+        LEFT JOIN users cu ON cu.id = a.created_by_user_id
+        WHERE a.id = $1
+        LIMIT 1
+      `,
+      [assignmentId]
+    );
+
+    const asg = r.rows[0];
+    if (!asg) {
+      await ctx.reply("❌ Задача не найдена");
+      return;
+    }
+
+    const doneMap = await loadDoneInfoMap(st.pointId, st.dateISO, [
+      assignmentId,
+    ]);
+    const doneInfo = doneMap.get(assignmentId) || null;
+
+    const statusLine = doneInfo
+      ? "✅ <b>Выполнено</b>"
+      : "▫️ <b>Ожидание выполнения</b>";
+
+    const creator = [
+      asg.creator_name ? escHtml(asg.creator_name) : "—",
+      asg.creator_username ? `@${escHtml(asg.creator_username)}` : null,
+      asg.creator_phone ? escHtml(asg.creator_phone) : null,
+    ]
+      .filter(Boolean)
+      .join(" / ");
+
+    const doneBy = doneInfo
+      ? [
+          doneInfo.done_by_name ? escHtml(doneInfo.done_by_name) : "—",
+          doneInfo.done_by_username
+            ? `@${escHtml(doneInfo.done_by_username)}`
+            : null,
+          doneInfo.done_by_phone ? escHtml(doneInfo.done_by_phone) : null,
+        ]
+          .filter(Boolean)
+          .join(" / ")
+      : null;
+
+    let text = `📌 <b>Задача</b>\n\n`;
+    text += `📝 <b>Текст:</b> ${escHtml(asg.title)}\n`;
+    text += `📅 <b>Дата:</b> ${fmtRuDate(st.dateISO)}\n\n`;
+    text += `${statusLine}\n\n`;
+    text += `👤 <b>Кто создал:</b> ${creator}\n`;
+    text += `✅ <b>Кто выполнил:</b> ${doneBy ? doneBy : "—"}\n`;
+
+    if (doneInfo) {
+      // медиа
+      if (doneInfo.file_id && doneInfo.file_type) {
+        try {
+          if (doneInfo.file_type === "photo") {
+            await ctx.replyWithPhoto(doneInfo.file_id).catch(() => {});
+          } else if (doneInfo.file_type === "video") {
+            await ctx.replyWithVideo(doneInfo.file_id).catch(() => {});
+          }
+        } catch (_) {}
+      }
+
+      if (
+        doneInfo.answer_number !== null &&
+        doneInfo.answer_number !== undefined
+      ) {
+        text += `\n🔢 <b>Ответ:</b> ${escHtml(
+          String(doneInfo.answer_number)
+        )}\n`;
+      } else if (doneInfo.answer_text) {
+        text += `\n📝 <b>Ответ:</b> ${escHtml(doneInfo.answer_text)}\n`;
+      }
+    }
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          "⬅️ Назад к задачам",
+          "admin_shift_tasks_back_to_list"
+        ),
+      ],
+    ]);
+
+    await deliver(ctx, { text, extra: kb }, { edit: false });
+  }
+
+  bot.hears(/^\/t(\d+)(?:@[\w_]+)?$/, async (ctx) => {
+    try {
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || !st?.dateISO) {
+        await ctx.reply(
+          "❗ Сначала откройте экран «Задачи смены» и выберите точку/дату."
+        );
+        return;
+      }
+
+      const n = Number(ctx.match?.[1] || 0);
+      if (!Number.isInteger(n) || n <= 0) {
+        await ctx.reply("ℹ️ Используйте команду так: /t1, /t2, /t3 ...");
+        return;
+      }
+
+      const order = (st.opAssignments || []).map(Number);
+      if (!order.length) {
+        await ctx.reply("❗ Список задач пуст — нечего открывать.");
+        return;
+      }
+
+      const assignmentId = order[n - 1];
+      if (!assignmentId) {
+        await ctx.reply(`❌ Неверный номер. Доступно: 1–${order.length}`);
+        return;
+      }
+
+      await sendOpTaskCard(ctx, st, Number(assignmentId));
+    } catch (e) {
+      logError("admin_shift_tasks_t", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_back_to_list", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      await renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("admin_shift_tasks_back_to_list", e);
     }
   });
 
@@ -956,13 +1996,237 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       await deliver(
         ctx,
         {
-          text: "📅 <b>Выберите дату</b>\n\n(только сегодня и будущие)",
+          text: "📅 <b>Выберите дату</b>\n\n(можно прошедшие, или «Ввести дату»)",
           extra: kb,
         },
         { edit: true }
       );
     } catch (e) {
       logError("admin_shift_tasks_pick_date", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_date_input", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      setSt(ctx.from.id, { step: "date_input" });
+
+      const kb = Markup.inlineKeyboard([
+        [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_pick_date")],
+      ]);
+
+      await deliver(
+        ctx,
+        {
+          text:
+            "📅 <b>Введите дату</b>\n\n" +
+            "Формат: <b>ДД.ММ.ГГГГ</b> (например 08.01.2026)\n" +
+            "или <b>ГГГГ-ММ-ДД</b> (например 2026-01-08).",
+          extra: kb,
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("admin_shift_tasks_date_input", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_add_users_all", async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Теперь для всех ✅").catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.add) return;
+      st.add.targetUserIds = [];
+      setSt(ctx.from.id, { add: st.add, step: null });
+
+      await renderCreateUsersScreenA(ctx);
+    } catch (e) {
+      logError("admin_shift_tasks_add_users_all", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_add_users_rm_confirm_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const uid = Number(ctx.match[1]);
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🗑 Удалить",
+            `admin_shift_tasks_add_users_rm_${uid}`
+          ),
+        ],
+        [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_add_forwho")],
+      ]);
+      await deliver(
+        ctx,
+        { text: "🗑 <b>Удалить пользователя из задачи?</b>", extra: kb },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("admin_shift_tasks_add_users_rm_confirm", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_add_users_rm_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Удалено ✅").catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const uid = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      if (!st?.add) return;
+
+      st.add.targetUserIds = (st.add.targetUserIds || []).filter(
+        (x) => Number(x) !== uid
+      );
+      setSt(ctx.from.id, { add: st.add });
+
+      await renderCreateUsersScreenA(ctx);
+    } catch (e) {
+      logError("admin_shift_tasks_add_users_rm", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_add_users_add_p(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const page = Number(ctx.match[1]);
+      await renderCreateUsersScreenB(ctx, page, "");
+    } catch (e) {
+      logError("admin_shift_tasks_add_users_add", e);
+    }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_add_users_toggle_(\d+)_p(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const uid = Number(ctx.match[1]);
+        const page = Number(ctx.match[2]);
+
+        const st = getSt(ctx.from.id);
+        if (!st?.add) return;
+
+        const set = new Set((st.add.targetUserIds || []).map(Number));
+        if (set.has(uid)) set.delete(uid);
+        else set.add(uid);
+
+        st.add.targetUserIds = Array.from(set);
+        setSt(ctx.from.id, { add: st.add });
+
+        const q = st.createUsersQuery || "";
+        await renderCreateUsersScreenB(ctx, page, q);
+      } catch (e) {
+        logError("admin_shift_tasks_add_users_toggle", e);
+      }
+    }
+  );
+
+  // Для кого? (внутри добавления задачи)
+  bot.action("admin_shift_tasks_add_forwho", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || st.mode !== "add") return;
+
+      if (!st.add) st.add = {};
+      if (!Array.isArray(st.add.targetUserIds)) st.add.targetUserIds = [];
+
+      await renderCreateUsersScreenA(ctx);
+    } catch (e) {
+      logError("admin_shift_tasks_add_forwho", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_add_forwho_back", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      // FIX: иначе st.step остаётся add_forwho_input и перехватывает ввод текста задачи
+      setSt(ctx.from.id, { step: null });
+
+      await renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("admin_shift_tasks_add_forwho_back", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_add_forwho_all", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || st.mode !== "add") return;
+
+      setSt(ctx.from.id, {
+        step: null,
+        add: { ...st.add, forUserId: null, forUserName: null },
+      });
+      await renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("admin_shift_tasks_add_forwho_all", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_add_forwho_pick_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || st.mode !== "add") return;
+
+      const id = Number(ctx.match[1]);
+      const r = await pool.query(
+        `SELECT id, full_name, username, work_phone FROM users WHERE id = $1 LIMIT 1`,
+        [id]
+      );
+      const u = r.rows[0];
+      if (!u) {
+        await ctx
+          .answerCbQuery("Пользователь не найден", { show_alert: true })
+          .catch(() => {});
+        return;
+      }
+
+      setSt(ctx.from.id, {
+        step: null,
+        add: {
+          ...st.add,
+          forUserId: Number(u.id),
+          forUserName: u.full_name || u.username || String(u.id),
+        },
+      });
+
+      await renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("admin_shift_tasks_add_forwho_pick", e);
     }
   });
 
@@ -1126,6 +2390,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       if (!isAdmin(user)) return;
 
       setSt(ctx.from.id, {
+        step: null,
         mode: "add",
         add: {
           answerType: "button",
@@ -1134,11 +2399,32 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
           everyXDays: null,
           timeMode: "all_day",
           deadlineTime: null,
+
+          // NEW: для кого (null = все)
+          forUserId: null,
+          forUserName: null,
         },
       });
       await renderPointScreen(ctx, user);
     } catch (e) {
       logError("admin_shift_tasks_add", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_add_back", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId) return;
+
+      // важно: НЕ трогаем st.add (там targetUserIds)
+      setSt(ctx.from.id, { step: null, mode: "add" });
+      await renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("admin_shift_tasks_add_back", e);
     }
   });
 
@@ -1709,6 +2995,68 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
   });
 
   // ----- TEXT INPUT HANDLER (add task / set time / set everyX) -----
+
+  // ловим пересланные сообщения для выбора "Для кого?"
+  bot.on("message", async (ctx, next) => {
+    try {
+      const st = getSt(ctx.from.id);
+      if (!st) return next();
+
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return next();
+
+      if (st.step !== "add_forwho_input" || st.mode !== "add") return next();
+
+      const fwdId = ctx.message?.forward_from?.id || null;
+      if (!fwdId) return next();
+
+      const candidates = await searchUsersForWho(null, fwdId);
+      if (!candidates.length) {
+        await ctx.reply(
+          "❌ Пользователь не найден в базе (по пересланному сообщению)."
+        );
+        return;
+      }
+
+      const btns = candidates
+        .slice(0, 10)
+        .map((u) => [
+          Markup.button.callback(
+            formatUserLabel(u),
+            `admin_shift_tasks_add_forwho_pick_${u.id}`
+          ),
+        ]);
+
+      const kb = Markup.inlineKeyboard([
+        ...btns,
+        [
+          Markup.button.callback(
+            "👥 Для всех",
+            "admin_shift_tasks_add_forwho_all"
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            "admin_shift_tasks_add_forwho_back"
+          ),
+        ],
+      ]);
+
+      await deliver(
+        ctx,
+        {
+          text: "Найдено по пересланному сообщению. Выберите пользователя:",
+          extra: kb,
+        },
+        { edit: false }
+      );
+      return;
+    } catch (e) {
+      logError("admin_shift_tasks_add_forwho_forward", e);
+      return next();
+    }
+  });
   bot.on("text", async (ctx, next) => {
     const st = getSt(ctx.from.id);
     if (!st) return next();
@@ -1718,6 +3066,80 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
 
     const txt = String(ctx.message.text || "").trim();
     if (!txt) return next();
+
+    // 0) ввод произвольной даты
+    if (st.step === "date_input") {
+      const iso = parseAnyDateToISO(txt);
+      if (!iso) {
+        await ctx.reply("❌ Не понял дату. Формат: 08.01.2026 или 2026-01-08");
+        return;
+      }
+      setSt(ctx.from.id, {
+        step: null,
+        dateISO: iso,
+        mode: "view",
+        filter: "all",
+        deleteSelected: [],
+      });
+      await renderPointScreen(ctx, user);
+      return;
+    }
+
+    if (st.step === "sched_users_search" && st.schedUsers?.assignmentId) {
+      const q = (ctx.message.text || "").trim();
+      setSt(ctx.from.id, { schedUsersQuery: q });
+
+      await renderSchedUsersScreenB(
+        ctx,
+        st.schedUsers.assignmentId,
+        st.schedUsers.page || 1,
+        q
+      );
+      return;
+    }
+
+    // 0.1) поиск пользователя для "Для кого?"
+    if (st.step === "add_forwho_input") {
+      const candidates = await searchUsersForWho(txt);
+      if (!candidates.length) {
+        await ctx.reply(
+          "❌ Никого не нашёл. Попробуйте @username, телефон или часть имени."
+        );
+        return;
+      }
+
+      const btns = candidates
+        .slice(0, 10)
+        .map((u) => [
+          Markup.button.callback(
+            formatUserLabel(u),
+            `admin_shift_tasks_add_forwho_pick_${u.id}`
+          ),
+        ]);
+
+      const kb = Markup.inlineKeyboard([
+        ...btns,
+        [
+          Markup.button.callback(
+            "👥 Для всех",
+            "admin_shift_tasks_add_forwho_all"
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Назад",
+            "admin_shift_tasks_add_forwho_back"
+          ),
+        ],
+      ]);
+
+      await deliver(
+        ctx,
+        { text: "Найдено. Выберите пользователя:", extra: kb },
+        { edit: false }
+      );
+      return;
+    }
 
     // 1) если ждём ввод времени
     if (
@@ -1829,18 +3251,36 @@ VALUES ($1, $2, TRUE, $3)
       );
       const templateId = tplRes.rows[0].id;
 
-      // assignment (global, one_point)
+      const ids = Array.isArray(st.add.targetUserIds)
+        ? st.add.targetUserIds.map(Number)
+        : [];
+      const taskType = ids.length ? "individual" : "global";
+
       const asgRes = await pool.query(
         `
-        INSERT INTO task_assignments
-          (task_type, template_id, created_by_user_id, point_scope, trade_point_id, is_active)
-        VALUES
-          ('global', $1, $2, 'one_point', $3, TRUE)
-        RETURNING id
-        `,
-        [templateId, user.id, st.pointId]
+  INSERT INTO task_assignments
+    (task_type, template_id, created_by_user_id, point_scope, trade_point_id, is_active)
+  VALUES
+    ($1, $2, $3, 'one_point', $4, TRUE)
+  RETURNING id
+  `,
+        [taskType, templateId, user.id, st.pointId]
       );
+
       const assignmentId = asgRes.rows[0].id;
+
+      if (ids.length) {
+        for (const uid of ids) {
+          await pool.query(
+            `
+      INSERT INTO task_assignment_targets (assignment_id, user_id)
+      VALUES ($1, $2)
+      ON CONFLICT DO NOTHING
+      `,
+            [assignmentId, uid]
+          );
+        }
+      }
 
       // schedule
       const scheduleType = st.add.scheduleType || "single";

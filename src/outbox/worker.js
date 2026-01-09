@@ -44,7 +44,7 @@ async function processOutboxOnce(bot) {
 
           if (mentorTg && candidateId) {
             const text =
-              `✅ Стажировка завершена\n\n` +
+            `✅ Стажировка завершена\n\n` +
               `Стажёр: ${internName}\n` +
               `Нажмите кнопку ниже, чтобы открыть карточку.`;
 
