@@ -13,6 +13,9 @@ const { startOutboxWorker } = require("./outbox/worker");
 const {
   startShiftOpeningControlWatcher,
 } = require("./bot/shifts/shiftOpeningControlWatcher");
+const {
+  startResponsibleRemindersWatcher,
+} = require("./bot/tasks/responsibleRemindersWatcher");
 
 const BOT_TOKEN = process.env.BOT_TOKEN_LK;
 
@@ -23,6 +26,7 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 startOutboxWorker(bot);
 startShiftOpeningControlWatcher({ intervalMs: 60_000, logError });
+startResponsibleRemindersWatcher({ intervalMs: 300_000, logError });
 
 // Простенький логгер ошибок
 function logError(tag, err) {

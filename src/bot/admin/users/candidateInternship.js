@@ -245,6 +245,42 @@ async function askLinkUser(ctx, candidateId) {
     });
 }
 
+async function askPostTrainingControl(ctx, candidateId) {
+  const text = `✅ Курс стажёра пройден.
+
+Сотрудник может работать самостоятельно *под контролем*,  
+или пока нужен *полный контроль*?
+
+Выберите вариант:`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "✅ Может работать под контролем",
+        `lk_cand_invite_post_training_control_${candidateId}_yes`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "❌ нужен полный контроль",
+        `lk_cand_invite_post_training_control_${candidateId}_no`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "❌ Отмена",
+        `lk_cand_invite_cancel_${candidateId}`
+      ),
+    ],
+  ]);
+
+  await ctx
+    .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
+    .catch(async () => {
+      await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
+    });
+}
+
 async function askLinkUserOrFinish(ctx, candidateId, ensureUser) {
   const res = await pool.query(
     `SELECT id FROM users WHERE candidate_id = $1 LIMIT 1`,
@@ -259,6 +295,22 @@ async function askLinkUserOrFinish(ctx, candidateId, ensureUser) {
 
     // Берём админа из ensureUser, чтобы корректно решить показывать ли "В меню"
     const adminUser = await ensureUser(ctx);
+
+    // Если курс уже пройден — уточняем режим контроля перед назначением
+    const uRes = await pool.query(
+      `SELECT training_completed_at FROM users WHERE id = $1`,
+      [existingUserId]
+    );
+    const trainingCompleted = !!uRes.rows?.[0]?.training_completed_at;
+
+    if (trainingCompleted) {
+      setState(ctx.from.id, {
+        step: "post_training_control",
+        pending_link_user_id: existingUserId,
+      });
+      await askPostTrainingControl(ctx, candidateId);
+      return;
+    }
 
     await finishInternshipInvite(ctx, ctx.from.id, adminUser, {
       linkUserId: existingUserId,
@@ -394,6 +446,21 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
         linkedTelegramId = res.rows[0].telegram_id;
         linkedName = res.rows[0].full_name;
       }
+    }
+
+    // Сохраняем режим контроля после прохождения курса (если выбран)
+    if (
+      typeof options.postTrainingCanWorkUnderControl === "boolean" &&
+      linkedUserId
+    ) {
+      await client.query(
+        `
+    UPDATE users
+       SET post_training_can_work_under_control = $2
+     WHERE id = $1
+    `,
+        [linkedUserId, options.postTrainingCanWorkUnderControl]
+      );
     }
 
     // 2б) Привязка из lk_waiting_users
@@ -1269,25 +1336,23 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // Эти поля нужны для отображения блока "О стажировке" и для списков наставника,
       // пока стажировка идёт.
 
+      // 5) OUTBOX (academy): если курс ещё НЕ пройден — уведомляем наставника и даём кнопку «Начать курс»
+      // Академический worker слушает destination='academy' и event_type='internship_started'
+      const trRes = await pool.query(
+        "SELECT training_completed_at FROM users WHERE id = $1",
+        [internUserId]
+      );
+      const trainingCompletedAt = trRes.rows[0]?.training_completed_at || null;
 
-   // 5) OUTBOX (academy): если курс ещё НЕ пройден — уведомляем наставника и даём кнопку «Начать курс»
-// Академический worker слушает destination='academy' и event_type='internship_started'
-const trRes = await pool.query(
-  "SELECT training_completed_at FROM users WHERE id = $1",
-  [internUserId]
-);
-const trainingCompletedAt = trRes.rows[0]?.training_completed_at || null;
-
-if (!trainingCompletedAt) {
-  await pushOutboxEvent("academy", "internship_started", {
-    mentor_telegram_id: Number(ctx.from.id),
-    intern_user_id: Number(internUserId),
-    intern_name: internName || "стажёр",
-    session_id: sessionId,
-    day_number: nextDay,
-  });
-}
-
+      if (!trainingCompletedAt) {
+        await pushOutboxEvent("academy", "internship_started", {
+          mentor_telegram_id: Number(ctx.from.id),
+          intern_user_id: Number(internUserId),
+          intern_name: internName || "стажёр",
+          session_id: sessionId,
+          day_number: nextDay,
+        });
+      }
 
       // 6) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
       const text =

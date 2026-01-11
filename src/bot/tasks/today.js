@@ -3,10 +3,36 @@ const { Markup } = require("telegraf");
 const pool = require("../../db/pool");
 const { deliver } = require("../../utils/renderHelpers");
 const { hasForCurrentShift } = require("../handover");
+const { insertNotificationAndFanout } = require("../notifications");
+
 
 const { getUserState, setUserState, clearUserState } = require("../state");
 
 const MODE = "lk_task_answer";
+
+let __taskInstancesUniqEnsured = false;
+async function ensureTaskInstancesUniqueByPoint() {
+  if (__taskInstancesUniqEnsured) return;
+  __taskInstancesUniqEnsured = true;
+  try {
+    // Drop legacy constraint (assignment_id, user_id, for_date) to avoid "done" leaking across points
+    await pool.query(`
+      ALTER TABLE task_instances
+      DROP CONSTRAINT IF EXISTS task_instances_assignment_id_user_id_for_date_key
+    `);
+  } catch (_) {}
+
+  try {
+    // New uniqueness: per assignment + user + point + date
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS task_instances_assignment_user_point_date_uniq
+      ON task_instances (assignment_id, user_id, trade_point_id, for_date)
+    `);
+  } catch (_) {
+    // ignore (e.g. insufficient privileges)
+  }
+}
+
 
 function getTaskState(tgId) {
   const st = getUserState(tgId);
@@ -198,7 +224,7 @@ async function ensureTodayInstances(user, shift, today) {
           (assignment_id, template_id, user_id, trade_point_id, for_date, time_mode, deadline_at, status)
         VALUES
           ($1, $2, $3, $4, $5, $6, NULL, 'open')
-        ON CONFLICT (assignment_id, user_id, for_date) DO NOTHING
+        ON CONFLICT (assignment_id, user_id, trade_point_id, for_date) DO NOTHING
       `,
       [
         assignmentId,
@@ -281,6 +307,7 @@ function buildKeyboard(rows, hasComments) {
 }
 
 async function showTodayTasks(ctx, user) {
+  await ensureTaskInstancesUniqueByPoint();
   const shift = await getActiveShiftForUser(user.id).catch(() => null);
 
   const today = await dbTodayISO();
@@ -386,6 +413,19 @@ async function notifyResponsiblesOnCompletion(bot, taskInstanceId) {
     );
     const row = r.rows[0];
     if (!row) return;
+// respect completion notification setting (fallback: true)
+try {
+  const rs = await pool.query(
+    `
+    SELECT COALESCE(completion_notifications_enabled, TRUE) AS enabled
+    FROM task_assignment_responsible_settings
+    WHERE assignment_id = $1
+    LIMIT 1
+    `,
+    [row.assignment_id]
+  );
+  if (rs.rows[0] && rs.rows[0].enabled === false) return;
+} catch (_) {}
 
     // respect completion notification setting (fallback: true)
     let completionEnabled = true;
@@ -449,6 +489,15 @@ async function notifyResponsiblesOnCompletion(bot, taskInstanceId) {
       } catch (e) {
         // ignore per-user send errors
       }
+
+// also write to in-app notifications (text-only) + ping (so it appears in 🔔 Уведомления)
+try {
+  await insertNotificationAndFanout({
+    createdBy: null,
+    text: caption,
+    recipientUserIds: users.rows.map((x) => Number(x.id)).filter(Boolean),
+  });
+} catch (_) {}
     }
   } catch (e) {
     // ignore

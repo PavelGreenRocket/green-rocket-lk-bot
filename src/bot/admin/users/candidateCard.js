@@ -230,7 +230,8 @@ u_intern.telegram_id AS internship_admin_tg_id,
 u_link.id           AS lk_user_id,
         u_link.full_name    AS lk_user_name,
         u_link.telegram_id  AS lk_user_telegram_id,
-         COALESCE(u_link.lk_enabled, false) AS lk_user_lk_enabled
+         COALESCE(u_link.lk_enabled, false) AS lk_user_lk_enabled,
+         u_link.training_completed_at AS lk_user_training_completed_at
 
 
 FROM candidates c
@@ -251,6 +252,9 @@ FROM candidates c
   }
 
   const cand = res.rows[0];
+
+  const trainingCompleted = !!cand.lk_user_training_completed_at;
+
 
   const isInternshipScheduled =
     !!cand.internship_date &&
@@ -732,7 +736,9 @@ LIMIT 1
           if (isMentor) {
             rows.push([
               Markup.button.url(
-                "⏺️ Перейти к обучению",
+                trainingCompleted
+                  ? "✅ завершить стажировку"
+                  : "⏺️ Перейти к обучению",
                 "https://t.me/baristaAcademy_GR_bot"
               ),
             ]);
@@ -1270,14 +1276,23 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
 
       const candidateId = Number(ctx.match[1]);
 
+      const text =
+        "⬆️ Повышение до сотрудника\n\n" +
+        "Повышаем только тогда, когда стажёр уже может работать полностью самостоятельно без контроля наставника.\n\n" +
+        "⚠️ Важно: если курс стажёра в Академии не завершён — повысить нельзя.\n" +
+        "⚠️ Важно: если сейчас идёт активная сессия стажировки — повысить нельзя.";
+
       await deliver(
         ctx,
         {
-          text:
-            "⬆️ Повышение до сотрудника\n\n" +
-            "Повышаем только тогда, когда стажёр уже может работать полностью самостоятельно без контроля наставника.\n\n" +
-            "Пока это заглушка (в следующем этапе сделаем реальное повышение).",
+          text,
           extra: Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                "⬆️ Повысить",
+                `lk_intern_settings_promote_apply_${candidateId}`
+              ),
+            ],
             [
               Markup.button.callback(
                 "⬅️ Назад",
@@ -1290,6 +1305,199 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       );
     } catch (err) {
       logError("lk_intern_settings_promote", err);
+    }
+  });
+
+  function phoneForTelegramLocal(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return null;
+    let cleaned = s.replace(/[^\d+]/g, "");
+    if (/^8\d{10}$/.test(cleaned)) cleaned = "+7" + cleaned.slice(1);
+    if (/^7\d{10}$/.test(cleaned)) cleaned = "+7" + cleaned.slice(1);
+    return cleaned;
+  }
+
+  async function renderWorkerCardAfterPromote(ctx, workerId) {
+    const res = await pool.query(
+      `
+      SELECT
+        u.id,
+        u.full_name,
+        u.role,
+        u.staff_status,
+        u.position,
+        u.work_phone,
+        u.username,
+        c.age AS age
+      FROM users u
+      LEFT JOIN candidates c ON c.id = u.candidate_id
+      WHERE u.id = $1
+      LIMIT 1
+      `,
+      [workerId]
+    );
+
+    if (!res.rows.length) {
+      await ctx
+        .answerCbQuery("✅ Повышено, но карточка сотрудника не найдена", {
+          show_alert: false,
+        })
+        .catch(() => {});
+      return;
+    }
+
+    const u = res.rows[0];
+
+    const roleLabels = {
+      super_admin: "супер-админ",
+      admin: "админ",
+      worker: "сотрудник",
+      user: "пользователь",
+    };
+    const statusLabels = {
+      candidate: "кандидат",
+      intern: "стажёр",
+      worker: "сотрудник",
+    };
+
+    const roleText = roleLabels[u.role] || u.role || "не указана";
+    const statusText =
+      statusLabels[u.staff_status] || u.staff_status || "не указан";
+    const positionText = u.position || "бариста";
+    const normalizedPhone = phoneForTelegramLocal(u.work_phone);
+    const phoneText = normalizedPhone || u.work_phone || "не указан";
+    const usernameText = u.username ? `@${u.username}` : "не указан";
+
+    const header = (statusLabels[u.staff_status] || "сотрудник").toUpperCase();
+    const sep = "────────────────────────────";
+
+    const nameWithAge = `${u.full_name || "не указано"}${
+      u.age ? ` (${u.age})` : ""
+    }`;
+
+    const text =
+      `🔻 <b>${escHtml(header)}</b>\n${sep}\n` +
+      `🔹 <b>Общая информация</b>\n` +
+      `• <b>Имя:</b> ${escHtml(nameWithAge)}\n` +
+      `• <b>Роль:</b> ${escHtml(roleText)}\n` +
+      `• <b>Статус:</b> ${escHtml(statusText)}\n` +
+      `• <b>Должность:</b> ${escHtml(positionText)}\n` +
+      `• <b>Телефон:</b> ${escHtml(phoneText)}\n` +
+      `• <b>Username:</b> ${escHtml(usernameText)}\n` +
+      `${sep}\n` +
+      `🔹 <b>О работе</b>\n` +
+      `• <b>Следующая смена:</b> в разработке`;
+
+    const rows = [
+      [Markup.button.callback("💼 Работа", `lk_worker_work_stub_${u.id}`)],
+      [
+        Markup.button.callback(
+          "📊 успеваемость",
+          `lk_worker_performance_${u.id}`
+        ),
+      ],
+      [Markup.button.callback("⚙️ Настройки", `admin_worker_settings_${u.id}`)],
+      [Markup.button.callback("⬅️ К сотрудникам", "admin_users_workers")],
+    ];
+
+    await deliver(
+      ctx,
+      { text, extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" } },
+      { edit: true }
+    );
+  }
+
+  bot.action(/^lk_intern_settings_promote_apply_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin"))
+        return;
+
+      const candidateId = Number(ctx.match[1]);
+
+      // 1) находим связанного пользователя
+      const r = await pool.query(
+        `
+        SELECT id AS user_id, telegram_id, staff_status, training_completed_at
+        FROM users
+        WHERE candidate_id = $1
+        LIMIT 1
+        `,
+        [candidateId]
+      );
+      const u = r.rows[0];
+      if (!u?.user_id) {
+        await ctx
+          .answerCbQuery("❌ Не найден привязанный пользователь", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      // уже сотрудник
+      if (u.staff_status === "worker") {
+        await renderWorkerCardAfterPromote(ctx, u.user_id);
+        return;
+      }
+
+      // 2) нельзя повышать, если идёт активная сессия стажировки
+      const act = await pool.query(
+        `
+        SELECT id
+        FROM internship_sessions
+        WHERE user_id = $1
+          AND finished_at IS NULL
+          AND is_canceled = FALSE
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+        [u.user_id]
+      );
+      if (act.rows.length) {
+        await ctx
+          .answerCbQuery("❌ Нельзя повысить: сейчас идёт активная стажировка", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      // 3) нельзя повышать, пока не завершён курс стажёра
+      if (!u.training_completed_at) {
+        await ctx
+          .answerCbQuery(
+            "❌ Нельзя повысить: сначала нужно пройти курс стажёра в Академии",
+            { show_alert: false }
+          )
+          .catch(() => {});
+        return;
+      }
+
+      // 4) повышаем
+      await pool.query(
+        `UPDATE users SET staff_status = 'worker' WHERE id = $1`,
+        [u.user_id]
+      );
+
+      if (u.telegram_id) {
+        await ctx.telegram
+          .sendMessage(
+            Number(u.telegram_id),
+            "🎉 Вы повышены до сотрудника!\n\nДоступ к функциям сотрудника открыт."
+          )
+          .catch(() => {});
+      }
+
+      await ctx
+        .answerCbQuery("✅ Повышен до сотрудника", { show_alert: false })
+        .catch(() => {});
+
+      // 5) сразу открываем карточку сотрудника
+      await renderWorkerCardAfterPromote(ctx, u.user_id);
+    } catch (err) {
+      logError("lk_intern_settings_promote_apply", err);
     }
   });
 

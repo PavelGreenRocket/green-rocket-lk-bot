@@ -604,6 +604,9 @@ async function showInternsListLk(ctx, user, options = {}) {
   let where =
     "(c.status = 'intern' OR EXISTS (SELECT 1 FROM internship_sessions s WHERE s.user_id = u.id AND s.is_canceled = FALSE))";
 
+  // ✅ MVP: если пользователь уже сотрудник — НЕ показываем в списке стажёров
+  where += " AND COALESCE(u.staff_status, '') <> 'worker'";
+
   if (filters.scope === "personal") {
     params.push(user.id);
     where += ` AND c.internship_admin_id = $${params.length}`;
@@ -2152,6 +2155,7 @@ sh.trade_point_id,
   u.position,
   u.work_phone,
   u.username,
+  u.lk_enabled,
   u.candidate_id,
   c.age AS age
 FROM users u
@@ -2187,7 +2191,8 @@ WHERE u.id = $1
     const roleText = roleLabels[u.role] || u.role || "не указана";
     const statusText =
       statusLabels[u.staff_status] || u.staff_status || "не указан";
-    const positionText = u.position || "не указана";
+    // MVP: по умолчанию для сотрудника должность "бариста" (пока вручную не повысим)
+    const positionText = u.position || "бариста";
     const normalizedPhone = phoneForTelegram(u.work_phone);
     const workPhoneText = normalizedPhone || u.work_phone || "не указан";
     const usernameText = u.username ? `@${u.username}` : "не указан";
@@ -2213,7 +2218,7 @@ WHERE u.id = $1
       `• <b>Роль:</b> ${roleVal}\n` +
       `• <b>Статус:</b> ${statusVal}\n` +
       `• <b>Должность:</b> ${posVal}\n` +
-      `• <b>Рабочий номер:</b> ${phoneVal}\n` +
+      `• <b>Телефон:</b> ${phoneVal}\n` +
       `• <b>Username:</b> ${userVal}\n` +
       `${sep}\n` +
       `🔹 <b>О работе</b>\n` +
@@ -2231,12 +2236,19 @@ WHERE u.id = $1
       ]);
     }
 
-    // 2) успеваемость (заглушка)
+ 
+
+    // 2) успеваемость
     rows.push([
       Markup.button.callback(
         "📊 успеваемость",
         `lk_worker_performance_${u.id}`
       ),
+    ]);
+
+    // 2.5) работа (заглушка)
+    rows.push([
+      Markup.button.callback("💼 Работа", `lk_worker_work_stub_${u.id}`),
     ]);
 
     // 3) открыть карточку (toggle как у стажёра)
@@ -2270,9 +2282,127 @@ WHERE u.id = $1
     }
   }
 
+  // ----- НАСТРОЙКИ СОТРУДНИКА (MVP, как у стажёра: скрин 5) -----
+  async function showWorkerSettingsMenu(ctx, workerId, options = {}) {
+    const res = await pool.query(
+      `
+      SELECT
+        u.id,
+        u.full_name,
+        u.role,
+        u.staff_status,
+        u.position,
+        u.work_phone,
+        u.username,
+        u.lk_enabled,
+        u.candidate_id,
+        c.age AS age
+      FROM users u
+      LEFT JOIN candidates c ON c.id = u.candidate_id
+      WHERE u.id = $1
+      `,
+      [workerId]
+    );
+
+    if (!res.rows.length) {
+      if (!options.silent) {
+        await ctx.reply("Этот сотрудник не найден или был удалён.");
+      }
+      return;
+    }
+
+    const u = res.rows[0];
+
+    const roleLabels = {
+      super_admin: "супер-админ",
+      admin: "админ",
+      user: "пользователь",
+      worker: "сотрудник",
+    };
+
+    const statusLabels = {
+      candidate: "кандидат",
+      intern: "стажёр",
+      worker: "сотрудник",
+    };
+
+    const roleText = roleLabels[u.role] || u.role || "не указана";
+    const statusText =
+      statusLabels[u.staff_status] || u.staff_status || "не указан";
+    const positionText = u.position || "бариста";
+    const normalizedPhone = phoneForTelegram(u.work_phone);
+    const workPhoneText = normalizedPhone || u.work_phone || "не указан";
+    const usernameText = u.username ? `@${u.username}` : "не указан";
+
+    const HR = "────────────────────────────";
+
+    let text = `⚙️ <b>НАСТРОЙКИ СОТРУДНИКА</b>\n`;
+    text += `${HR}\n`;
+    text += `🔹 <b>Общая информация</b>\n`;
+    const nameWithAge = `${u.full_name || "не указано"}${u.age ? ` (${u.age})` : ""}`;
+    text += `• <b>Имя:</b> ${escHtml(nameWithAge)}\n`;
+    text += `• <b>Роль:</b> ${escHtml(roleText)}\n`;
+    text += `• <b>Статус:</b> ${escHtml(statusText)}\n`;
+    text += `• <b>Должность:</b> ${escHtml(positionText)}\n`;
+    text += `• <b>Телефон:</b> ${escHtml(workPhoneText)}\n`;
+    text += `• <b>Username:</b> ${escHtml(usernameText)}\n`;
+    text += `${HR}`;
+
+    const rows = [];
+
+    // Доступ в ЛК (как у стажёра)
+    const lkEnabled = !!u.lk_enabled;
+    rows.push([
+      Markup.button.callback(
+        lkEnabled ? "🔒 Закрыть доступ в ЛК" : "🔓 Открыть доступ в ЛК",
+        lkEnabled
+          ? `admin_worker_settings_close_lk_${u.id}`
+          : `admin_worker_settings_open_lk_${u.id}`
+      ),
+    ]);
+
+    // Изменить карточку -> старый экран редактирования (скрин 4)
+    rows.push([
+      Markup.button.callback(
+        "✏️ Изменить карточку",
+        `admin_worker_edit_card_${u.id}`
+      ),
+    ]);
+
+    // Удалить пользователя (пока заглушка)
+    rows.push([
+      Markup.button.callback(
+        "🗑 Удалить пользователя",
+        `admin_worker_delete_stub_${u.id}`
+      ),
+    ]);
+
+    // Открыть другую карточку (пока заглушка)
+    rows.push([
+      Markup.button.callback(
+        "📋 Открыть другую карточку",
+        `admin_worker_open_other_card_stub_${u.id}`
+      ),
+    ]);
+
+    rows.push([
+      Markup.button.callback("⬅️ К сотруднику", `admin_worker_open_${u.id}`),
+    ]);
+
+    const keyboard = Markup.inlineKeyboard(rows);
+    const extra = { ...keyboard, parse_mode: "HTML" };
+
+    if (options.edit) {
+      await deliver(ctx, { text, extra }, { edit: true });
+    } else {
+      await ctx.reply(text, extra);
+    }
+  }
+
   // ----- МЕНЮ НАСТРОЕК СОТРУДНИКА -----
 
-  async function showWorkerSettingsMenu(ctx, workerId, options = {}) {
+  // Экран редактирования карточки сотрудника (бывшие "настройки" на скрине 4)
+  async function showWorkerEditCardMenu(ctx, workerId, options = {}) {
     const res = await pool.query(
       `
      SELECT
@@ -2283,6 +2413,7 @@ WHERE u.id = $1
   u.position,
   u.work_phone,
   u.username,
+  u.lk_enabled,
   u.candidate_id,
   c.age AS age
 FROM users u
@@ -2488,6 +2619,80 @@ WHERE u.id = $1
     }
   });
 
+  // Открыть экран "изменить карточку" (старый экран редактирования)
+  bot.action(/^admin_worker_edit_card_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        return;
+      }
+      const workerId = Number(ctx.match[1]);
+      await showWorkerEditCardMenu(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("admin_worker_edit_card", err);
+    }
+  });
+
+  // Открыть/закрыть доступ в ЛК для сотрудника
+  bot.action(/^admin_worker_settings_open_lk_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+      await pool.query(`UPDATE users SET lk_enabled = true WHERE id = $1`, [
+        workerId,
+      ]);
+
+      await ctx
+        .answerCbQuery("✅ Доступ в ЛК открыт", { show_alert: false })
+        .catch(() => {});
+
+      await showWorkerSettingsMenu(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("admin_worker_settings_open_lk", err);
+    }
+  });
+
+  bot.action(/^admin_worker_settings_close_lk_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const admin = await ensureUser(ctx);
+      if (!admin || (admin.role !== "admin" && admin.role !== "super_admin")) {
+        return;
+      }
+
+      const workerId = Number(ctx.match[1]);
+      await pool.query(`UPDATE users SET lk_enabled = false WHERE id = $1`, [
+        workerId,
+      ]);
+
+      await ctx
+        .answerCbQuery("✅ Доступ в ЛК закрыт", { show_alert: false })
+        .catch(() => {});
+
+      await showWorkerSettingsMenu(ctx, workerId, { edit: true });
+    } catch (err) {
+      logError("admin_worker_settings_close_lk", err);
+    }
+  });
+
+  bot.action(/^admin_worker_delete_stub_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("🚧 В разработке", { show_alert: false })
+      .catch(() => {});
+  });
+
+  bot.action(/^admin_worker_open_other_card_stub_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("🚧 В разработке", { show_alert: false })
+      .catch(() => {});
+  });
+
   // Раскрыть/свернуть карточку сотрудника (как у стажёра)
   bot.action(/^lk_worker_toggle_cards_(\d+)$/, async (ctx) => {
     try {
@@ -2573,10 +2778,66 @@ WHERE u.id = $1
   // Заглушка: успеваемость
   bot.action(/^lk_worker_performance_(\d+)$/, async (ctx) => {
     try {
-      await ctx.answerCbQuery("Скоро добавим этот раздел.").catch(() => {});
+      await ctx.answerCbQuery().catch(() => {});
+      const workerId = Number(ctx.match[1]);
+
+      const r = await pool.query(
+        `SELECT id, candidate_id, COALESCE(full_name,'Без имени') AS full_name FROM users WHERE id = $1 LIMIT 1`,
+        [workerId]
+      );
+      const u = r.rows[0];
+      if (!u) {
+        await ctx
+          .answerCbQuery("❌ Пользователь не найден", { show_alert: false })
+          .catch(() => {});
+        return;
+      }
+
+      const text =
+        `📊 *Успеваемость*\n\n` +
+        `👤 *${u.full_name}*\n\n` +
+        `Пока показываем только данные стажировок (как у стажёра).`;
+
+      const rows = [];
+      if (u.candidate_id) {
+        rows.push([
+          Markup.button.callback(
+            "🌱 данные стажировок",
+            `lk_internship_data_${u.candidate_id}`
+          ),
+        ]);
+      } else {
+        rows.push([
+          Markup.button.callback(
+            "🌱 данные стажировок",
+            `lk_worker_no_internship_data_${workerId}`
+          ),
+        ]);
+      }
+      rows.push([
+        Markup.button.callback("⬅️ Назад", `admin_worker_open_${workerId}`),
+      ]);
+
+      await deliver(
+        ctx,
+        { text, extra: { ...Markup.inlineKeyboard(rows), parse_mode: "Markdown" } },
+        { edit: true }
+      );
     } catch (err) {
       logError("lk_worker_performance", err);
     }
+  });
+
+  bot.action(/^lk_worker_no_internship_data_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("⚠️ Нет данных стажировок", { show_alert: false })
+      .catch(() => {});
+  });
+
+  bot.action(/^lk_worker_work_stub_(\d+)$/, async (ctx) => {
+    await ctx
+      .answerCbQuery("🚧 В разработке", { show_alert: false })
+      .catch(() => {});
   });
 
   bot.action(/^admin_worker_edit_phone_(\d+)$/, async (ctx) => {

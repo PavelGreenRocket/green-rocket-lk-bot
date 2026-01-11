@@ -9,6 +9,25 @@ const { showHandoverAfterOpenIfAny } = require("../handover");
 
 const MODE = "shift_open";
 
+let __taskInstancesUniqEnsured = false;
+async function ensureTaskInstancesUniqueByPoint() {
+  if (__taskInstancesUniqEnsured) return;
+  __taskInstancesUniqEnsured = true;
+  try {
+    await pool.query(`
+      ALTER TABLE task_instances
+      DROP CONSTRAINT IF EXISTS task_instances_assignment_id_user_id_for_date_key
+    `);
+  } catch (_) {}
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS task_instances_assignment_user_point_date_uniq
+      ON task_instances (assignment_id, user_id, trade_point_id, for_date)
+    `);
+  } catch (_) {}
+}
+
+
 function getShiftState(tgId) {
   const st = getUserState(tgId);
   return st && st.mode === MODE ? st : null;
@@ -1086,6 +1105,7 @@ async function syncTasksFromTransferIfNeeded(toShiftId) {
     : new Date().toISOString().slice(0, 10);
 
   // копируем/апсёртим task_instances от A -> B по этой точке и дате
+  await ensureTaskInstancesUniqueByPoint();
   await pool.query(
     `
     INSERT INTO task_instances

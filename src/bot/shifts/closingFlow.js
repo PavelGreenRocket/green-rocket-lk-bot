@@ -9,6 +9,8 @@ const {
   loadCashCollectorsPage,
   isCashCollectorForPoint,
 } = require("./cashCollectors");
+const { insertNotificationAndFanout } = require("../notifications");
+
 
 const MODE = "shift_close";
 
@@ -71,7 +73,7 @@ async function notifyResponsiblesOnNotCompleted(bot, shiftId) {
     if (!openTasks.rows.length) return;
 
     // aggregate per responsible telegram_id
-    const buckets = new Map(); // tgId -> titles[]
+    const buckets = new Map(); // tgId -> { userId, titles[] }
     for (const t of openTasks.rows) {
       // respect completion notification setting (fallback: true)
       let enabled = true;
@@ -93,7 +95,7 @@ async function notifyResponsiblesOnNotCompleted(bot, shiftId) {
 
       const resp = await pool.query(
         `
-        SELECT u.telegram_id
+        SELECT u.id AS user_id, u.telegram_id
         FROM task_assignment_responsibles ar
         JOIN users u ON u.id = ar.user_id
         WHERE ar.assignment_id = $1 AND u.telegram_id IS NOT NULL
@@ -103,8 +105,8 @@ async function notifyResponsiblesOnNotCompleted(bot, shiftId) {
       for (const r of resp.rows) {
         const tgId = Number(r.telegram_id);
         if (!tgId) continue;
-        if (!buckets.has(tgId)) buckets.set(tgId, []);
-        buckets.get(tgId).push(t.task_title);
+        if (!buckets.has(tgId)) buckets.set(tgId, { userId: Number(r.user_id), titles: [] });
+        buckets.get(tgId).titles.push(t.task_title);
       }
     }
 
@@ -113,13 +115,25 @@ async function notifyResponsiblesOnNotCompleted(bot, shiftId) {
     const dateStr = String(shift.d);
     const pointLine = shift.point_title ? `Точка: ${shift.point_title}\n` : "";
 
-    for (const [tgId, titles] of buckets.entries()) {
+    for (const [tgId, payload] of buckets.entries()) {
+      const titles = payload.titles || [];
+      const userId = Number(payload.userId);
       const uniq = Array.from(new Set(titles));
       let msg = `❌ Задачи не выполнены (смена закрыта)\n\n`;
       msg += pointLine;
       msg += `Дата: ${dateStr}\n\n`;
       msg += uniq.map((x, i) => `${i + 1}. ${x}`).join("\n");
       try {
+
+try {
+  if (userId) {
+    await insertNotificationAndFanout({
+      createdBy: null,
+      text: msg,
+      recipientUserIds: [userId],
+    });
+  }
+} catch (_) {}
         await bot.telegram.sendMessage(tgId, msg);
       } catch (e) {
         // ignore
