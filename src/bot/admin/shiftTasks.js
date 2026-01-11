@@ -773,7 +773,7 @@ async function renderSingleListForDate(ctx, user) {
   if (!oneTime.length) {
     text += `На эту дату разовых задач нет.\n`;
     const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_back_to_list")],
+      [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")],
     ]);
     return deliver(ctx, { text, extra: kb }, { edit: true });
   }
@@ -789,7 +789,7 @@ async function renderSingleListForDate(ctx, user) {
     Markup.button.callback(String(i + 1), `admin_shift_tasks_open_${r.assignment_id}`)
   );
   for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_back_to_list")]);
+  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")]);
 
   await deliver(ctx, { text, extra: Markup.inlineKeyboard(rows) }, { edit: true });
 }
@@ -827,7 +827,7 @@ async function renderScheduledListForDate(ctx, user) {
     text += `На эту дату задач по расписанию нет.\n`;
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback("⚙ все задачи по расписанию", "admin_shift_tasks_sched_all")],
-      [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_back_to_list")],
+      [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")],
     ]);
     return deliver(ctx, { text, extra: kb }, { edit: true });
   }
@@ -845,7 +845,7 @@ async function renderScheduledListForDate(ctx, user) {
   for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
 
   rows.push([Markup.button.callback("⚙ все задачи по расписанию", "admin_shift_tasks_sched_all")]);
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_back_to_list")]);
+  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")]);
 
   await deliver(ctx, { text, extra: Markup.inlineKeyboard(rows) }, { edit: true });
 }
@@ -2474,7 +2474,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
   });
 
   // /tN — открыть карточку задачи из списка (отдельным сообщением)
-  async function sendOpTaskCard(ctx, st, assignmentId) {
+  async function sendOpTaskCard(ctx, st, assignmentId, opts = {}) {
     const r = await pool.query(
       `
         SELECT
@@ -2579,7 +2579,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       ],
     ]);
 
-    await deliver(ctx, { text, extra: kb }, { edit: false });
+    await deliver(ctx, { text, extra: kb }, { edit: !!opts.edit });
   }
 
   bot.hears(/^\/t(\d+)(?:@[\w_]+)?$/, async (ctx) => {
@@ -2631,7 +2631,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       const assignmentId = Number(ctx.match[1]);
       if (!assignmentId || !st?.pointId || !st?.dateISO) return;
 
-      await sendOpTaskCard(ctx, st, assignmentId);
+      await sendOpTaskCard(ctx, st, assignmentId, { edit: true });
     } catch (e) {
       logError("admin_shift_tasks_open", e);
     }
@@ -5111,7 +5111,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
-      await renderScheduledList(ctx, user);
+      await renderScheduledListForDate(ctx, user);
     } catch (e) {
       logError("admin_shift_tasks_sched_root", e);
     }
