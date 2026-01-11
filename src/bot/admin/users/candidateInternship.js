@@ -584,6 +584,19 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
 
       const keyboardRows = [];
 
+      // Берём флаг доступа в ЛК у самого стажёра (а не у админа),
+      // чтобы кнопка «⬅️ В меню» показывалась корректно.
+      let linkedLkEnabled = false;
+      if (linkedUserId) {
+        try {
+          const lkRes = await pool.query(
+            "SELECT lk_enabled FROM users WHERE id = $1",
+            [linkedUserId]
+          );
+          linkedLkEnabled = lkRes.rows[0]?.lk_enabled === true;
+        } catch (e) {}
+      }
+
       if (c?.mentor_telegram_id) {
         const firstName =
           (mentorName || "Telegram").split(" ")[0] || "Telegram";
@@ -608,7 +621,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
       ]);
 
       // В меню — показываем только если доступ в ЛК открыт
-      if (user.lk_enabled === true) {
+      if (linkedLkEnabled) {
         keyboardRows.push([
           {
             text: "⬅️ В меню",
@@ -1256,13 +1269,25 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // Эти поля нужны для отображения блока "О стажировке" и для списков наставника,
       // пока стажировка идёт.
 
-      // 5) OUTBOX (academy): уведомить наставника "обучение началось" + кнопка "открыть курс"
-      // Академический worker слушает destination='academy' и event_type='internship_started'
-      await pushOutboxEvent("academy", "internship_started", {
-        mentor_telegram_id: Number(ctx.from.id),
-        intern_user_id: Number(internUserId),
-        intern_name: internName || "стажёр",
-      });
+
+   // 5) OUTBOX (academy): если курс ещё НЕ пройден — уведомляем наставника и даём кнопку «Начать курс»
+// Академический worker слушает destination='academy' и event_type='internship_started'
+const trRes = await pool.query(
+  "SELECT training_completed_at FROM users WHERE id = $1",
+  [internUserId]
+);
+const trainingCompletedAt = trRes.rows[0]?.training_completed_at || null;
+
+if (!trainingCompletedAt) {
+  await pushOutboxEvent("academy", "internship_started", {
+    mentor_telegram_id: Number(ctx.from.id),
+    intern_user_id: Number(internUserId),
+    intern_name: internName || "стажёр",
+    session_id: sessionId,
+    day_number: nextDay,
+  });
+}
+
 
       // 6) уведомим стажёра (на всякий случай, у тебя ранее могло уйти другое уведомление)
       const text =

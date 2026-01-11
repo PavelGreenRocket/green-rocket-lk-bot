@@ -101,6 +101,39 @@ function escHtml(s) {
 async function ensureTodayInstances(user, shift, today) {
   const todayObj = new Date(today + "T00:00:00");
 
+  // schedule move overrides (skip/include for this date)
+  let ovSkip = new Set();
+  let ovInclude = new Set();
+  try {
+    if (shift?.trade_point_id) {
+      // ensure table exists (safe)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS task_schedule_overrides (
+          assignment_id bigint NOT NULL REFERENCES task_assignments(id) ON DELETE CASCADE,
+          trade_point_id bigint NOT NULL REFERENCES trade_points(id) ON DELETE CASCADE,
+          from_date date NOT NULL,
+          to_date date NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (assignment_id, trade_point_id, from_date)
+        )
+      `);
+
+      const ov = await pool.query(
+        `SELECT assignment_id, from_date::text AS from_date, to_date::text AS to_date
+         FROM task_schedule_overrides
+         WHERE trade_point_id = $1 AND (from_date = $2::date OR to_date = $2::date)`,
+        [Number(shift.trade_point_id), today]
+      );
+
+      for (const row of ov.rows) {
+        const aid = Number(row.assignment_id);
+        if (!aid) continue;
+        if (row.from_date === today) ovSkip.add(aid);
+        if (row.to_date === today) ovInclude.add(aid);
+      }
+    }
+  } catch (_) {}
+
   // targets for individual
   const tgtRes = await pool.query(
     `SELECT assignment_id FROM task_assignment_targets WHERE user_id = $1`,
@@ -146,8 +179,17 @@ async function ensureTodayInstances(user, shift, today) {
       if (Number(row.trade_point_id) !== Number(shift.trade_point_id)) continue;
     }
 
-    // schedule filter
-    if (!scheduleMatchesToday(row, today, todayObj)) continue;
+    // schedule filter + overrides
+    if (shift?.trade_point_id) {
+      if (ovSkip.has(assignmentId)) continue;
+      if (
+        !ovInclude.has(assignmentId) &&
+        !scheduleMatchesToday(row, today, todayObj)
+      )
+        continue;
+    } else {
+      if (!scheduleMatchesToday(row, today, todayObj)) continue;
+    }
 
     // create instance if not exists
     await pool.query(
@@ -322,6 +364,97 @@ async function markDoneWithAnswer(taskInstanceId, payload) {
   );
 }
 
+async function notifyResponsiblesOnCompletion(bot, taskInstanceId) {
+  try {
+    // gather context
+    const r = await pool.query(
+      `
+      SELECT
+        ti.id AS task_instance_id,
+        ti.assignment_id,
+        ti.trade_point_id,
+        tp.title AS point_title,
+        tt.title AS task_title
+      FROM task_instances ti
+      JOIN task_assignments a ON a.id = ti.assignment_id
+      JOIN task_templates tt ON tt.id = a.template_id
+      LEFT JOIN trade_points tp ON tp.id = ti.trade_point_id
+      WHERE ti.id = $1
+      LIMIT 1
+      `,
+      [taskInstanceId]
+    );
+    const row = r.rows[0];
+    if (!row) return;
+
+    // respect completion notification setting (fallback: true)
+    let completionEnabled = true;
+    try {
+      const s = await pool.query(
+        `
+        SELECT COALESCE(completion_notifications_enabled, TRUE) AS enabled
+        FROM task_assignment_responsible_settings
+        WHERE assignment_id = $1
+        LIMIT 1
+        `,
+        [row.assignment_id]
+      );
+      completionEnabled = s.rows[0]?.enabled !== false;
+    } catch (e) {
+      completionEnabled = true;
+    }
+    if (!completionEnabled) return;
+
+    const users = await pool.query(
+      `
+      SELECT u.telegram_id
+      FROM task_assignment_responsibles ar
+      JOIN users u ON u.id = ar.user_id
+      WHERE ar.assignment_id = $1 AND u.telegram_id IS NOT NULL
+      `,
+      [row.assignment_id]
+    );
+    if (!users.rows.length) return;
+
+    const ans = await pool.query(
+      `
+      SELECT answer_text, answer_number, file_id, file_type
+      FROM task_instance_answers
+      WHERE task_instance_id = $1
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+      [taskInstanceId]
+    );
+    const a = ans.rows[0] || {};
+
+    let caption = `✅ Задача выполнена\n\n`;
+    caption += `Задача: ${row.task_title}\n`;
+    if (row.point_title) caption += `Точка: ${row.point_title}\n`;
+    if (a.answer_text) caption += `\nКомментарий: ${a.answer_text}`;
+    if (typeof a.answer_number === "number")
+      caption += `\nОтвет: ${a.answer_number}`;
+
+    for (const u of users.rows) {
+      const chatId = Number(u.telegram_id);
+      if (!chatId) continue;
+      try {
+        if (a.file_id && a.file_type === "photo") {
+          await bot.telegram.sendPhoto(chatId, a.file_id, { caption });
+        } else if (a.file_id && a.file_type === "video") {
+          await bot.telegram.sendVideo(chatId, a.file_id, { caption });
+        } else {
+          await bot.telegram.sendMessage(chatId, caption);
+        }
+      } catch (e) {
+        // ignore per-user send errors
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
 function registerTodayTasks(bot, ensureUser, logError) {
   // entry from menu
   bot.action("lk_tasks_today", async (ctx) => {
@@ -472,11 +605,13 @@ function registerTodayTasks(bot, ensureUser, logError) {
           answerType: "number",
           number: num,
         });
+        await notifyResponsiblesOnCompletion(bot, st.taskInstanceId);
       } else if (st.answerType === "text") {
         await markDoneWithAnswer(st.taskInstanceId, {
           answerType: "text",
           text: txt,
         });
+        await notifyResponsiblesOnCompletion(bot, st.taskInstanceId);
       } else {
         return next();
       }
@@ -511,6 +646,8 @@ function registerTodayTasks(bot, ensureUser, logError) {
         fileId: best.file_id,
       });
 
+      await notifyResponsiblesOnCompletion(bot, st.taskInstanceId);
+
       clearTaskState(ctx.from.id);
       await ctx.reply("✅ Фото принято!");
       await showTodayTasks(ctx, user);
@@ -538,6 +675,8 @@ function registerTodayTasks(bot, ensureUser, logError) {
         answerType: "video",
         fileId: v.file_id,
       });
+
+      await notifyResponsiblesOnCompletion(bot, st.taskInstanceId);
 
       clearTaskState(ctx.from.id);
       await ctx.reply("✅ Видео принято!");

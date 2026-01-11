@@ -38,6 +38,98 @@ function parseNumber(text) {
   return isFiniteNumber(n) ? n : null;
 }
 
+async function notifyResponsiblesOnNotCompleted(bot, shiftId) {
+  try {
+    const s = await pool.query(
+      `
+      SELECT sh.id, sh.trade_point_id, (sh.started_at::date) AS d, tp.title AS point_title
+      FROM shifts sh
+      LEFT JOIN trade_points tp ON tp.id = sh.trade_point_id
+      WHERE sh.id = $1
+      LIMIT 1
+      `,
+      [shiftId]
+    );
+    const shift = s.rows[0];
+    if (!shift) return;
+
+    const openTasks = await pool.query(
+      `
+      SELECT
+        ti.id AS task_instance_id,
+        ti.assignment_id,
+        tt.title AS task_title
+      FROM task_instances ti
+      JOIN task_assignments a ON a.id = ti.assignment_id
+      JOIN task_templates tt ON tt.id = a.template_id
+      WHERE ti.trade_point_id = $1
+        AND ti.for_date = $2
+        AND ti.status <> 'done'
+      `,
+      [shift.trade_point_id, shift.d]
+    );
+    if (!openTasks.rows.length) return;
+
+    // aggregate per responsible telegram_id
+    const buckets = new Map(); // tgId -> titles[]
+    for (const t of openTasks.rows) {
+      // respect completion notification setting (fallback: true)
+      let enabled = true;
+      try {
+        const rs = await pool.query(
+          `
+          SELECT COALESCE(completion_notifications_enabled, TRUE) AS enabled
+          FROM task_assignment_responsible_settings
+          WHERE assignment_id = $1
+          LIMIT 1
+          `,
+          [t.assignment_id]
+        );
+        enabled = rs.rows[0]?.enabled !== false;
+      } catch (e) {
+        enabled = true;
+      }
+      if (!enabled) continue;
+
+      const resp = await pool.query(
+        `
+        SELECT u.telegram_id
+        FROM task_assignment_responsibles ar
+        JOIN users u ON u.id = ar.user_id
+        WHERE ar.assignment_id = $1 AND u.telegram_id IS NOT NULL
+        `,
+        [t.assignment_id]
+      );
+      for (const r of resp.rows) {
+        const tgId = Number(r.telegram_id);
+        if (!tgId) continue;
+        if (!buckets.has(tgId)) buckets.set(tgId, []);
+        buckets.get(tgId).push(t.task_title);
+      }
+    }
+
+    if (!buckets.size) return;
+
+    const dateStr = String(shift.d);
+    const pointLine = shift.point_title ? `Точка: ${shift.point_title}\n` : "";
+
+    for (const [tgId, titles] of buckets.entries()) {
+      const uniq = Array.from(new Set(titles));
+      let msg = `❌ Задачи не выполнены (смена закрыта)\n\n`;
+      msg += pointLine;
+      msg += `Дата: ${dateStr}\n\n`;
+      msg += uniq.map((x, i) => `${i + 1}. ${x}`).join("\n");
+      try {
+        await bot.telegram.sendMessage(tgId, msg);
+      } catch (e) {
+        // ignore
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
 async function getActiveShift(userId) {
   const res = await pool.query(
     `
@@ -1594,6 +1686,9 @@ WHERE id = $1
       } catch (e) {
         logError("uncompleted_tasks_alert", e);
       }
+
+      // 1.2) отдельные "Ответственные задачи" (из задач по расписанию) — просто уведомляем их о невыполнении
+      await notifyResponsiblesOnNotCompleted(bot, Number(st.shiftId));
 
       // ==== если это закрытие по передаче смены — завершаем transfer и уведомляем B
       try {

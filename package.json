@@ -4,7 +4,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "db:schema": "pg_dump -h 38.180.15.42 -p 5432 -U postgres -d barista_academy --schema-only --no-owner --no-privileges > schema.sql"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

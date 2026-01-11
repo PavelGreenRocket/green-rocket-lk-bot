@@ -6,6 +6,69 @@ const { deliver } = require("../../utils/renderHelpers");
 // локальное состояние (не FSM в БД, а in-memory как в других админ-модулях)
 const stByTg = new Map();
 
+// -----------------------------
+// SCHEMA / OVERRIDES (idempotent)
+// -----------------------------
+let __schemaEnsured = false;
+async function ensureShiftTasksSchema() {
+  if (__schemaEnsured) return;
+  __schemaEnsured = true;
+
+  // completion notifications toggle for responsibles
+  try {
+    await pool.query(`
+      ALTER TABLE task_assignment_responsible_settings
+      ADD COLUMN IF NOT EXISTS completion_notifications_enabled boolean DEFAULT TRUE
+    `);
+    await pool.query(`
+      UPDATE task_assignment_responsible_settings
+      SET completion_notifications_enabled = TRUE
+      WHERE completion_notifications_enabled IS NULL
+    `);
+  } catch (_) {}
+
+  // per-day overrides for scheduled tasks (move one occurrence without changing schedule)
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS task_schedule_overrides (
+        assignment_id bigint NOT NULL REFERENCES task_assignments(id) ON DELETE CASCADE,
+        trade_point_id bigint NOT NULL REFERENCES trade_points(id) ON DELETE CASCADE,
+        from_date date NOT NULL,
+        to_date date NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (assignment_id, trade_point_id, from_date)
+      )
+    `);
+  } catch (_) {}
+}
+
+async function loadOverridesForDate(tradePointId, dateISO) {
+  await ensureShiftTasksSchema();
+  try {
+    const r = await pool.query(
+      `
+      SELECT assignment_id, from_date::text AS from_date, to_date::text AS to_date
+      FROM task_schedule_overrides
+      WHERE trade_point_id = $1
+        AND (from_date = $2::date OR to_date = $2::date)
+      `,
+      [tradePointId, dateISO]
+    );
+
+    const skip = new Set();
+    const include = new Set();
+    for (const row of r.rows) {
+      const aid = Number(row.assignment_id);
+      if (!aid) continue;
+      if (row.from_date === dateISO) skip.add(aid);
+      if (row.to_date === dateISO) include.add(aid);
+    }
+    return { skip, include };
+  } catch (_) {
+    return { skip: new Set(), include: new Set() };
+  }
+}
+
 const WD = [
   { key: "mon", label: "Пн", bit: 1 << 0 },
   { key: "tue", label: "Вт", bit: 1 << 1 },
@@ -29,7 +92,8 @@ function fmtRuDate(iso) {
   const d = new Date(iso + "T00:00:00");
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}`;
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}.${mm}.${yy}`;
 }
 
 function parseAnyDateToISO(input) {
@@ -130,7 +194,8 @@ function fmtShortDate(v) {
   const d = v instanceof Date ? v : new Date(v);
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}`;
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}.${mm}.${yy}`;
 }
 
 function fmtShortDateYY(v) {
@@ -348,13 +413,18 @@ async function loadAssignmentsForPoint(pointId) {
       s.time_mode,
       s.deadline_time,
       t.title,
-      t.answer_type
+      t.answer_type,
+      COALESCE(tg.target_count, 0) AS target_count
     FROM task_assignments a
     JOIN task_schedules s ON s.assignment_id = a.id
     JOIN task_templates t ON t.id = a.template_id
     LEFT JOIN users u ON u.id = a.created_by_user_id
-   WHERE a.task_type = 'global'
-
+    LEFT JOIN (
+      SELECT assignment_id, COUNT(*)::int AS target_count
+      FROM task_assignment_targets
+      GROUP BY assignment_id
+    ) tg ON tg.assignment_id = a.id
+    WHERE a.task_type IN ('global','individual')
       AND (
         a.point_scope = 'all_points'
         OR (a.point_scope = 'one_point' AND a.trade_point_id = $1)
@@ -476,9 +546,6 @@ async function buildDatePicker(dateISO) {
   }
 
   rows.push([
-    Markup.button.callback("✍️ Ввести дату", "admin_shift_tasks_date_input"),
-  ]);
-  rows.push([
     Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_back"),
   ]);
 
@@ -533,6 +600,11 @@ function buildTasksText(
       isDone && doneInfo.done_by_name
         ? ` (${escHtml(doneInfo.done_by_name)})`
         : "";
+    const selected =
+      !isDone && r.task_type === "individual" && Number(r.target_count) > 0
+        ? ` 👤(${Number(r.target_count)})`
+        : "";
+
     const op = ` /t${n}`;
 
     const printableTitle = selectedSet.has(Number(r.assignment_id))
@@ -542,7 +614,7 @@ function buildTasksText(
     if (mode === "delete") {
       text += `${n}. ${mark} ${printableTitle}\n`;
     } else {
-      text += `${statusMark} ${mark} ${printableTitle}${who}${op}\n`;
+      text += `${statusMark} ${mark} ${printableTitle}${selected}${who}${op}\n`;
     }
   });
 
@@ -562,26 +634,41 @@ function trunc(s, n = 28) {
 function buildMainKeyboard(st, items) {
   const rows = [];
 
+  // --- дата-бар: ← DD MM YY →
+  const d = new Date(st.dateISO + "T00:00:00");
+  const dd = String(d.getDate()).padStart(2, "0") + ".";
+  const mm = String(d.getMonth() + 1).padStart(2, "0") + ".";
+  const yy = String(d.getFullYear()).slice(-2);
+
   rows.push([
-    Markup.button.callback(
-      `➕ Добавить задачу на ${fmtRuDate(st.dateISO)}`,
-      "admin_shift_tasks_add"
-    ),
-  ]);
-  rows.push([
-    Markup.button.callback(
-      "📅 Выбрать другую дату",
-      "admin_shift_tasks_pick_date"
-    ),
-  ]);
-  rows.push([
-    Markup.button.callback("🗑 Удалить задачу", "admin_shift_tasks_delete"),
+    Markup.button.callback("←", "admin_shift_tasks_date_prev"),
+    Markup.button.callback(dd, "admin_shift_tasks_pick_day"),
+    Markup.button.callback(mm, "admin_shift_tasks_pick_month"),
+    Markup.button.callback(yy, "admin_shift_tasks_pick_year"),
+    Markup.button.callback("→", "admin_shift_tasks_date_next"),
   ]);
 
-  // ⚙️ теперь не фильтр даты, а отдельный режим управления расписанием
+  // если выбранная дата < сегодня (в таймзоне БД) — скрываем add/delete
+  // важно: сравниваем как YYYY-MM-DD строки (лексикографически работает)
+  // todayISO кладём в st при входе/выборе точки через dbTodayISO()
+  const todayISO = st.todayISO || null;
+  const isPast = todayISO ? st.dateISO < todayISO : false;
+
+  if (!isPast) {
+    rows.push([
+      Markup.button.callback(
+        `➕ Добавить задачу на ${fmtRuDate(st.dateISO)}`,
+        "admin_shift_tasks_add"
+      ),
+    ]);
+    rows.push([
+      Markup.button.callback("🗑 Удалить задачу", "admin_shift_tasks_delete"),
+    ]);
+  }
+
   rows.push([
     Markup.button.callback(
-      "⚙️ Задачи по расписанию",
+      "⏰ Задачи по расписанию",
       "admin_shift_tasks_sched_root"
     ),
   ]);
@@ -622,8 +709,10 @@ function buildAddKeyboard(st) {
   const timeLabel =
     a.timeMode === "deadline" ? `до ${a.deadlineTime || "??:??"}` : "нет";
 
-  const whoLabel = a.forUserId
-    ? `👤 Для кого? (${a.forUserName || "выбран"})`
+  const targetIds = Array.isArray(a.targetUserIds) ? a.targetUserIds : [];
+
+  const whoLabel = targetIds.length
+    ? `👤 Для кого? (выбрано: ${targetIds.length})`
     : "👥 Для кого? (все)";
 
   const rows = [
@@ -667,7 +756,7 @@ async function renderScheduledList(ctx, user) {
   const all = await loadAssignmentsForPoint(st.pointId);
   const scheduled = all.filter((r) => r.schedule_type !== "single");
 
-  let text = `⚙️ <b>Задачи по расписанию</b>\n\n`;
+  let text = `⏰ <b>Задачи по расписанию</b>\n\n`;
   text += `• Точка: <b>${escHtml(point.title)}</b>\n\n`;
 
   if (!scheduled.length) {
@@ -678,8 +767,10 @@ async function renderScheduledList(ctx, user) {
       const n = idx + 1;
       const creator = r.creator_name ? ` (${r.creator_name})` : "";
       const on = r.is_active ? "" : " (выключена)";
-      text += `${n}. ⏰ ${escHtml(r.title)}${escHtml(creator)}${on}\n`;
+      text += `${n}. ⏰ ${escHtml(r.title)}${on}\n`;
     });
+    text += "__________________\n";
+    text += "<i>Нажмите на нужный номер, для просмотра деталей</i>\n";
   }
 
   const rows = [];
@@ -955,8 +1046,15 @@ async function renderPointScreen(ctx, adminUser) {
   // в основном экране показываем только активные (удалённые/выключенные скрываем)
   const allActive = all.filter((r) => r.is_active === true);
 
-  // матчим на дату
-  const matched = allActive.filter((r) => scheduleMatchesDate(r, st.dateISO));
+  // матчим на дату (+ overrides для переносов расписанных задач)
+  const ov = await loadOverridesForDate(st.pointId, st.dateISO);
+
+  const matched = allActive.filter((r) => {
+    const aid = Number(r.assignment_id);
+    if (ov.skip.has(aid)) return false;
+    if (ov.include.has(aid)) return true;
+    return scheduleMatchesDate(r, st.dateISO);
+  });
 
   // сортировка: сначала разовые, потом расписание
   const singles = matched.filter((r) => r.schedule_type === "single");
@@ -971,6 +1069,7 @@ async function renderPointScreen(ctx, adminUser) {
   setSt(ctx.from.id, {
     opAssignments: items.map((x) => Number(x.assignment_id)),
   });
+
   const assignmentIds = items.map((x) => Number(x.assignment_id));
   const doneMap = await loadDoneInfoMap(st.pointId, st.dateISO, assignmentIds);
 
@@ -1020,22 +1119,31 @@ async function renderPickPoint(ctx) {
 async function renderScheduledCard(ctx, user, assignmentId) {
   const r = await pool.query(
     `
-    SELECT
+        SELECT
       a.id AS assignment_id,
+      a.template_id,
+      a.task_type,
+      a.trade_point_id,
       a.is_active,
       a.created_by_user_id,
       u.full_name AS creator_name,
       u.username AS creator_username,
-u.work_phone AS creator_phone,
+      u.work_phone AS creator_phone,
+
+      -- counts:
+      (SELECT COUNT(*)::int FROM task_assignment_targets tat WHERE tat.assignment_id = a.id) AS target_cnt,
+      (SELECT COUNT(*)::int FROM task_assignment_responsibles tar WHERE tar.assignment_id = a.id) AS resp_cnt,
+
       s.schedule_type,
       s.start_date,
       s.weekdays_mask,
       s.every_x_days,
       s.time_mode,
       s.deadline_time,
-        s.single_date,
+      s.single_date,
       t.title,
       t.answer_type
+
     FROM task_assignments a
     JOIN task_schedules s ON s.assignment_id = a.id
     JOIN task_templates t ON t.id = a.template_id
@@ -1055,7 +1163,7 @@ u.work_phone AS creator_phone,
   const creator = row.creator_name ? ` (${row.creator_name})` : "";
   const status = row.is_active ? "включена ✅" : "выключена ⚪️";
 
-  let text = `⚙️ <b>Задача по расписанию</b>\n\n`;
+  let text = `⏰  <b>Задача по расписанию</b>\n\n`;
   text += `Задача: <b>${escHtml(row.title)}</b>\n`;
 
   // создатель отдельной строкой
@@ -1063,19 +1171,47 @@ u.work_phone AS creator_phone,
   if (row.creator_name) creatorParts.push(escHtml(row.creator_name));
   if (row.creator_username)
     creatorParts.push(`@${escHtml(row.creator_username)}`);
-  if (row.creator_phone) creatorParts.push(escHtml(row.creator_phone));
   text += `Создал задачу: <b>${
     creatorParts.length ? creatorParts.join(" / ") : "—"
   }</b>\n`;
 
   text += `Статус: <b>${status}</b>\n`;
-  text += `Периодичность: <b>${escHtml(scheduleLabel(row))}</b>\n`;
-
+  text += `Периодичность: <b>${scheduleLabel(row) || "—"}</b>\n`;
   // следующий день выполнения
   const nextD = nextScheduleDate(row);
   text += `Следующий день выполнения: <b>${
     nextD ? fmtShortDateYY(nextD) : "—"
   }</b>\n`;
+
+  const targetCnt = Number(row.target_cnt || 0);
+  const respCnt = Number(row.resp_cnt || 0);
+
+  const whoBtnLabel = targetCnt
+    ? `👤 Для кого? (выбрано ${targetCnt})`
+    : "👥 Для кого? (все)";
+
+  const respBtnLabel = respCnt
+    ? `🤵‍♂️ Ответственные (выбрано ${respCnt})`
+    : "🤵‍♂️ Ответственные (не назначены)";
+
+  // точки, где есть эта задача (по template_id)
+  let pointsBtnLabel = "📍 Точки";
+  try {
+    const pr = await pool.query(
+      `
+    SELECT p.id, p.title
+    FROM task_assignments a
+    JOIN trade_points p ON p.id = a.trade_point_id
+    WHERE a.template_id = $1 AND a.task_type = $2 AND a.is_active = TRUE
+    ORDER BY p.title ASC
+    `,
+      [row.template_id, row.task_type]
+    );
+    const pts = pr.rows || [];
+    if (pts.length === 1) pointsBtnLabel = `📍 Точки (${pts[0].title})`;
+    else if (pts.length > 1)
+      pointsBtnLabel = `📍 Точки (выбрано ${pts.length})`;
+  } catch (_) {}
 
   const kb = Markup.inlineKeyboard([
     [
@@ -1086,7 +1222,21 @@ u.work_phone AS creator_phone,
     ],
     [
       Markup.button.callback(
-        "👥/👤 Пользователи задачи",
+        respBtnLabel,
+        `admin_shift_tasks_sched_resp_${row.assignment_id}`
+      ),
+    ],
+
+    [
+      Markup.button.callback(
+        pointsBtnLabel,
+        `admin_shift_tasks_sched_points_${row.assignment_id}`
+      ),
+    ],
+
+    [
+      Markup.button.callback(
+        whoBtnLabel,
         `admin_shift_tasks_sched_users_${row.assignment_id}`
       ),
     ],
@@ -1417,6 +1567,407 @@ async function renderCreateUsersScreenB(ctx, page, query) {
     createUsers: { page: p },
     createUsersQuery: q,
   });
+}
+
+// -----------------------------
+// SCHEDULE RESPONSIBLES (helpers)
+// -----------------------------
+async function loadSchedResponsibles(assignmentId) {
+  const r = await pool.query(
+    `
+    SELECT u.id, u.full_name, u.username, u.work_phone
+    FROM task_assignment_responsibles ar
+    JOIN users u ON u.id = ar.user_id
+    WHERE ar.assignment_id = $1
+    ORDER BY u.full_name NULLS LAST, u.id ASC
+    `,
+    [assignmentId]
+  );
+  return r.rows;
+}
+
+async function loadSchedRespSettings(assignmentId) {
+  await ensureShiftTasksSchema();
+
+  const baseDefault = {
+    assignment_id: assignmentId,
+    enabled: false,
+    days_before: 0,
+    completion_enabled: true, // по умолчанию включено
+  };
+
+  try {
+    const r = await pool.query(
+      `
+      SELECT
+        assignment_id,
+        notifications_enabled AS enabled,
+        days_before,
+        COALESCE(completion_notifications_enabled, TRUE) AS completion_enabled
+      FROM task_assignment_responsible_settings
+      WHERE assignment_id = $1
+      LIMIT 1
+      `,
+      [assignmentId]
+    );
+    return r.rows[0] || baseDefault;
+  } catch (e) {
+    // fallback если колонки нет
+    const r = await pool.query(
+      `
+      SELECT
+        assignment_id,
+        notifications_enabled AS enabled,
+        days_before
+      FROM task_assignment_responsible_settings
+      WHERE assignment_id = $1
+      LIMIT 1
+      `,
+      [assignmentId]
+    );
+    return r.rows[0] ? { ...r.rows[0], completion_enabled: true } : baseDefault;
+  }
+}
+
+async function upsertSchedRespSettings(assignmentId, patch) {
+  await ensureShiftTasksSchema();
+
+  const enabled =
+    typeof patch.enabled === "boolean" ? patch.enabled : undefined;
+  const daysBefore = Number.isInteger(patch.days_before)
+    ? patch.days_before
+    : undefined;
+  const completionEnabled =
+    typeof patch.completion_enabled === "boolean"
+      ? patch.completion_enabled
+      : undefined;
+
+  const cur = await loadSchedRespSettings(assignmentId);
+
+  const nextEnabled = enabled === undefined ? cur.enabled : enabled;
+  const nextDays = daysBefore === undefined ? cur.days_before : daysBefore;
+  const nextCompletion =
+    completionEnabled === undefined
+      ? typeof cur.completion_enabled === "boolean"
+        ? cur.completion_enabled
+        : true
+      : completionEnabled;
+
+  // Пишем с completion_notifications_enabled; если колонки вдруг нет — fallback.
+  try {
+    await pool.query(
+      `
+      INSERT INTO task_assignment_responsible_settings
+        (assignment_id, notifications_enabled, days_before, completion_notifications_enabled, updated_at)
+      VALUES ($1, $2, $3, $4, now())
+      ON CONFLICT (assignment_id) DO UPDATE
+        SET notifications_enabled = EXCLUDED.notifications_enabled,
+            days_before = EXCLUDED.days_before,
+            completion_notifications_enabled = EXCLUDED.completion_notifications_enabled,
+            updated_at = now()
+      `,
+      [assignmentId, nextEnabled, nextDays, nextCompletion]
+    );
+  } catch (_) {
+    await pool.query(
+      `
+      INSERT INTO task_assignment_responsible_settings
+        (assignment_id, notifications_enabled, days_before, updated_at)
+      VALUES ($1, $2, $3, now())
+      ON CONFLICT (assignment_id) DO UPDATE
+        SET notifications_enabled = EXCLUDED.notifications_enabled,
+            days_before = EXCLUDED.days_before,
+            updated_at = now()
+      `,
+      [assignmentId, nextEnabled, nextDays]
+    );
+  }
+
+  return {
+    assignment_id: assignmentId,
+    enabled: nextEnabled,
+    days_before: nextDays,
+    completion_enabled: nextCompletion,
+  };
+}
+
+async function loadAssignmentTitle(assignmentId) {
+  const r = await pool.query(
+    `
+    SELECT a.id, t.title
+    FROM task_assignments a
+    JOIN task_templates t ON t.id = a.template_id
+    WHERE a.id = $1
+    LIMIT 1
+    `,
+    [assignmentId]
+  );
+  return r.rows[0] || null;
+}
+
+async function searchUsersPaged(q, page, limit = 10) {
+  const offset = page * limit;
+
+  // если пришло @username
+  const qq = (q || "").trim();
+  const like = `%${qq.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+
+  const r = await pool.query(
+    `
+    SELECT id, full_name, username, work_phone
+    FROM users
+    WHERE
+      ($1 = '' OR
+        (username IS NOT NULL AND username ILIKE $2) OR
+        (work_phone IS NOT NULL AND work_phone ILIKE $2) OR
+        (full_name IS NOT NULL AND full_name ILIKE $2)
+      )
+    ORDER BY full_name NULLS LAST, id ASC
+    LIMIT $3 OFFSET $4
+    `,
+    [qq, like, limit, offset]
+  );
+
+  // всего (для пагинации)
+  const c = await pool.query(
+    `
+    SELECT COUNT(*)::int AS cnt
+    FROM users
+    WHERE
+      ($1 = '' OR
+        (username IS NOT NULL AND username ILIKE $2) OR
+        (work_phone IS NOT NULL AND work_phone ILIKE $2) OR
+        (full_name IS NOT NULL AND full_name ILIKE $2)
+      )
+    `,
+    [qq, like]
+  );
+
+  return { rows: r.rows, total: c.rows[0]?.cnt || 0 };
+}
+
+function fmtUserLine(u) {
+  const name = u.full_name || `id:${u.id}`;
+  const uname = u.username ? `@${u.username}` : "";
+  const phone = u.work_phone ? u.work_phone : "";
+  const parts = [name, uname, phone].filter(Boolean);
+  return parts.join(" / ");
+}
+
+// -----------------------------
+// SCHEDULE RESPONSIBLES (screens)
+// -----------------------------
+async function renderSchedRespScreen(ctx, user, assignmentId) {
+  const a = await loadAssignmentTitle(assignmentId);
+  if (!a) {
+    await ctx.answerCbQuery("Не найдено", { show_alert: true }).catch(() => {});
+    return;
+  }
+
+  const resp = await loadSchedResponsibles(assignmentId);
+  const settings = await loadSchedRespSettings(assignmentId);
+
+  let text = `🤵‍♂️ <b>Ответственные задачи</b>\n\n`;
+  text += `Задача: <b>${escHtml(a.title)}</b>\n\n`;
+
+  if (!resp.length) {
+    text += `Сейчас ответственных нет.\n`;
+    text += `\nℹ️ Если ответственных нет — уведомления включить нельзя.\n`;
+  } else {
+    text += `Ответственные (нажмите чтобы удалить):\n`;
+    resp.forEach((u, i) => {
+      text += `✅ ${i + 1}. ${escHtml(fmtUserLine(u))}\n`;
+    });
+  }
+
+  const notifLine = settings.enabled
+    ? `🔔 Уведомления: <b>включены</b>\n`
+    : `🔕 Уведомления: <b>выключены</b>\n`;
+  const daysLine = settings.enabled
+    ? `⏳ За сколько дней напоминать: <b>${settings.days_before}</b>\n`
+    : "";
+
+  text += `\n${notifLine}${daysLine}`;
+
+  const rows = [];
+
+  // кнопки удаления ответственных (каждый — отдельная кнопка)
+  if (resp.length) {
+    resp.forEach((u, i) => {
+      rows.push([
+        Markup.button.callback(
+          `✅ ${i + 1}. ${u.full_name || u.username || u.id}`,
+          `admin_shift_tasks_sched_resp_rm_${assignmentId}_${u.id}`
+        ),
+      ]);
+    });
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "➕ Добавить ответственного",
+      `admin_shift_tasks_sched_resp_add_${assignmentId}_0`
+    ),
+  ]);
+
+  // toggle напоминаний
+  if (settings.enabled) {
+    rows.push([
+      Markup.button.callback(
+        "🔕 Выкл. напоминания",
+        `admin_shift_tasks_sched_resp_notif_off_${assignmentId}`
+      ),
+    ]);
+  } else {
+    rows.push([
+      Markup.button.callback(
+        "🔔 Вкл. напоминания",
+        `admin_shift_tasks_sched_resp_notif_on_${assignmentId}`
+      ),
+    ]);
+  }
+
+  // toggle оповещений о выполнении
+  if (settings.completion_enabled) {
+    rows.push([
+      Markup.button.callback(
+        "🔕 Выкл. оповещение о выполнении",
+        `admin_shift_tasks_sched_resp_completion_off_${assignmentId}`
+      ),
+    ]);
+  } else {
+    rows.push([
+      Markup.button.callback(
+        "🔔 Вкл. оповещение о выполнении",
+        `admin_shift_tasks_sched_resp_completion_on_${assignmentId}`
+      ),
+    ]);
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_shift_tasks_sched_card_${assignmentId}`
+    ),
+  ]);
+
+  setSt(ctx.from.id, {
+    mode: "sched_resp",
+    schedResp: { assignmentId, page: 0, q: "" },
+  });
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
+}
+
+async function renderSchedRespAddScreen(ctx, user, assignmentId, page, q) {
+  const a = await loadAssignmentTitle(assignmentId);
+  if (!a) {
+    await ctx.answerCbQuery("Не найдено", { show_alert: true }).catch(() => {});
+    return;
+  }
+
+  const selected = await loadSchedResponsibles(assignmentId);
+  const selectedSet = new Set(selected.map((x) => Number(x.id)));
+
+  const { rows, total } = await searchUsersPaged(q || "", page || 0, 10);
+  const pages = Math.max(1, Math.ceil(total / 10));
+
+  let text = `👤 <b>Добавить ответственного</b>\n\n`;
+  text += `Задача: <b>${escHtml(a.title)}</b>\n\n`;
+  text += `Для быстрого поиска введите @username, телефон или часть имени.\n`;
+  text += `Можно также переслать сообщение пользователя.\n\n`;
+  text += `Страница: <b>${(page || 0) + 1}/${pages}</b>\n`;
+
+  const kb = [];
+
+  // список пользователей (✅ если уже выбран)
+  rows.forEach((u) => {
+    const isSel = selectedSet.has(Number(u.id));
+    kb.push([
+      Markup.button.callback(
+        `${isSel ? "✅ " : ""}${u.full_name || u.username || u.id}`,
+        `admin_shift_tasks_sched_resp_pick_${assignmentId}_${u.id}_${page || 0}`
+      ),
+    ]);
+  });
+
+  // пагинация
+  const nav = [];
+  if ((page || 0) > 0) {
+    nav.push(
+      Markup.button.callback(
+        "⬅️",
+        `admin_shift_tasks_sched_resp_add_${assignmentId}_${(page || 0) - 1}`
+      )
+    );
+  }
+  if ((page || 0) < pages - 1) {
+    nav.push(
+      Markup.button.callback(
+        "➡️",
+        `admin_shift_tasks_sched_resp_add_${assignmentId}_${(page || 0) + 1}`
+      )
+    );
+  }
+  if (nav.length) kb.push(nav);
+
+  kb.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `admin_shift_tasks_sched_resp_${assignmentId}`
+    ),
+  ]);
+
+  setSt(ctx.from.id, {
+    mode: "sched_resp_add",
+    schedResp: { assignmentId, page: page || 0, q: q || "" },
+  });
+
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(kb) },
+    { edit: true }
+  );
+}
+
+async function renderSchedRespDaysScreen(ctx, user, assignmentId) {
+  const a = await loadAssignmentTitle(assignmentId);
+  if (!a) {
+    await ctx.answerCbQuery("Не найдено", { show_alert: true }).catch(() => {});
+    return;
+  }
+
+  let text = `🔔 <b>Уведомления по задаче</b>\n\n`;
+  text += `Задача: <b>${escHtml(a.title)}</b>\n\n`;
+  text += `За сколько дней до выполнения присылать уведомление?\n`;
+  text += `Введите число (например 1, 2, 3).\n\n`;
+  text += `Или нажмите «в день выполнения».\n`;
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "📅 В день выполнения",
+        `admin_shift_tasks_sched_resp_days_set0_${assignmentId}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "⬅️ Назад",
+        `admin_shift_tasks_sched_resp_${assignmentId}`
+      ),
+    ],
+  ]);
+
+  setSt(ctx.from.id, {
+    mode: "sched_resp_days",
+    schedResp: { assignmentId, page: 0, q: "" },
+  });
+
+  await deliver(ctx, { text, extra: kb }, { edit: true });
 }
 
 function registerAdminShiftTasks(bot, ensureUser, logError) {
@@ -1760,6 +2311,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         step: "pick_point",
         pointId: null,
         dateISO: today,
+        todayISO: today,
         filter: "all",
         mode: "view",
       });
@@ -1860,6 +2412,16 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     const kb = Markup.inlineKeyboard([
       [
         Markup.button.callback(
+          "📅 Перенести задачу",
+          `admin_shift_tasks_task_move_${assignmentId}`
+        ),
+        Markup.button.callback(
+          "📎 Клонировать задачу",
+          `admin_shift_tasks_task_clone_${assignmentId}`
+        ),
+      ],
+      [
+        Markup.button.callback(
           "⬅️ Назад к задачам",
           "admin_shift_tasks_back_to_list"
         ),
@@ -1917,6 +2479,866 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   });
 
+  // -----------------------------
+  // TASK CARD: move/clone (single-day operations)
+  // -----------------------------
+
+  async function isAssignmentDoneOnDate(assignmentId, pointId, dateISO) {
+    const r = await pool.query(
+      `
+    SELECT status
+    FROM task_instances
+    WHERE assignment_id = $1 AND trade_point_id = $2 AND for_date = $3::date
+    ORDER BY id DESC
+    LIMIT 1
+    `,
+      [assignmentId, pointId, dateISO]
+    );
+    return r.rows[0]?.status === "done";
+  }
+
+  async function loadScheduleType(assignmentId) {
+    const r = await pool.query(
+      `SELECT schedule_type FROM task_schedules WHERE assignment_id = $1 LIMIT 1`,
+      [assignmentId]
+    );
+    return r.rows[0]?.schedule_type || "single";
+  }
+
+  async function applyMoveOccurrence(
+    assignmentId,
+    pointId,
+    fromDateISO,
+    toDateISO
+  ) {
+    await ensureShiftTasksSchema();
+
+    const scheduleType = await loadScheduleType(assignmentId);
+
+    if (scheduleType === "single") {
+      // update schedule date
+      await pool.query(
+        `UPDATE task_schedules SET single_date = $2 WHERE assignment_id = $1`,
+        [assignmentId, toDateISO]
+      );
+
+      // move instance if exists
+      await pool.query(
+        `DELETE FROM task_instances WHERE assignment_id = $1 AND trade_point_id = $2 AND for_date = $3::date`,
+        [assignmentId, pointId, toDateISO]
+      );
+      await pool.query(
+        `UPDATE task_instances SET for_date = $4::date WHERE assignment_id = $1 AND trade_point_id = $2 AND for_date = $3::date`,
+        [assignmentId, pointId, fromDateISO, toDateISO]
+      );
+
+      return { kind: "single" };
+    }
+
+    // scheduled: override only this occurrence
+    if (fromDateISO === toDateISO) {
+      await pool.query(
+        `DELETE FROM task_schedule_overrides WHERE assignment_id = $1 AND trade_point_id = $2 AND from_date = $3::date`,
+        [assignmentId, pointId, fromDateISO]
+      );
+      return { kind: "scheduled" };
+    }
+
+    await pool.query(
+      `
+    INSERT INTO task_schedule_overrides (assignment_id, trade_point_id, from_date, to_date)
+    VALUES ($1, $2, $3::date, $4::date)
+    ON CONFLICT (assignment_id, trade_point_id, from_date) DO UPDATE
+      SET to_date = EXCLUDED.to_date,
+          created_at = now()
+    `,
+      [assignmentId, pointId, fromDateISO, toDateISO]
+    );
+
+    // move instance row if it already exists for "from" date
+    await pool.query(
+      `DELETE FROM task_instances WHERE assignment_id = $1 AND trade_point_id = $2 AND for_date = $3::date`,
+      [assignmentId, pointId, toDateISO]
+    );
+    await pool.query(
+      `UPDATE task_instances SET for_date = $4::date WHERE assignment_id = $1 AND trade_point_id = $2 AND for_date = $3::date`,
+      [assignmentId, pointId, fromDateISO, toDateISO]
+    );
+
+    return { kind: "scheduled" };
+  }
+
+  async function cloneAssignmentToPointSingleDate(
+    srcAssignmentId,
+    pointId,
+    dateISO,
+    actorUserId
+  ) {
+    // read source assignment + schedule meta
+    const srcR = await pool.query(
+      `
+    SELECT a.task_type, a.template_id, COALESCE($4::bigint, a.created_by_user_id) AS created_by_user_id,
+           s.time_mode, s.deadline_time
+    FROM task_assignments a
+    JOIN task_schedules s ON s.assignment_id = a.id
+    WHERE a.id = $1
+    LIMIT 1
+    `,
+      [srcAssignmentId, pointId, dateISO, actorUserId || null]
+    );
+    const src = srcR.rows[0];
+    if (!src) throw new Error("src assignment not found");
+
+    // create assignment (same template_id)
+    const asgRes = await pool.query(
+      `
+    INSERT INTO task_assignments
+      (task_type, template_id, created_by_user_id, point_scope, trade_point_id, is_active)
+    VALUES
+      ($1, $2, $3, 'one_point', $4, TRUE)
+    RETURNING id
+    `,
+      [src.task_type, src.template_id, src.created_by_user_id, pointId]
+    );
+    const newAssignmentId = asgRes.rows[0].id;
+
+    // schedule single
+    await pool.query(
+      `
+    INSERT INTO task_schedules
+      (assignment_id, schedule_type, single_date, time_mode, deadline_time)
+    VALUES
+      ($1, 'single', $2, $3, $4)
+    `,
+      [newAssignmentId, dateISO, src.time_mode || "all_day", src.deadline_time]
+    );
+
+    // copy targets
+    await pool.query(
+      `
+    INSERT INTO task_assignment_targets (assignment_id, user_id)
+    SELECT $2 AS assignment_id, user_id
+    FROM task_assignment_targets
+    WHERE assignment_id = $1
+    ON CONFLICT DO NOTHING
+    `,
+      [srcAssignmentId, newAssignmentId]
+    );
+
+    // copy responsibles
+    await pool.query(
+      `
+    INSERT INTO task_assignment_responsibles (assignment_id, user_id)
+    SELECT $2 AS assignment_id, user_id
+    FROM task_assignment_responsibles
+    WHERE assignment_id = $1
+    ON CONFLICT DO NOTHING
+    `,
+      [srcAssignmentId, newAssignmentId]
+    );
+
+    // copy responsible settings (if any)
+    try {
+      await pool.query(
+        `
+      INSERT INTO task_assignment_responsible_settings
+        (assignment_id, notifications_enabled, days_before, completion_notifications_enabled, updated_at)
+      SELECT $2 AS assignment_id,
+             notifications_enabled,
+             days_before,
+             COALESCE(completion_notifications_enabled, TRUE),
+             now()
+      FROM task_assignment_responsible_settings
+      WHERE assignment_id = $1
+      ON CONFLICT (assignment_id) DO UPDATE
+        SET notifications_enabled = EXCLUDED.notifications_enabled,
+            days_before = EXCLUDED.days_before,
+            completion_notifications_enabled = EXCLUDED.completion_notifications_enabled,
+            updated_at = now()
+      `,
+        [srcAssignmentId, newAssignmentId]
+      );
+    } catch (_) {
+      // ignore if settings table/column differs
+    }
+
+    return newAssignmentId;
+  }
+
+  async function renderTaskOpDateScreen(ctx, user, title) {
+    const st = getSt(ctx.from.id);
+    const op = st.taskOp;
+    if (!op) return renderPointScreen(ctx, user);
+
+    const todayISO = await dbTodayISO();
+    const isPast = op.dateISO < todayISO;
+
+    const d = new Date(op.dateISO + "T00:00:00");
+    const dd = String(d.getDate()).padStart(2, "0") + ".";
+    const mm = String(d.getMonth() + 1).padStart(2, "0") + ".";
+    const yy = String(d.getFullYear()).slice(-2);
+
+    const text =
+      `📅 <b>${escHtml(title)}</b>\n\n` +
+      `Выбранная дата: <b>${fmtRuDate(op.dateISO)}</b>\n` +
+      (isPast ? `\n⚠️ Прошлую дату выбрать нельзя.` : "");
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("←", "admin_shift_tasks_taskop_date_prev"),
+        Markup.button.callback(dd, "admin_shift_tasks_taskop_pick_day"),
+        Markup.button.callback(mm, "admin_shift_tasks_taskop_pick_month"),
+        Markup.button.callback(yy, "admin_shift_tasks_taskop_pick_year"),
+        Markup.button.callback("→", "admin_shift_tasks_taskop_date_next"),
+      ],
+      [Markup.button.callback("✅ Готово", "admin_shift_tasks_taskop_apply")],
+      [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_taskop_cancel")],
+    ]);
+
+    await deliver(ctx, { text, extra: kb }, { edit: true });
+  }
+
+  async function renderTaskOpDayPicker(ctx, user, page = 0) {
+    const st = getSt(ctx.from.id);
+    const op = st.taskOp;
+    if (!op) return renderPointScreen(ctx, user);
+
+    const d = new Date(op.dateISO + "T00:00:00");
+    const year = d.getFullYear();
+    const month = d.getMonth() + 1;
+
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const start = page === 0 ? 1 : 17;
+    const end = Math.min(daysInMonth, page === 0 ? 16 : 31);
+
+    const btns = [];
+    for (let day = start; day <= end; day++) {
+      const iso = ymd(year, month, day);
+      const label = iso === op.dateISO ? `✅ ${pad2(day)}` : pad2(day);
+      btns.push(
+        Markup.button.callback(label, `admin_shift_tasks_taskop_day_set_${iso}`)
+      );
+    }
+
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
+
+    if (daysInMonth > 16) {
+      rows.push([
+        Markup.button.callback(
+          "⬅️",
+          `admin_shift_tasks_taskop_day_page_${page === 0 ? 0 : 0}`
+        ),
+        Markup.button.callback(
+          "➡️",
+          `admin_shift_tasks_taskop_day_page_${page === 0 ? 1 : 1}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        "admin_shift_tasks_taskop_date_screen"
+      ),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите день</b>\n\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  async function renderTaskOpMonthPicker(ctx, user) {
+    const st = getSt(ctx.from.id);
+    const op = st.taskOp;
+    if (!op) return renderPointScreen(ctx, user);
+
+    const d = new Date(op.dateISO + "T00:00:00");
+    const year = d.getFullYear();
+    const curMonth = d.getMonth() + 1;
+
+    const months = [
+      "01.",
+      "02.",
+      "03.",
+      "04.",
+      "05.",
+      "06.",
+      "07.",
+      "08.",
+      "09.",
+      "10.",
+      "11.",
+      "12.",
+    ];
+
+    const btns = months.map((m, idx) => {
+      const mo = idx + 1;
+      const isoMonth = `${year}-${pad2(mo)}`;
+      const label = mo === curMonth ? `✅ ${m}` : m;
+      return Markup.button.callback(
+        label,
+        `admin_shift_tasks_taskop_month_set_${isoMonth}`
+      );
+    });
+
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        "admin_shift_tasks_taskop_date_screen"
+      ),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите месяц</b>\n\nГод: <b>${year}</b>\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  async function renderTaskOpYearPicker(ctx, user) {
+    const st = getSt(ctx.from.id);
+    const op = st.taskOp;
+    if (!op) return renderPointScreen(ctx, user);
+
+    const d = new Date(op.dateISO + "T00:00:00");
+    const curYear = d.getFullYear();
+
+    const years = [];
+    for (let y = curYear - 1; y <= curYear + 2; y++) years.push(y);
+
+    const btns = years.map((y) => {
+      const label = y === curYear ? `✅ ${y}` : String(y);
+      return Markup.button.callback(
+        label,
+        `admin_shift_tasks_taskop_year_set_${y}`
+      );
+    });
+
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 2) rows.push(btns.slice(i, i + 2));
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        "admin_shift_tasks_taskop_date_screen"
+      ),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите год</b>\n\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  async function renderTaskClonePointsScreen(ctx, user) {
+    const st = getSt(ctx.from.id);
+    const op = st.taskOp;
+    if (!op) return renderPointScreen(ctx, user);
+
+    const pointsR = await pool.query(
+      `SELECT id, title FROM trade_points ORDER BY title ASC`
+    );
+    const points = pointsR.rows;
+
+    const selected = new Set(op.pointIds || []);
+    const rows = [];
+
+    for (const p of points) {
+      const picked = selected.has(Number(p.id));
+      const label = `${picked ? "✅" : "▫️"} ${p.title}`;
+      rows.push([
+        Markup.button.callback(
+          label,
+          `admin_shift_tasks_taskclone_point_${p.id}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "✅ Готово",
+        "admin_shift_tasks_taskclone_points_done"
+      ),
+    ]);
+    rows.push([
+      Markup.button.callback("⬅️ Назад", "admin_shift_tasks_taskop_cancel"),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `🏬 <b>Выберите торговые точки (мультивыбор ✅)</b>\n\nЗадача будет склонирована в выбранные точки.`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  bot.action(/^admin_shift_tasks_task_move_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || !st?.dateISO) return;
+
+      const todayISO = await dbTodayISO();
+      if (st.dateISO < todayISO) {
+        await ctx
+          .answerCbQuery("Перенести из прошлой даты нельзя", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        return;
+      }
+
+      const done = await isAssignmentDoneOnDate(
+        assignmentId,
+        st.pointId,
+        st.dateISO
+      );
+      if (done) {
+        await ctx
+          .answerCbQuery(
+            "перенести выполненные задачи нельзя, их можно клонировать",
+            { show_alert: true }
+          )
+          .catch(() => {});
+        return;
+      }
+
+      setSt(ctx.from.id, {
+        taskOp: {
+          mode: "move",
+          assignmentId,
+          originPointId: st.pointId,
+          originDateISO: st.dateISO,
+          dateISO: st.dateISO < todayISO ? todayISO : st.dateISO,
+        },
+      });
+
+      return renderTaskOpDateScreen(ctx, user, "Перенос задачи");
+    } catch (e) {
+      logError("task_move", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_task_clone_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      if (!st?.pointId || !st?.dateISO) return;
+
+      const todayISO = await dbTodayISO();
+      setSt(ctx.from.id, {
+        taskOp: {
+          mode: "clone",
+          assignmentId,
+          originPointId: st.pointId,
+          originDateISO: st.dateISO,
+          dateISO: st.dateISO < todayISO ? todayISO : st.dateISO,
+          pointIds: [st.pointId], // по умолчанию текущая точка отмечена
+        },
+      });
+
+      return renderTaskClonePointsScreen(ctx, user);
+    } catch (e) {
+      logError("task_clone", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_date_prev", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op) return;
+
+      const next = addDaysISO(op.dateISO, -1);
+      const todayISO = await dbTodayISO();
+      if (next < todayISO) {
+        await ctx
+          .answerCbQuery("прошлую дату выбрать нельзя", { show_alert: false })
+          .catch(() => {});
+        return renderTaskOpDateScreen(
+          ctx,
+          user,
+          op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+        );
+      }
+
+      setSt(ctx.from.id, { taskOp: { ...op, dateISO: next } });
+      return renderTaskOpDateScreen(
+        ctx,
+        user,
+        op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+      );
+    } catch (e) {
+      logError("taskop_prev", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_date_next", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op) return;
+
+      const next = addDaysISO(op.dateISO, 1);
+      setSt(ctx.from.id, { taskOp: { ...op, dateISO: next } });
+      return renderTaskOpDateScreen(
+        ctx,
+        user,
+        op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+      );
+    } catch (e) {
+      logError("taskop_next", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_cancel", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      setSt(ctx.from.id, { taskOp: null });
+
+      if (op?.assignmentId) {
+        // вернуть карточку задачи
+        return ctx
+          .reply(`/t${op.assignmentId}`)
+          .catch(() => renderPointScreen(ctx, user));
+      }
+      return renderPointScreen(ctx, user);
+    } catch (e) {
+      logError("taskop_cancel", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_date_screen", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op) return;
+
+      return renderTaskOpDateScreen(
+        ctx,
+        user,
+        op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+      );
+    } catch (e) {
+      logError("taskop_date_screen", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_pick_day", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      return renderTaskOpDayPicker(ctx, user, 0);
+    } catch (e) {
+      logError("taskop_pick_day", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_taskop_day_page_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const page = Number(ctx.match[1]) || 0;
+      return renderTaskOpDayPicker(ctx, user, page);
+    } catch (e) {
+      logError("taskop_day_page", e);
+    }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_taskop_day_set_(\d{4}-\d{2}-\d{2})$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const iso = ctx.match[1];
+        const todayISO = await dbTodayISO();
+        if (iso < todayISO) {
+          await ctx
+            .answerCbQuery("прошлую дату выбрать нельзя", { show_alert: false })
+            .catch(() => {});
+          return renderTaskOpDayPicker(ctx, user, 0);
+        }
+
+        const st = getSt(ctx.from.id);
+        const op = st.taskOp;
+        if (!op) return;
+
+        setSt(ctx.from.id, { taskOp: { ...op, dateISO: iso } });
+        return renderTaskOpDateScreen(
+          ctx,
+          user,
+          op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+        );
+      } catch (e) {
+        logError("taskop_day_set", e);
+      }
+    }
+  );
+
+  bot.action("admin_shift_tasks_taskop_pick_month", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      return renderTaskOpMonthPicker(ctx, user);
+    } catch (e) {
+      logError("taskop_pick_month", e);
+    }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_taskop_month_set_(\d{4}-\d{2})$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const ym = ctx.match[1];
+        const st = getSt(ctx.from.id);
+        const op = st.taskOp;
+        if (!op) return;
+
+        // keep current day, clamp to end of month
+        const cur = new Date(op.dateISO + "T00:00:00");
+        const year = Number(ym.slice(0, 4));
+        const month = Number(ym.slice(5, 7));
+        const dim = new Date(year, month, 0).getDate();
+        const day = Math.min(cur.getDate(), dim);
+        const iso = ymd(year, month, day);
+
+        const todayISO = await dbTodayISO();
+        if (iso < todayISO) {
+          await ctx
+            .answerCbQuery("прошлую дату выбрать нельзя", { show_alert: false })
+            .catch(() => {});
+          return renderTaskOpMonthPicker(ctx, user);
+        }
+
+        setSt(ctx.from.id, { taskOp: { ...op, dateISO: iso } });
+        return renderTaskOpDateScreen(
+          ctx,
+          user,
+          op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+        );
+      } catch (e) {
+        logError("taskop_month_set", e);
+      }
+    }
+  );
+
+  bot.action("admin_shift_tasks_taskop_pick_year", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      return renderTaskOpYearPicker(ctx, user);
+    } catch (e) {
+      logError("taskop_pick_year", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_taskop_year_set_(\d{4})$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const year = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op) return;
+
+      const cur = new Date(op.dateISO + "T00:00:00");
+      const month = cur.getMonth() + 1;
+      const dim = new Date(year, month, 0).getDate();
+      const day = Math.min(cur.getDate(), dim);
+      const iso = ymd(year, month, day);
+
+      const todayISO = await dbTodayISO();
+      if (iso < todayISO) {
+        await ctx
+          .answerCbQuery("прошлую дату выбрать нельзя", { show_alert: false })
+          .catch(() => {});
+        return renderTaskOpYearPicker(ctx, user);
+      }
+
+      setSt(ctx.from.id, { taskOp: { ...op, dateISO: iso } });
+      return renderTaskOpDateScreen(
+        ctx,
+        user,
+        op.mode === "move" ? "Перенос задачи" : "Клонирование задачи"
+      );
+    } catch (e) {
+      logError("taskop_year_set", e);
+    }
+  });
+
+  bot.action(/^admin_shift_tasks_taskclone_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const pointId = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op || op.mode !== "clone") return;
+
+      const cur = new Set(op.pointIds || []);
+      if (cur.has(pointId)) cur.delete(pointId);
+      else cur.add(pointId);
+
+      setSt(ctx.from.id, { taskOp: { ...op, pointIds: Array.from(cur) } });
+      return renderTaskClonePointsScreen(ctx, user);
+    } catch (e) {
+      logError("taskclone_point_toggle", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskclone_points_done", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op || op.mode !== "clone") return;
+
+      const picked = (op.pointIds || []).filter(Boolean);
+      if (!picked.length) {
+        await ctx
+          .answerCbQuery("Выберите хотя бы одну точку", { show_alert: false })
+          .catch(() => {});
+        return renderTaskClonePointsScreen(ctx, user);
+      }
+
+      return renderTaskOpDateScreen(ctx, user, "Клонирование задачи");
+    } catch (e) {
+      logError("taskclone_points_done", e);
+    }
+  });
+
+  bot.action("admin_shift_tasks_taskop_apply", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id);
+      const op = st.taskOp;
+      if (!op) return;
+
+      const todayISO = await dbTodayISO();
+      if (op.dateISO < todayISO) {
+        await ctx
+          .answerCbQuery("прошлую дату выбрать нельзя", { show_alert: false })
+          .catch(() => {});
+        if (op.mode === "clone")
+          return renderTaskOpDateScreen(ctx, user, "Клонирование задачи");
+        return renderTaskOpDateScreen(ctx, user, "Перенос задачи");
+      }
+
+      if (op.mode === "move") {
+        await applyMoveOccurrence(
+          op.assignmentId,
+          op.originPointId,
+          op.originDateISO,
+          op.dateISO
+        );
+        setSt(ctx.from.id, { dateISO: op.dateISO, taskOp: null });
+        await ctx
+          .answerCbQuery("задача перенесена", { show_alert: false })
+          .catch(() => {});
+        return ctx
+          .reply(`/t${op.assignmentId}`)
+          .catch(() => renderPointScreen(ctx, user));
+      }
+
+      if (op.mode === "clone") {
+        const pointIds = (op.pointIds || []).filter(Boolean);
+        for (const pid of pointIds) {
+          await cloneAssignmentToPointSingleDate(
+            op.assignmentId,
+            Number(pid),
+            op.dateISO,
+            user.id
+          );
+        }
+        setSt(ctx.from.id, { taskOp: null });
+        await ctx
+          .answerCbQuery("задача склонирована в выбранные точки", {
+            show_alert: false,
+          })
+          .catch(() => {});
+        return ctx
+          .reply(`/t${op.assignmentId}`)
+          .catch(() => renderPointScreen(ctx, user));
+      }
+    } catch (e) {
+      logError("taskop_apply", e);
+    }
+  });
+
   bot.action(/^admin_shift_tasks_point_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -1928,6 +3350,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       setSt(ctx.from.id, {
         pointId,
         dateISO: today,
+        todayISO: today,
         filter: "all",
         mode: "view",
         deleteSelected: [],
@@ -1981,56 +3404,56 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   });
 
-  // pick date
-  bot.action("admin_shift_tasks_pick_date", async (ctx) => {
+  function addDaysISO(iso, delta) {
+    const d = new Date(iso + "T00:00:00");
+    d.setDate(d.getDate() + delta);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  }
+
+  bot.action("admin_shift_tasks_date_prev", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
 
       const st = getSt(ctx.from.id);
-      if (!st?.pointId) return renderPickPoint(ctx);
+      if (!st?.dateISO) return;
 
-      const kb = await buildDatePicker(st.dateISO);
+      setSt(ctx.from.id, {
+        dateISO: addDaysISO(st.dateISO, -1),
+        mode: "view",
+        filter: "all",
+        deleteSelected: [],
+      });
 
-      await deliver(
-        ctx,
-        {
-          text: "📅 <b>Выберите дату</b>\n\n(можно прошедшие, или «Ввести дату»)",
-          extra: kb,
-        },
-        { edit: true }
-      );
+      await renderPointScreen(ctx, user);
     } catch (e) {
-      logError("admin_shift_tasks_pick_date", e);
+      logError("admin_shift_tasks_date_prev", e);
     }
   });
 
-  bot.action("admin_shift_tasks_date_input", async (ctx) => {
+  bot.action("admin_shift_tasks_date_next", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
 
-      setSt(ctx.from.id, { step: "date_input" });
+      const st = getSt(ctx.from.id);
+      if (!st?.dateISO) return;
 
-      const kb = Markup.inlineKeyboard([
-        [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_pick_date")],
-      ]);
+      setSt(ctx.from.id, {
+        dateISO: addDaysISO(st.dateISO, +1),
+        mode: "view",
+        filter: "all",
+        deleteSelected: [],
+      });
 
-      await deliver(
-        ctx,
-        {
-          text:
-            "📅 <b>Введите дату</b>\n\n" +
-            "Формат: <b>ДД.ММ.ГГГГ</b> (например 08.01.2026)\n" +
-            "или <b>ГГГГ-ММ-ДД</b> (например 2026-01-08).",
-          extra: kb,
-        },
-        { edit: true }
-      );
+      await renderPointScreen(ctx, user);
     } catch (e) {
-      logError("admin_shift_tasks_date_input", e);
+      logError("admin_shift_tasks_date_next", e);
     }
   });
 
@@ -2338,23 +3761,604 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(/^admin_shift_tasks_date_(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
+  // -----------------------------
+  // SCHEDULED CARD: Points (clone task to other points, keep schedule)
+  // -----------------------------
+
+  async function cloneAssignmentToPointKeepScheduleSameTemplate(
+    srcAssignmentId,
+    pointId,
+    actorUserId
+  ) {
+    // source assignment + schedule
+    const srcA = await pool.query(
+      `
+    SELECT a.task_type, a.template_id, COALESCE($2::bigint, a.created_by_user_id) AS created_by_user_id
+    FROM task_assignments a
+    WHERE a.id = $1
+    LIMIT 1
+    `,
+      [srcAssignmentId, actorUserId || null]
+    );
+    const a = srcA.rows[0];
+    if (!a) throw new Error("src assignment not found");
+
+    const schR = await pool.query(
+      `
+    SELECT schedule_type, start_date, single_date, weekdays_mask, every_x_days, time_mode, deadline_time
+    FROM task_schedules
+    WHERE assignment_id = $1
+    LIMIT 1
+    `,
+      [srcAssignmentId]
+    );
+    const sch = schR.rows[0] || { schedule_type: "single" };
+
+    // create assignment with SAME template_id (global template)
+    const asgRes = await pool.query(
+      `
+    INSERT INTO task_assignments
+      (task_type, template_id, created_by_user_id, point_scope, trade_point_id, is_active)
+    VALUES
+      ($1, $2, $3, 'one_point', $4, TRUE)
+    RETURNING id
+    `,
+      [a.task_type, a.template_id, a.created_by_user_id, pointId]
+    );
+    const newAssignmentId = asgRes.rows[0].id;
+
+    // schedule copy (same type)
+    const stype = sch.schedule_type || "single";
+    if (stype === "single") {
+      await pool.query(
+        `
+      INSERT INTO task_schedules
+        (assignment_id, schedule_type, single_date, time_mode, deadline_time)
+      VALUES
+        ($1, 'single', $2, $3, $4)
+      `,
+        [
+          newAssignmentId,
+          sch.single_date,
+          sch.time_mode || "all_day",
+          sch.deadline_time,
+        ]
+      );
+    } else if (stype === "weekly") {
+      await pool.query(
+        `
+      INSERT INTO task_schedules
+        (assignment_id, schedule_type, weekdays_mask, time_mode, deadline_time)
+      VALUES
+        ($1, 'weekly', $2, $3, $4)
+      `,
+        [
+          newAssignmentId,
+          Number(sch.weekdays_mask || 0),
+          sch.time_mode || "all_day",
+          sch.deadline_time,
+        ]
+      );
+    } else if (stype === "every_x_days") {
+      await pool.query(
+        `
+      INSERT INTO task_schedules
+        (assignment_id, schedule_type, start_date, every_x_days, time_mode, deadline_time)
+      VALUES
+        ($1, 'every_x_days', $2::date, $3, $4, $5)
+      `,
+        [
+          newAssignmentId,
+          sch.start_date,
+          Number(sch.every_x_days || 1),
+          sch.time_mode || "all_day",
+          sch.deadline_time,
+        ]
+      );
+    } else {
+      // unknown -> fallback single
+      await pool.query(
+        `
+      INSERT INTO task_schedules
+        (assignment_id, schedule_type, single_date, time_mode, deadline_time)
+      VALUES
+        ($1, 'single', $2, $3, $4)
+      `,
+        [
+          newAssignmentId,
+          sch.single_date,
+          sch.time_mode || "all_day",
+          sch.deadline_time,
+        ]
+      );
+    }
+
+    // copy targets/responsibles/settings
+    await pool.query(
+      `
+    INSERT INTO task_assignment_targets (assignment_id, user_id)
+    SELECT $2 AS assignment_id, user_id
+    FROM task_assignment_targets
+    WHERE assignment_id = $1
+    ON CONFLICT DO NOTHING
+    `,
+      [srcAssignmentId, newAssignmentId]
+    );
+
+    await pool.query(
+      `
+    INSERT INTO task_assignment_responsibles (assignment_id, user_id)
+    SELECT $2 AS assignment_id, user_id
+    FROM task_assignment_responsibles
+    WHERE assignment_id = $1
+    ON CONFLICT DO NOTHING
+    `,
+      [srcAssignmentId, newAssignmentId]
+    );
+
+    try {
+      await pool.query(
+        `
+      INSERT INTO task_assignment_responsible_settings
+        (assignment_id, notifications_enabled, days_before, completion_notifications_enabled, updated_at)
+      SELECT $2 AS assignment_id,
+             notifications_enabled,
+             days_before,
+             COALESCE(completion_notifications_enabled, TRUE),
+             now()
+      FROM task_assignment_responsible_settings
+      WHERE assignment_id = $1
+      ON CONFLICT (assignment_id) DO UPDATE
+        SET notifications_enabled = EXCLUDED.notifications_enabled,
+            days_before = EXCLUDED.days_before,
+            completion_notifications_enabled = EXCLUDED.completion_notifications_enabled,
+            updated_at = now()
+      `,
+        [srcAssignmentId, newAssignmentId]
+      );
+    } catch (_) {}
+
+    return newAssignmentId;
+  }
+
+  async function renderSchedPointsPicker(ctx, user, assignmentId) {
+    const st = getSt(ctx.from.id);
+    const flow = st.schedPointsFlow;
+    if (!flow || flow.assignmentId !== assignmentId)
+      return renderScheduledCard(ctx, user, assignmentId);
+
+    const pointsR = await pool.query(
+      `SELECT id, title FROM trade_points ORDER BY title ASC`
+    );
+    const points = pointsR.rows || [];
+    const selected = new Set(flow.pointIds || []);
+
+    const rows = [];
+    for (const p of points) {
+      const picked = selected.has(Number(p.id));
+      rows.push([
+        Markup.button.callback(
+          `${picked ? "✅" : "▫️"} ${p.title}`,
+          `admin_shift_tasks_sched_points_toggle_${assignmentId}_${p.id}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "✅ Готово",
+        `admin_shift_tasks_sched_points_apply_${assignmentId}`
+      ),
+    ]);
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад",
+        `admin_shift_tasks_sched_card_${assignmentId}`
+      ),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `🏬 <b>Точки</b>\n\nВыберите точки, куда нужно склонировать задачу.\n\nПосле нажатия «Готово» задача появится на выбранных точках со всеми параметрами.`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  bot.action(/^admin_shift_tasks_sched_points_(\d+)$/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!isAdmin(user)) return;
 
-      const iso = ctx.match[1];
+      const assignmentId = Number(ctx.match[1]);
+
+      // текущие точки для этого template_id + task_type
+      const base = await pool.query(
+        `
+      SELECT template_id, task_type
+      FROM task_assignments
+      WHERE id = $1
+      LIMIT 1
+      `,
+        [assignmentId]
+      );
+      const b = base.rows[0];
+      if (!b) return renderScheduledCard(ctx, user, assignmentId);
+
+      const pr = await pool.query(
+        `
+      SELECT a.trade_point_id
+      FROM task_assignments a
+      WHERE a.template_id = $1 AND a.task_type = $2 AND a.is_active = TRUE
+      `,
+        [b.template_id, b.task_type]
+      );
+      const curPointIds = (pr.rows || [])
+        .map((x) => Number(x.trade_point_id))
+        .filter(Boolean);
+
       setSt(ctx.from.id, {
-        dateISO: iso,
-        mode: "view",
-        filter: "all",
-        deleteSelected: [],
+        schedPointsFlow: {
+          assignmentId,
+          templateId: b.template_id,
+          taskType: b.task_type,
+          pointIds: curPointIds,
+        },
       });
-      await renderPointScreen(ctx, user);
+
+      return renderSchedPointsPicker(ctx, user, assignmentId);
     } catch (e) {
-      logError("admin_shift_tasks_date_set", e);
+      logError("sched_points_open", e);
     }
+  });
+
+  bot.action(
+    /^admin_shift_tasks_sched_points_toggle_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const pointId = Number(ctx.match[2]);
+
+        const st = getSt(ctx.from.id);
+        const flow = st.schedPointsFlow;
+        if (!flow || flow.assignmentId !== assignmentId)
+          return renderScheduledCard(ctx, user, assignmentId);
+
+        const s = new Set(flow.pointIds || []);
+        if (s.has(pointId)) s.delete(pointId);
+        else s.add(pointId);
+
+        setSt(ctx.from.id, {
+          schedPointsFlow: { ...flow, pointIds: Array.from(s) },
+        });
+        return renderSchedPointsPicker(ctx, user, assignmentId);
+      } catch (e) {
+        logError("sched_points_toggle", e);
+      }
+    }
+  );
+
+  bot.action(/^admin_shift_tasks_sched_points_apply_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
+      const flow = st.schedPointsFlow;
+      if (!flow || flow.assignmentId !== assignmentId)
+        return renderScheduledCard(ctx, user, assignmentId);
+
+      const desired = (flow.pointIds || []).map(Number).filter(Boolean);
+
+      // какие уже существуют
+      const ex = await pool.query(
+        `
+      SELECT trade_point_id
+      FROM task_assignments
+      WHERE template_id = $1 AND task_type = $2 AND is_active = TRUE
+      `,
+        [flow.templateId, flow.taskType]
+      );
+      const existing = new Set(
+        (ex.rows || []).map((x) => Number(x.trade_point_id)).filter(Boolean)
+      );
+
+      // клонируем в отсутствующие
+      for (const pid of desired) {
+        if (existing.has(pid)) continue;
+        await cloneAssignmentToPointKeepScheduleSameTemplate(
+          assignmentId,
+          pid,
+          user.id
+        );
+      }
+
+      setSt(ctx.from.id, { schedPointsFlow: null });
+
+      await ctx
+        .answerCbQuery("задача склонирована в выбранные точки", {
+          show_alert: false,
+        })
+        .catch(() => {});
+      return renderScheduledCard(ctx, user, assignmentId);
+    } catch (e) {
+      logError("sched_points_apply", e);
+    }
+  });
+
+  // -----------------------------
+  // DATE PICKER: 3 экрана (День / Месяц / Год)
+  // -----------------------------
+
+  function daysInMonth(year, month1to12) {
+    return new Date(year, month1to12, 0).getDate();
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function ymd(year, month1to12, day) {
+    return `${year}-${pad2(month1to12)}-${pad2(day)}`;
+  }
+
+  async function renderDayPicker(ctx, st, page = 0) {
+    const d = new Date(st.dateISO + "T00:00:00");
+    const year = d.getFullYear();
+    const month = d.getMonth() + 1; // 1..12
+    const maxDay = daysInMonth(year, month);
+
+    const start = page === 0 ? 1 : 17;
+    const end = Math.min(page === 0 ? 16 : 31, maxDay);
+
+    const btns = [];
+    for (let day = start; day <= end; day++) {
+      const iso = ymd(year, month, day);
+      const label = iso === st.dateISO ? `✅ ${pad2(day)}` : pad2(day);
+      btns.push(
+        Markup.button.callback(label, `admin_shift_tasks_day_set_${iso}`)
+      );
+    }
+
+    // 4 колонки
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
+
+    // навигация 1–16 / 17–31 (только если есть смысл)
+    const hasSecondPage = maxDay > 16;
+    if (hasSecondPage) {
+      rows.push([
+        Markup.button.callback(
+          "⬅️",
+          `admin_shift_tasks_day_page_${page === 0 ? 0 : 0}`
+        ),
+        Markup.button.callback(page === 0 ? "1–16" : "17–31", "noop"),
+        Markup.button.callback(
+          "➡️",
+          `admin_shift_tasks_day_page_${page === 0 ? 1 : 1}`
+        ),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback("✅ Готово", "admin_shift_tasks_point_back"),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите день</b>\n\nТекущая дата: <b>${fmtRuDate(
+          st.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  async function renderMonthPicker(ctx, st) {
+    const d = new Date(st.dateISO + "T00:00:00");
+    const year = d.getFullYear();
+    const curMonth = d.getMonth() + 1;
+
+    const months = [
+      "01",
+      "02",
+      "03",
+      "04",
+      "05",
+      "06",
+      "07",
+      "08",
+      "09",
+      "10",
+      "11",
+      "12",
+    ];
+
+    const btns = months.map((mm, idx) => {
+      const m = idx + 1;
+      const label = m === curMonth ? `✅ ${mm}` : mm;
+      return Markup.button.callback(label, `admin_shift_tasks_month_set_${m}`);
+    });
+
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
+
+    rows.push([
+      Markup.button.callback("✅ Готово", "admin_shift_tasks_point_back"),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите месяц</b>\n\nГод: <b>${year}</b>\nТекущая дата: <b>${fmtRuDate(
+          st.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  async function renderYearPicker(ctx, st, page = 0) {
+    const d = new Date(st.dateISO + "T00:00:00");
+    const curYear = d.getFullYear();
+
+    // по 12 лет на страницу
+    const startYear = curYear - 6 + page * 12;
+    const years = Array.from({ length: 12 }, (_, i) => startYear + i);
+
+    const btns = years.map((y) => {
+      const label = y === curYear ? `✅ ${y}` : String(y);
+      return Markup.button.callback(label, `admin_shift_tasks_year_set_${y}`);
+    });
+
+    const rows = [];
+    for (let i = 0; i < btns.length; i += 3) rows.push(btns.slice(i, i + 3));
+
+    rows.push([
+      Markup.button.callback("⬅️", `admin_shift_tasks_year_page_${page - 1}`),
+      Markup.button.callback("", "noop"),
+      Markup.button.callback("➡️", `admin_shift_tasks_year_page_${page + 1}`),
+    ]);
+
+    rows.push([
+      Markup.button.callback("✅ Готово", "admin_shift_tasks_point_back"),
+    ]);
+
+    await deliver(
+      ctx,
+      {
+        text: `📅 <b>Выберите год</b>\n\nТекущая дата: <b>${fmtRuDate(
+          st.dateISO
+        )}</b>`,
+        extra: Markup.inlineKeyboard(rows),
+      },
+      { edit: true }
+    );
+  }
+
+  // открыть 3 экрана
+  bot.action("admin_shift_tasks_pick_day", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return renderPickPoint(ctx);
+
+    await renderDayPicker(ctx, st, 0);
+  });
+
+  bot.action("admin_shift_tasks_pick_month", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return renderPickPoint(ctx);
+
+    await renderMonthPicker(ctx, st);
+  });
+
+  bot.action("admin_shift_tasks_pick_year", async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return renderPickPoint(ctx);
+
+    await renderYearPicker(ctx, st, 0);
+  });
+
+  // day: страницы и выбор дня
+  bot.action(/^admin_shift_tasks_day_page_(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return;
+
+    const page = Number(ctx.match[1]);
+    await renderDayPicker(ctx, st, page <= 0 ? 0 : 1);
+  });
+
+  bot.action(/^admin_shift_tasks_day_set_(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return;
+
+    setSt(ctx.from.id, { dateISO: ctx.match[1] });
+    await renderPointScreen(ctx, user);
+  });
+
+  // month: выбор месяца
+  bot.action(/^admin_shift_tasks_month_set_(\d{1,2})$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return;
+
+    const d = new Date(st.dateISO + "T00:00:00");
+    const year = d.getFullYear();
+    const day = d.getDate();
+    const m = Number(ctx.match[1]);
+
+    const maxDay = daysInMonth(year, m);
+    const safeDay = Math.min(day, maxDay);
+
+    setSt(ctx.from.id, { dateISO: ymd(year, m, safeDay) });
+    await renderDayPicker(ctx, getSt(ctx.from.id), safeDay <= 16 ? 0 : 1);
+  });
+
+  // year: страницы и выбор года
+  bot.action(/^admin_shift_tasks_year_page_(-?\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return;
+
+    const page = Number(ctx.match[1]);
+    await renderYearPicker(ctx, st, page);
+  });
+
+  bot.action(/^admin_shift_tasks_year_set_(\d{4})$/, async (ctx) => {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const st = getSt(ctx.from.id);
+    if (!st?.pointId) return;
+
+    const d = new Date(st.dateISO + "T00:00:00");
+    const month = d.getMonth() + 1;
+    const day = d.getDate();
+    const year = Number(ctx.match[1]);
+
+    const maxDay = daysInMonth(year, month);
+    const safeDay = Math.min(day, maxDay);
+
+    setSt(ctx.from.id, { dateISO: ymd(year, month, safeDay) });
+    await renderMonthPicker(ctx, getSt(ctx.from.id));
   });
 
   bot.action("admin_shift_tasks_point_back", async (ctx) => {
@@ -2845,6 +4849,330 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   });
 
+  // -----------------------------
+  // SCHEDULE RESPONSIBLES (handlers)
+  // -----------------------------
+
+  // открыть экран R1
+  bot.action(/^admin_shift_tasks_sched_resp_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      const assignmentId = Number(ctx.match[1]);
+      await renderSchedRespScreen(ctx, user, assignmentId);
+    } catch (e) {
+      logError("sched_resp_open", e);
+    }
+  });
+
+  // удаление ответственного — подтверждение
+  bot.action(/^admin_shift_tasks_sched_resp_rm_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+      const userId = Number(ctx.match[2]);
+
+      const u = await pool.query(
+        `SELECT id, full_name, username, work_phone FROM users WHERE id = $1 LIMIT 1`,
+        [userId]
+      );
+      const who = u.rows[0] ? fmtUserLine(u.rows[0]) : `id:${userId}`;
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🗑 Удалить",
+            `admin_shift_tasks_sched_resp_rm_ok_${assignmentId}_${userId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Отмена",
+            `admin_shift_tasks_sched_resp_${assignmentId}`
+          ),
+        ],
+      ]);
+
+      await deliver(
+        ctx,
+        {
+          text: `Удалить ответственного?\n\n<b>${escHtml(who)}</b>`,
+          extra: kb,
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("sched_resp_rm_confirm", e);
+    }
+  });
+
+  // удаление ответственного — OK
+  bot.action(
+    /^admin_shift_tasks_sched_resp_rm_ok_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const userId = Number(ctx.match[2]);
+
+        await pool.query(
+          `DELETE FROM task_assignment_responsibles WHERE assignment_id = $1 AND user_id = $2`,
+          [assignmentId, userId]
+        );
+
+        // если после удаления ответственных не осталось — отключаем уведомления автоматически
+        const left = await pool.query(
+          `SELECT 1 FROM task_assignment_responsibles WHERE assignment_id = $1 LIMIT 1`,
+          [assignmentId]
+        );
+        if (!left.rows.length) {
+          await upsertSchedRespSettings(assignmentId, { enabled: false });
+        }
+
+        await renderSchedRespScreen(ctx, user, assignmentId);
+      } catch (e) {
+        logError("sched_resp_rm_ok", e);
+      }
+    }
+  );
+
+  // открыть экран R2 (страница)
+  bot.action(/^admin_shift_tasks_sched_resp_add_(\d+)_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+      const assignmentId = Number(ctx.match[1]);
+      const page = Number(ctx.match[2]) || 0;
+
+      const st = getSt(ctx.from.id);
+      const q =
+        st?.mode === "sched_resp_add" &&
+        st?.schedResp?.assignmentId === assignmentId
+          ? st.schedResp.q || ""
+          : "";
+
+      await renderSchedRespAddScreen(ctx, user, assignmentId, page, q);
+    } catch (e) {
+      logError("sched_resp_add_page", e);
+    }
+  });
+
+  // pick user (toggle add/remove)
+  bot.action(
+    /^admin_shift_tasks_sched_resp_pick_(\d+)_(\d+)_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+        const pickedId = Number(ctx.match[2]);
+        const page = Number(ctx.match[3]) || 0;
+
+        // toggle
+        const ex = await pool.query(
+          `SELECT 1 FROM task_assignment_responsibles WHERE assignment_id = $1 AND user_id = $2 LIMIT 1`,
+          [assignmentId, pickedId]
+        );
+
+        if (ex.rows.length) {
+          await pool.query(
+            `DELETE FROM task_assignment_responsibles WHERE assignment_id = $1 AND user_id = $2`,
+            [assignmentId, pickedId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO task_assignment_responsibles (assignment_id, user_id) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+            [assignmentId, pickedId]
+          );
+        }
+
+        const st = getSt(ctx.from.id);
+        const q = st?.mode === "sched_resp_add" ? st.schedResp?.q || "" : "";
+
+        await renderSchedRespAddScreen(ctx, user, assignmentId, page, q);
+      } catch (e) {
+        logError("sched_resp_pick", e);
+      }
+    }
+  );
+
+  // включить уведомления (если нет ответственных — нельзя)
+  bot.action(/^admin_shift_tasks_sched_resp_notif_on_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+
+      const has = await pool.query(
+        `SELECT 1 FROM task_assignment_responsibles WHERE assignment_id = $1 LIMIT 1`,
+        [assignmentId]
+      );
+      if (!has.rows.length) {
+        await ctx
+          .answerCbQuery("Сначала назначьте ответственных", {
+            show_alert: true,
+          })
+          .catch(() => {});
+        return renderSchedRespScreen(ctx, user, assignmentId);
+      }
+
+      // идём на экран R3 (ввод days_before)
+      await renderSchedRespDaysScreen(ctx, user, assignmentId);
+    } catch (e) {
+      logError("sched_resp_notif_on", e);
+    }
+  });
+
+  // в день выполнения (=0)
+  bot.action(/^admin_shift_tasks_sched_resp_days_set0_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+
+      await upsertSchedRespSettings(assignmentId, {
+        enabled: true,
+        days_before: 0,
+      });
+      await ctx
+        .answerCbQuery("✅ Уведомления включены", { show_alert: false })
+        .catch(() => {});
+      await renderSchedRespScreen(ctx, user, assignmentId);
+    } catch (e) {
+      logError("sched_resp_days_set0", e);
+    }
+  });
+
+  // включить/выключить оповещения о выполнении (по умолчанию включены)
+  bot.action(
+    /^admin_shift_tasks_sched_resp_completion_on_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+
+        const has = await pool.query(
+          `SELECT 1 FROM task_assignment_responsibles WHERE assignment_id = $1 LIMIT 1`,
+          [assignmentId]
+        );
+        if (!has.rows.length) {
+          await ctx
+            .answerCbQuery("Сначала назначьте ответственных", {
+              show_alert: true,
+            })
+            .catch(() => {});
+          return;
+        }
+
+        await upsertSchedRespSettings(assignmentId, {
+          completion_enabled: true,
+        });
+
+        return renderSchedRespScreen(ctx, user, assignmentId);
+      } catch (e) {
+        logError("sched_resp_completion_on", e);
+      }
+    }
+  );
+
+  bot.action(
+    /^admin_shift_tasks_sched_resp_completion_off_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+
+        await upsertSchedRespSettings(assignmentId, {
+          completion_enabled: false,
+        });
+
+        return renderSchedRespScreen(ctx, user, assignmentId);
+      } catch (e) {
+        logError("sched_resp_completion_off", e);
+      }
+    }
+  );
+
+  // выключить уведомления — подтверждение
+  bot.action(/^admin_shift_tasks_sched_resp_notif_off_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const assignmentId = Number(ctx.match[1]);
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🔕 Да, выключить",
+            `admin_shift_tasks_sched_resp_notif_off_ok_${assignmentId}`
+          ),
+        ],
+        [
+          Markup.button.callback(
+            "⬅️ Отмена",
+            `admin_shift_tasks_sched_resp_${assignmentId}`
+          ),
+        ],
+      ]);
+
+      await deliver(
+        ctx,
+        {
+          text: `🔕 <b>Выключить уведомления?</b>\n\nОповещения ответственным перестанут приходить.`,
+          extra: kb,
+        },
+        { edit: true }
+      );
+    } catch (e) {
+      logError("sched_resp_notif_off_confirm", e);
+    }
+  });
+
+  // выключить уведомления — OK
+  bot.action(
+    /^admin_shift_tasks_sched_resp_notif_off_ok_(\d+)$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+
+        const assignmentId = Number(ctx.match[1]);
+
+        await upsertSchedRespSettings(assignmentId, { enabled: false });
+        await ctx
+          .answerCbQuery("🔕 Уведомления выключены", { show_alert: false })
+          .catch(() => {});
+        await renderSchedRespScreen(ctx, user, assignmentId);
+      } catch (e) {
+        logError("sched_resp_notif_off_ok", e);
+      }
+    }
+  );
+
   // ----- SCHEDULE FILTER + EDIT PERIOD -----
   bot.action("admin_shift_tasks_sched_root", async (ctx) => {
     try {
@@ -3067,6 +5395,68 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     const txt = String(ctx.message.text || "").trim();
     if (!txt) return next();
 
+    // --- schedule responsibles: search mode (R2) ---
+    if (st.mode === "sched_resp_add" && st.schedResp?.assignmentId) {
+      // поддержка forwarded message (если переслали пользователя)
+      const fwd = ctx.message?.forward_from;
+      if (fwd?.id) {
+        const u = await pool.query(
+          `SELECT id FROM users WHERE telegram_id = $1 LIMIT 1`,
+          [Number(fwd.id)]
+        );
+        if (u.rows[0]) {
+          const assignmentId = Number(st.schedResp.assignmentId);
+          await pool.query(
+            `INSERT INTO task_assignment_responsibles (assignment_id, user_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [assignmentId, Number(u.rows[0].id)]
+          );
+          await ctx.reply("✅ Пользователь добавлен").catch(() => {});
+          return renderSchedRespAddScreen(
+            ctx,
+            user,
+            assignmentId,
+            st.schedResp.page || 0,
+            st.schedResp.q || ""
+          );
+        }
+      }
+
+      // обычный поиск
+      const assignmentId = Number(st.schedResp.assignmentId);
+      const q = txt;
+      return renderSchedRespAddScreen(ctx, user, assignmentId, 0, q);
+    }
+
+    // --- schedule responsibles: days_before input (R3) ---
+    if (st.mode === "sched_resp_days" && st.schedResp?.assignmentId) {
+      const assignmentId = Number(st.schedResp.assignmentId);
+      const n = parseInt(txt, 10);
+
+      if (
+        !Number.isFinite(n) ||
+        String(n) !== String(parseInt(String(n), 10))
+      ) {
+        await ctx
+          .reply("❌ Введите целое число дней (например 0, 1, 2).")
+          .catch(() => {});
+        return;
+      }
+      if (n < 0 || n > 365) {
+        await ctx
+          .reply("❌ Число дней должно быть от 0 до 365.")
+          .catch(() => {});
+        return;
+      }
+
+      await upsertSchedRespSettings(assignmentId, {
+        enabled: true,
+        days_before: n,
+      });
+      await ctx.reply("✅ Уведомления включены").catch(() => {});
+      return renderSchedRespScreen(ctx, user, assignmentId);
+    }
+
     // 0) ввод произвольной даты
     if (st.step === "date_input") {
       const iso = parseAnyDateToISO(txt);
@@ -3099,7 +5489,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
 
     // 0.1) поиск пользователя для "Для кого?"
-    if (st.step === "add_forwho_input") {
+    if (st.step === "add_forwho_input" && st.mode === "add") {
       const candidates = await searchUsersForWho(txt);
       if (!candidates.length) {
         await ctx.reply(
