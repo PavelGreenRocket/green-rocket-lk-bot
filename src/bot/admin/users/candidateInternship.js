@@ -805,6 +805,60 @@ function registerCandidateInternship(bot, ensureUser, logError) {
     }
   });
 
+  // Доп. вопрос (если курс пройден): режим контроля после обучения
+  // callback_data: lk_cand_invite_post_training_control_{candidateId}_{yes|no}
+  bot.action(
+    /^lk_cand_invite_post_training_control_(\d+)_(yes|no)$/,
+    async (ctx) => {
+      try {
+        const user = await ensureUser(ctx);
+        if (!user || (user.role !== "admin" && user.role !== "super_admin")) {
+          await ctx.answerCbQuery("Нет доступа").catch(() => {});
+          return;
+        }
+
+        const candidateId = Number(ctx.match[1]);
+        const choice = String(ctx.match[2]);
+
+        const st = getState(ctx.from.id);
+        if (!st || st.candidateId !== candidateId || st.step !== "post_training_control") {
+          await ctx.answerCbQuery("Сценарий не активен").catch(() => {});
+          return;
+        }
+
+        const linkUserId = Number(st.pending_link_user_id);
+        if (!Number.isFinite(linkUserId) || linkUserId <= 0) {
+          await ctx.answerCbQuery("Не найден пользователь для привязки").catch(() => {});
+          clearState(ctx.from.id);
+          await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
+            () => {}
+          );
+          return;
+        }
+
+        const canWorkUnderControl = choice === "yes";
+
+        await pool.query(
+          `
+          UPDATE users
+             SET post_training_can_work_under_control = $2
+           WHERE id = $1
+          `,
+          [linkUserId, canWorkUnderControl]
+        );
+
+        await ctx.answerCbQuery().catch(() => {});
+
+        // После выбора — продолжаем назначение стажировки
+        await finishInternshipInvite(ctx, ctx.from.id, user, {
+          linkUserId,
+        });
+      } catch (err) {
+        logError("lk_cand_invite_post_training_control", err);
+      }
+    }
+  );
+
   // Дата: сегодня / завтра
   bot.action(/^lk_cand_invite_date_today_(\d+)$/, async (ctx) => {
     try {

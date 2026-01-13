@@ -670,11 +670,7 @@ function registerShiftFlow(bot, ensureUser, logError) {
 
       const pointId = Number(ctx.match[1]);
 
-      await pool.query(
-        `UPDATE shifts SET trade_point_id=$1 WHERE id=$2 AND user_id=$3`,
-        [pointId, st.shiftId, user.id]
-      );
-
+      setShiftState(ctx.from.id, { ...st, tradePointId: pointId });
       // === transfer check: есть ли активная смена другого сотрудника на этой точке
       const active = await pool.query(
         `
@@ -683,6 +679,8 @@ function registerShiftFlow(bot, ensureUser, logError) {
         JOIN users u ON u.id = s.user_id
         JOIN trade_points tp ON tp.id = s.trade_point_id
         WHERE s.trade_point_id = $1
+          AND (s.closed_at IS NULL)
+          AND s.opened_at >= (now() - interval '18 hours')
           AND s.status = ANY(ARRAY[
   'opening_in_progress'::shift_status,
   'opened'::shift_status,
@@ -699,8 +697,23 @@ function registerShiftFlow(bot, ensureUser, logError) {
 
       if (a && a.telegram_id) {
         // если уже есть pending-запрос на эту точку — не создаём второй
+        // но сначала помечаем просроченные как expired (чтобы не блокировали навсегда)
+        await pool.query(
+          `UPDATE shift_transfer_requests
+              SET status='expired', responded_at = COALESCE(responded_at, now())
+            WHERE trade_point_id=$1
+              AND status='pending'
+              AND expires_at < now()`,
+          [pointId]
+        );
+
         const exists = await pool.query(
-          `SELECT id FROM shift_transfer_requests WHERE trade_point_id=$1 AND status='pending' LIMIT 1`,
+          `SELECT id
+             FROM shift_transfer_requests
+            WHERE trade_point_id=$1
+              AND status='pending'
+              AND expires_at >= now()
+            LIMIT 1`,
           [pointId]
         );
         if (exists.rows[0]) {
@@ -774,6 +787,11 @@ function registerShiftFlow(bot, ensureUser, logError) {
         await showPickPoint(ctx);
         return;
       }
+
+      await pool.query(
+        `UPDATE shifts SET trade_point_id=$1 WHERE id=$2 AND user_id=$3`,
+        [pointId, st.shiftId, user.id]
+      );
 
       setShiftState(ctx.from.id, {
         ...st,

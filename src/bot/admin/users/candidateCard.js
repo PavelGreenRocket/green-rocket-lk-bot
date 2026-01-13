@@ -230,8 +230,7 @@ u_intern.telegram_id AS internship_admin_tg_id,
 u_link.id           AS lk_user_id,
         u_link.full_name    AS lk_user_name,
         u_link.telegram_id  AS lk_user_telegram_id,
-         COALESCE(u_link.lk_enabled, false) AS lk_user_lk_enabled,
-         u_link.training_completed_at AS lk_user_training_completed_at
+         COALESCE(u_link.lk_enabled, false) AS lk_user_lk_enabled
 
 
 FROM candidates c
@@ -253,9 +252,6 @@ FROM candidates c
 
   const cand = res.rows[0];
 
-  const trainingCompleted = !!cand.lk_user_training_completed_at;
-
-
   const isInternshipScheduled =
     !!cand.internship_date &&
     !!cand.internship_time_from &&
@@ -265,6 +261,21 @@ FROM candidates c
 
   const me = ensureUserFn ? await ensureUserFn(ctx) : null;
   const isAdmin = me && (me.role === "admin" || me.role === "super_admin");
+
+  // ✅ отметка о завершении курса (ставится Академией в users.training_completed_at)
+  let trainingCompletedAt = null;
+  if (cand.lk_user_id) {
+    try {
+      const tr = await pool.query(
+        `SELECT training_completed_at FROM users WHERE id = $1 LIMIT 1`,
+        [cand.lk_user_id]
+      );
+      trainingCompletedAt = tr.rows[0]?.training_completed_at || null;
+    } catch (_) {
+      trainingCompletedAt = null;
+    }
+  }
+
 
   // Когда открываем карточку кандидата через переключатель со стажёра/сотрудника,
   // хотим показывать текст как на этапе "приглашён на стажировку" (скрин 3).
@@ -506,6 +517,61 @@ LIMIT 1
       // стажировка завершена (нет активной сессии)
       text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
 
+
+// общий % изученного (как в "данные стажировок")
+if (lkUserId) {
+  try {
+    const userMetaRes = await pool.query(
+      `SELECT training_completed_at, post_training_can_work_under_control
+       FROM users WHERE id = $1`,
+      [lkUserId]
+    );
+    const trainingCompletedAt = userMetaRes.rows[0]?.training_completed_at || null;
+    const canWorkUnderControl = userMetaRes.rows[0]?.post_training_can_work_under_control; // boolean|null
+
+    const totalStepsRes = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM internship_steps`
+    );
+    const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
+
+    let overallPercent = 0;
+    if (totalSteps > 0) {
+      const passedAllRes = await pool.query(
+        `
+        SELECT COUNT(DISTINCT r.step_id)::int AS cnt
+        FROM internship_step_results r
+        JOIN internship_sessions s ON s.id = r.session_id
+        WHERE s.user_id = $1
+          AND s.is_canceled = FALSE
+          AND r.is_passed = TRUE
+        `,
+        [lkUserId]
+      );
+      const passedAll = passedAllRes.rows[0]?.cnt || 0;
+      overallPercent = Math.round((passedAll / totalSteps) * 100);
+    }
+
+    // если академия уже поставила метку завершения — считаем курс пройденным
+    if (trainingCompletedAt) overallPercent = 100;
+
+    text += `• *общий % изученного:* ${overallPercent}%\n`;
+
+    if (overallPercent >= 100) {
+      if (canWorkUnderControl === false) {
+        text += `• *Курс пройден, но стажёр пока не может работать самостоятельно под контролем*\n`;
+      } else if (canWorkUnderControl === true) {
+        text += `• *Курс пройден: работа самостоятельно под контролем*\n`;
+      } else {
+        text += `• *Курс пройден, но режим контроля не выбран наставником*\n`;
+      }
+    }
+
+    text += `\n`;
+  } catch (e) {
+    // не ломаем карточку, если где-то нет таблиц/данных
+  }
+}
+
       // Следующая стажировка показывается ТОЛЬКО если есть planned в internship_schedules
       const nextDate =
         schedule?.status === "planned" ? schedule?.planned_date : null;
@@ -731,17 +797,25 @@ LIMIT 1
             ? me.id === cand.internship_admin_id
             : true);
 
-        // 1) Перейти к обучению / идёт обучение
+        // 1) Перейти к обучению / ⏺️ завершить стажировку / идёт обучение
         if (activeInternshipSession) {
           if (isMentor) {
-            rows.push([
-              Markup.button.url(
-                trainingCompleted
-                  ? "✅ завершить стажировку"
-                  : "⏺️ Перейти к обучению",
-                "https://t.me/baristaAcademy_GR_bot"
-              ),
-            ]);
+            // если курс уже пройден — завершаем стажировку прямо в ЛК-боте
+            if (trainingCompletedAt) {
+              rows.push([
+                Markup.button.callback(
+                  "⏺️ завершить стажировку",
+                  `lk_internship_finish_${cand.id}`
+                ),
+              ]);
+            } else {
+              rows.push([
+                Markup.button.url(
+                  "⏺️ Перейти к обучению",
+                  "https://t.me/baristaAcademy_GR_bot"
+                ),
+              ]);
+            }
           } else {
             rows.push([
               Markup.button.callback(
@@ -1034,53 +1108,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   );
 
-  // 📊 успеваемость (экран-заглушка, внутри кнопка 🌱 данные стажировок)
-  bot.action(/^lk_intern_progress_stub_(\d+)$/, async (ctx) => {
-    try {
-      const candidateId = Number(ctx.match[1]);
-      await ctx.answerCbQuery().catch(() => {});
-
-      const text =
-        "📊 *Успеваемость*\n\n" + "Данные об успеваемости добавим позже.";
-
-      const keyboard = Markup.inlineKeyboard([
-        [
-          Markup.button.callback(
-            "🌱 данные стажировок",
-            `lk_internship_data_${candidateId}`
-          ),
-        ],
-        [
-          Markup.button.callback(
-            "⬅️ Назад к карточке",
-            `lk_intern_progress_back_${candidateId}`
-          ),
-        ],
-      ]);
-
-      await ctx
-        .editMessageText(text, { ...keyboard, parse_mode: "Markdown" })
-        .catch(async () => {
-          await ctx.reply(text, { ...keyboard, parse_mode: "Markdown" });
-        });
-    } catch (err) {
-      logError("lk_intern_progress_stub", err);
-    }
-  });
-
-  // back из экрана "успеваемость" -> карточка стажёра
-  bot.action(/^lk_intern_progress_back_(\d+)$/, async (ctx) => {
-    try {
-      const candidateId = Number(ctx.match[1]);
-      await ctx.answerCbQuery().catch(() => {});
-      await showCandidateCardLk(ctx, candidateId, {
-        edit: true,
-        forceMode: "trainee",
-      });
-    } catch (err) {
-      logError("lk_intern_progress_back", err);
-    }
-  });
+  // 📊 успеваемость вынесена в отдельный модуль (src/bot/admin/users/performance.js)
 
   // ⚙️ Настройки стажёра (отдельный экран)
   bot.action(/^lk_intern_settings_(\d+)$/, async (ctx) => {
@@ -1631,7 +1659,105 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
-  // "идёт обучение" — тост
+  
+  // ⏺️ завершить стажировку (для наставника, когда курс уже пройден)
+  bot.action(/^lk_internship_finish_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const me = await ensureUser(ctx);
+      if (!me || (me.role !== "admin" && me.role !== "super_admin")) return;
+
+      const text =
+        "⏺️ Завершение стажировки\n\n" +
+        "Подтвердите завершение активной сессии стажировки.";
+
+      const kb = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "✅ завершить",
+            `lk_internship_finish_confirm_${candId}`
+          ),
+        ],
+        [Markup.button.callback("⬅️ отмена", `lk_cand_open_${candId}`)],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
+    } catch (err) {
+      logError("lk_internship_finish", err);
+    }
+  });
+
+  bot.action(/^lk_internship_finish_confirm_(\d+)$/, async (ctx) => {
+    try {
+      const candId = Number(ctx.match[1]);
+      await ctx.answerCbQuery().catch(() => {});
+
+      const me = await ensureUser(ctx);
+      if (!me || (me.role !== "admin" && me.role !== "super_admin")) return;
+
+      // user_id по кандидату
+      const ur = await pool.query(
+        `SELECT id FROM users WHERE candidate_id = $1 LIMIT 1`,
+        [candId]
+      );
+      const userId = ur.rows[0]?.id;
+      if (!userId) {
+        await ctx
+          .answerCbQuery("❌ Пользователь не привязан", { show_alert: false })
+          .catch(() => {});
+        await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+        return;
+      }
+
+      // активная сессия
+      const sr = await pool.query(
+        `
+        SELECT id
+        FROM internship_sessions
+        WHERE user_id = $1
+          AND finished_at IS NULL
+          AND is_canceled = FALSE
+        ORDER BY id DESC
+        LIMIT 1
+        `,
+        [userId]
+      );
+
+      const sessionId = sr.rows[0]?.id;
+      if (!sessionId) {
+        await ctx
+          .answerCbQuery("⚠️ Активная стажировка не найдена", { show_alert: false })
+          .catch(() => {});
+        await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+        return;
+      }
+
+      // закрываем
+      await pool.query(
+        `UPDATE internship_sessions SET finished_at = NOW() WHERE id = $1`,
+        [sessionId]
+      );
+
+      // помечаем schedule завершённым (если есть)
+      await pool.query(
+        `UPDATE internship_schedules SET status = 'finished' WHERE session_id = $1`,
+        [sessionId]
+      );
+
+      await ctx
+        .answerCbQuery("✅ Стажировка завершена", { show_alert: false })
+        .catch(() => {});
+
+      await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+    } catch (err) {
+      logError("lk_internship_finish_confirm", err);
+    }
+  });
+
+
+// "идёт обучение" — тост
   bot.action(/^lk_internship_training_locked_(\d+)$/, async (ctx) => {
     try {
       await ctx

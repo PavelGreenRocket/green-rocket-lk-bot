@@ -298,7 +298,7 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       if (!isAdmin(user)) return;
 
       const text = "🛠 <b>Настройка смен</b>\n\nВыберите раздел:";
-      const keyboard = Markup.inlineKeyboard([
+      const rows = [
         [
           {
             text: "🚀 Задачи открытия смены",
@@ -317,15 +317,15 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
             callback_data: "admin_shift_closing_root",
           },
         ],
-         [
+        [
           {
             text: "❗ Порог недостачи",
             callback_data: "admin_cashdiff_shortage_open",
           },
         ],
-         [
+        [
           {
-            text: "💸 Порог излишек",
+            text: "💰 Порог излишка",
             callback_data: "admin_cashdiff_surplus_open",
           },
         ],
@@ -336,7 +336,16 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
           },
         ],
         [{ text: "⬅️ Назад", callback_data: "admin_settings_company" }],
-      ]);
+      ];
+
+      // Только для super_admin
+      if (user.role === "super_admin") {
+        rows.splice(3, 0, [
+          { text: "🟢 Активные смены", callback_data: "admin_active_shifts" },
+        ]);
+      }
+
+      const keyboard = Markup.inlineKeyboard(rows);
 
       await deliver(ctx, { text, extra: keyboard }, { edit: true });
     } catch (err) {
@@ -456,6 +465,257 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       logError("admin_shift_individual_info", err);
     }
   });
+
+
+  // -----------------------------
+  // Активные смены (только super_admin)
+  // -----------------------------
+  bot.action("admin_active_shifts", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const r = await pool.query(
+        `
+        SELECT
+          tp.id AS point_id,
+          tp.title AS point_title,
+          COUNT(*)::int AS active_count
+        FROM shifts s
+        JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE s.trade_point_id IS NOT NULL
+          AND s.closed_at IS NULL
+          AND s.opened_at >= (now() - interval '18 hours')
+          AND s.status = ANY(ARRAY[
+            'opening_in_progress'::shift_status,
+            'opened'::shift_status,
+            'closing_in_progress'::shift_status
+          ])
+        GROUP BY tp.id, tp.title
+        ORDER BY tp.title
+        `
+      );
+
+      const rows = r.rows;
+
+      const text =
+        "🟢 <b>Активные смены</b>\n\n" +
+        (rows.length
+          ? "Выберите точку:"
+          : "Сейчас нет активных смен (за последние ~18 часов).");
+
+      const kbRows = rows.map((p) => [
+        {
+          text: `${p.point_title} (${p.active_count})`,
+          callback_data: `admin_active_shifts_point_${p.point_id}`,
+        },
+      ]);
+
+      kbRows.push([{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }]);
+
+      await deliver(ctx, { text, extra: Markup.inlineKeyboard(kbRows) }, { edit: true });
+    } catch (err) {
+      logError("admin_active_shifts", err);
+    }
+  });
+
+  bot.action(/^admin_active_shifts_point_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const pointId = Number(ctx.match[1]);
+
+      const r = await pool.query(
+        `
+        SELECT
+          s.id AS shift_id,
+          u.id AS user_id,
+          COALESCE(u.full_name, '@' || u.username, 'Сотрудник') AS name,
+          tp.title AS point_title
+        FROM shifts s
+        JOIN users u ON u.id = s.user_id
+        JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE s.trade_point_id = $1
+          AND s.closed_at IS NULL
+          AND s.opened_at >= (now() - interval '18 hours')
+          AND s.status = ANY(ARRAY[
+            'opening_in_progress'::shift_status,
+            'opened'::shift_status,
+            'closing_in_progress'::shift_status
+          ])
+        ORDER BY s.id DESC
+        `,
+        [pointId]
+      );
+
+      const rows = r.rows;
+      const pointTitle = rows[0]?.point_title || "точка";
+
+      const text =
+        `🟢 <b>Активные смены</b>\n\n` +
+        `Точка: <b>${esc(pointTitle)}</b>\n\n` +
+        (rows.length ? "Выберите сотрудника:" : "На этой точке нет активных смен.");
+
+      const kbRows = rows.map((s) => [
+        {
+          text: s.name,
+          callback_data: `admin_active_shifts_user_${s.shift_id}`,
+        },
+      ]);
+
+      kbRows.push([{ text: "⬅️ Назад", callback_data: "admin_active_shifts" }]);
+
+      await deliver(ctx, { text, extra: Markup.inlineKeyboard(kbRows) }, { edit: true });
+    } catch (err) {
+      logError("admin_active_shifts_point", err);
+    }
+  });
+
+  bot.action(/^admin_active_shifts_user_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const shiftId = Number(ctx.match[1]);
+
+      const r = await pool.query(
+        `
+        SELECT
+          s.id AS shift_id,
+          s.trade_point_id,
+          tp.title AS point_title,
+          u.id AS user_id,
+          COALESCE(u.full_name, '@' || u.username, 'Сотрудник') AS name
+        FROM shifts s
+        JOIN users u ON u.id = s.user_id
+        JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE s.id = $1
+        LIMIT 1
+        `,
+        [shiftId]
+      );
+
+      const row = r.rows[0];
+      if (!row) {
+        await ctx.answerCbQuery("❌ Смена не найдена").catch(() => {});
+        return;
+      }
+
+      const text =
+        `🛑 <b>Принудительное завершение смены</b>\n\n` +
+        `Точка: <b>${esc(row.point_title)}</b>\n` +
+        `Сотрудник: <b>${esc(row.name)}</b>\n\n` +
+        `Вы можете принудительно завершить смену для этого сотрудника.\n` +
+        `Если это стажёр — также будет закрыта активная стажировка.`;
+
+      const kb = Markup.inlineKeyboard([
+        [
+          {
+            text: "🛑 Завершить смену",
+            callback_data: `admin_active_shifts_forceclose_${row.shift_id}`,
+          },
+        ],
+        [
+          {
+            text: "⬅️ Назад",
+            callback_data: `admin_active_shifts_point_${row.trade_point_id}`,
+          },
+        ],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
+    } catch (err) {
+      logError("admin_active_shifts_user", err);
+    }
+  });
+
+  bot.action(/^admin_active_shifts_forceclose_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const shiftId = Number(ctx.match[1]);
+
+      // 1) получаем смену
+      const r = await pool.query(
+        `
+        SELECT s.id, s.user_id, s.trade_point_id, tp.title AS point_title
+        FROM shifts s
+        JOIN trade_points tp ON tp.id = s.trade_point_id
+        WHERE s.id = $1
+        LIMIT 1
+        `,
+        [shiftId]
+      );
+
+      const sh = r.rows[0];
+      if (!sh) {
+        await ctx.answerCbQuery("❌ Смена не найдена").catch(() => {});
+        return;
+      }
+
+      // 2) закрываем смену
+      await pool.query(
+        `UPDATE shifts SET status='closed', closed_at=now() WHERE id=$1`,
+        [shiftId]
+      );
+
+      // 3) если есть активная стажировка у этого пользователя — закрываем тоже
+      const ses = await pool.query(
+        `
+        SELECT id, day_number
+        FROM internship_sessions
+        WHERE user_id = $1
+          AND finished_at IS NULL
+          AND is_canceled = FALSE
+        ORDER BY started_at DESC
+        LIMIT 1
+        `,
+        [sh.user_id]
+      );
+
+      const srow = ses.rows[0];
+      if (srow) {
+        await pool.query(
+          `UPDATE internship_sessions SET finished_at = now() WHERE id = $1`,
+          [srow.id]
+        );
+
+        await pool.query(
+          `UPDATE internship_schedules
+             SET status = 'finished',
+                 finished_at = now()
+           WHERE session_id = $1`,
+          [srow.id]
+        );
+
+        // обновим прогресс по дням (если такое поле используется)
+        await pool.query(
+          `
+          UPDATE users
+             SET intern_days_completed = GREATEST(COALESCE(intern_days_completed, 0), $2)
+           WHERE id = $1
+          `,
+          [sh.user_id, srow.day_number]
+        );
+      }
+
+      await ctx.reply(
+        `✅ Смена принудительно завершена на точке *${sh.point_title}*.` +
+          (srow ? "\nТакже закрыта активная стажировка." : ""),
+        { parse_mode: "Markdown" }
+      );
+      await ctx.answerCbQuery("✅ Завершено").catch(() => {});
+    } catch (err) {
+      logError("admin_active_shifts_forceclose", err);
+    }
+  });
+
 }
 
 module.exports = { registerAdminShiftSettings };

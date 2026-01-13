@@ -4,8 +4,8 @@ const { registerCandidateListHandlers } = require("./candidateList");
 const registerCandidateCard = require("./candidateCard");
 const registerCandidateInterview = require("./candidateInterview");
 const registerCandidateInternship = require("./candidateInternship");
-const registerPerformance = require("./performance");
 const { registerCandidateCreate } = require("./candidateCreate");
+const registerCandidatePerformance = require("./performance");
 
 module.exports = function registerAdminUsers(
   bot,
@@ -19,14 +19,14 @@ module.exports = function registerAdminUsers(
   // Карточка кандидата (все статусы + кнопки управления). Тут нужен deliver.
   registerCandidateCard(bot, ensureUser, logError, deliver);
 
+  // Успеваемость (отдельный модуль). Тут нужен deliver.
+  registerCandidatePerformance(bot, ensureUser, logError, deliver);
+
   // Итоги собеседования (при нажатии "✅ Собеседование пройдено")
   registerCandidateInterview(bot, ensureUser, logError);
 
   // Приглашение на стажировку + привязка к пользователю ЛК
   registerCandidateInternship(bot, ensureUser, logError);
-
-  // Успеваемость (аттестация/тесты/стажировки) внутри карточки стажёра
-  registerPerformance(bot, ensureUser, logError, deliver);
 
   // Создание нового кандидата (опрос)
   registerCandidateCreate(bot, ensureUser, logError, deliver);
