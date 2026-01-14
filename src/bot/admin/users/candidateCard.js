@@ -860,7 +860,7 @@ if (lkUserId) {
         rows.push([
           Markup.button.callback(
             "📊 успеваемость",
-            `lk_intern_progress_stub_${cand.id}`
+            `lk_perf_menu_${cand.id}`
           ),
         ]);
       } else {

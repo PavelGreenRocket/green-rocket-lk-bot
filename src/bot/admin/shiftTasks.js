@@ -14,6 +14,19 @@ async function ensureShiftTasksSchema() {
   if (__schemaEnsured) return;
   __schemaEnsured = true;
 
+  // soft-delete for scheduled assignments (so "Удалить" doesn't just выключать)
+  try {
+    await pool.query(`
+      ALTER TABLE task_assignments
+      ADD COLUMN IF NOT EXISTS is_deleted boolean DEFAULT FALSE
+    `);
+    await pool.query(`
+      UPDATE task_assignments
+      SET is_deleted = FALSE
+      WHERE is_deleted IS NULL
+    `);
+  } catch (_) {}
+
   // completion notifications toggle for responsibles
   try {
     await pool.query(`
@@ -394,6 +407,7 @@ async function getPointActiveShiftInfo(pointId) {
 }
 
 async function loadAssignmentsForPoint(pointId) {
+  await ensureShiftTasksSchema();
   const r = await pool.query(
     `
     SELECT
@@ -423,11 +437,13 @@ async function loadAssignmentsForPoint(pointId) {
       FROM task_assignment_targets
       GROUP BY assignment_id
     ) tg ON tg.assignment_id = a.id
-    WHERE a.task_type IN ('global','individual')
+       WHERE a.task_type IN ('global','individual')
+      AND COALESCE(a.is_deleted, FALSE) = FALSE
       AND (
         a.point_scope = 'all_points'
         OR (a.point_scope = 'one_point' AND a.trade_point_id = $1)
       )
+
     ORDER BY a.id ASC
     `,
     [pointId]
@@ -604,7 +620,6 @@ function buildTasksText(
         ? ` 👤(${Number(r.target_count)})`
         : "";
 
-
     const printableTitle = selectedSet.has(Number(r.assignment_id))
       ? `<s>${escHtml(r.title)}</s>`
       : escHtml(r.title);
@@ -619,6 +634,11 @@ function buildTasksText(
   // Подсказка в режиме удаления
   if (mode === "delete") {
     text += `\nНажимайте номера задач (❌), затем «Удалить».\n`;
+  }
+
+  if (mode === "add") {
+    text += "__________________________\n";
+    text += `<b> →   ВВЕДИТЕ ЗАДАЧУ:</b>\n\n`;
   }
 
   return text;
@@ -665,10 +685,7 @@ function buildMainKeyboard(st, items) {
   }
 
   rows.push([
-    Markup.button.callback(
-      `① Разовые задачи`,
-      "admin_shift_tasks_single_root"
-    ),
+    Markup.button.callback(`① Разовые задачи`, "admin_shift_tasks_single_root"),
   ]);
 
   rows.push([
@@ -717,8 +734,8 @@ function buildAddKeyboard(st) {
   const targetIds = Array.isArray(a.targetUserIds) ? a.targetUserIds : [];
 
   const whoLabel = targetIds.length
-    ? `👤 Для кого? (выбрано: ${targetIds.length})`
-    : "👥 Для кого? (все)";
+    ? `👤 Исполнители (выбрано: ${targetIds.length})`
+    : "👥 Исполнители (все)";
 
   const rows = [
     [
@@ -746,7 +763,6 @@ function buildAddKeyboard(st) {
 
   return Markup.inlineKeyboard(rows);
 }
-
 
 async function renderSingleListForDate(ctx, user) {
   const st = getSt(ctx.from.id);
@@ -786,12 +802,21 @@ async function renderSingleListForDate(ctx, user) {
 
   const rows = [];
   const btns = oneTime.map((r, i) =>
-    Markup.button.callback(String(i + 1), `admin_shift_tasks_open_${r.assignment_id}`)
+    Markup.button.callback(
+      String(i + 1),
+      `admin_shift_tasks_open_${r.assignment_id}`
+    )
   );
   for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")]);
+  rows.push([
+    Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw"),
+  ]);
 
-  await deliver(ctx, { text, extra: Markup.inlineKeyboard(rows) }, { edit: true });
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
 }
 
 async function renderScheduledListForDate(ctx, user) {
@@ -826,7 +851,12 @@ async function renderScheduledListForDate(ctx, user) {
   if (!sched.length) {
     text += `На эту дату задач по расписанию нет.\n`;
     const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("⚙ все задачи по расписанию", "admin_shift_tasks_sched_all")],
+      [
+        Markup.button.callback(
+          "⚙ все задачи по расписанию",
+          "admin_shift_tasks_sched_all"
+        ),
+      ],
       [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")],
     ]);
     return deliver(ctx, { text, extra: kb }, { edit: true });
@@ -840,14 +870,28 @@ async function renderScheduledListForDate(ctx, user) {
 
   const rows = [];
   const btns = sched.map((r, i) =>
-    Markup.button.callback(String(i + 1), `admin_shift_tasks_open_${r.assignment_id}`)
+    Markup.button.callback(
+      String(i + 1),
+      `admin_shift_tasks_open_${r.assignment_id}`
+    )
   );
   for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
 
-  rows.push([Markup.button.callback("⚙ все задачи по расписанию", "admin_shift_tasks_sched_all")]);
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw")]);
+  rows.push([
+    Markup.button.callback(
+      "⚙ все задачи по расписанию",
+      "admin_shift_tasks_sched_all"
+    ),
+  ]);
+  rows.push([
+    Markup.button.callback("⬅️ Назад", "admin_shift_tasks_point_redraw"),
+  ]);
 
-  await deliver(ctx, { text, extra: Markup.inlineKeyboard(rows) }, { edit: true });
+  await deliver(
+    ctx,
+    { text, extra: Markup.inlineKeyboard(rows) },
+    { edit: true }
+  );
 }
 
 async function renderScheduledList(ctx, user) {
@@ -1026,7 +1070,6 @@ function buildWeekdaysPickerEdit(mask, assignmentId) {
   return Markup.inlineKeyboard(rows);
 }
 
-
 function buildDeleteKeyboard(items, selectedIds) {
   const rows = [];
 
@@ -1156,7 +1199,7 @@ async function sendNewTasksNotification(
 
 async function renderPointScreen(ctx, adminUser) {
   const st = getSt(ctx.from.id);
-  setSt(ctx.from.id, { lastList: 'point' });
+  setSt(ctx.from.id, { lastList: "point" });
   if (!st.dateISO) {
     const today = await dbTodayISO();
     setSt(ctx.from.id, { dateISO: today });
@@ -1327,8 +1370,8 @@ async function renderScheduledCard(ctx, user, assignmentId) {
   const respCnt = Number(row.resp_cnt || 0);
 
   const whoBtnLabel = targetCnt
-    ? `👤 Для кого? (выбрано ${targetCnt})`
-    : "👥 Для кого? (все)";
+    ? `👤 Исполнители (выбрано ${targetCnt})`
+    : "👥 Исполнители (все)";
 
   const respBtnLabel = respCnt
     ? `🤵‍♂️ Ответственные (выбрано ${respCnt})`
@@ -1369,15 +1412,14 @@ async function renderScheduledCard(ctx, user, assignmentId) {
 
     [
       Markup.button.callback(
-        pointsBtnLabel,
-        `admin_shift_tasks_sched_points_${row.assignment_id}`
-      ),
-    ],
-
-    [
-      Markup.button.callback(
         whoBtnLabel,
         `admin_shift_tasks_sched_users_${row.assignment_id}`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        pointsBtnLabel,
+        `admin_shift_tasks_sched_points_${row.assignment_id}`
       ),
     ],
     [
@@ -1386,10 +1428,11 @@ async function renderScheduledCard(ctx, user, assignmentId) {
         `admin_shift_tasks_sched_toggle_${row.assignment_id}`
       ),
     ],
+
     [
       Markup.button.callback(
         "🗑 Удалить",
-        `admin_shift_tasks_sched_delete_${row.assignment_id}`
+         `admin_shift_tasks_sched_delete_confirm_${row.assignment_id}`
       ),
     ],
     [Markup.button.callback("⬅️ Назад", "admin_shift_tasks_sched_root")],
@@ -1907,7 +1950,7 @@ async function renderSchedRespScreen(ctx, user, assignmentId) {
   const resp = await loadSchedResponsibles(assignmentId);
   const settings = await loadSchedRespSettings(assignmentId);
 
-  let text = `🤵‍♂️ <b>Ответственные задачи</b>\n\n`;
+  let text = `🤵‍♂️ Ответственные <b>Ответственные задачи</b>\n\n`;
   text += `Задача: <b>${escHtml(a.title)}</b>\n\n`;
 
   if (!resp.length) {
@@ -1983,7 +2026,6 @@ ${remindersLine}${daysLine}${completionLine}`;
         `admin_shift_tasks_sched_resp_notif_on_${assignmentId}`
       ),
     ]);
-
   }
 
   // toggle оповещений о выполнении (всегда показываем независимо от напоминаний)
@@ -2493,9 +2535,12 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
           cu.work_phone AS creator_phone,
           t.title,
           t.answer_type
+              , s.schedule_type
         FROM task_assignments a
         JOIN task_templates t ON t.id = a.template_id
         LEFT JOIN users cu ON cu.id = a.created_by_user_id
+                LEFT JOIN task_schedules s ON s.assignment_id = a.id
+
         WHERE a.id = $1
         LIMIT 1
       `,
@@ -2517,32 +2562,95 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       ? "✅ <b>Выполнено</b>"
       : "▫️ <b>Ожидание выполнения</b>";
 
-    const creator = [
-      asg.creator_name ? escHtml(asg.creator_name) : "—",
-      asg.creator_username ? `@${escHtml(asg.creator_username)}` : null,
-      asg.creator_phone ? escHtml(asg.creator_phone) : null,
-    ]
-      .filter(Boolean)
-      .join(" / ");
+    const fmtPerson = (name, username, phone) => {
+      const nm = name ? escHtml(name) : "—";
+      const un = username ? `@${escHtml(username)}` : null;
+      const ph = phone ? escHtml(phone) : null;
+
+      // если есть username — телефон не показываем
+      if (un) return `${nm} / ${un}`;
+      if (ph) return `${nm} / ${ph}`;
+      return nm;
+    };
+
+    const creator = fmtPerson(
+      asg.creator_name,
+      asg.creator_username,
+      asg.creator_phone
+    );
 
     const doneBy = doneInfo
-      ? [
-          doneInfo.done_by_name ? escHtml(doneInfo.done_by_name) : "—",
-          doneInfo.done_by_username
-            ? `@${escHtml(doneInfo.done_by_username)}`
-            : null,
-          doneInfo.done_by_phone ? escHtml(doneInfo.done_by_phone) : null,
-        ]
-          .filter(Boolean)
-          .join(" / ")
+      ? fmtPerson(
+          doneInfo.done_by_name,
+          doneInfo.done_by_username,
+          doneInfo.done_by_phone
+        )
       : null;
 
-    let text = `📌 <b>Задача</b>\n\n`;
-    text += `📝 <b>Текст:</b> ${escHtml(asg.title)}\n`;
-    text += `📅 <b>Дата:</b> ${fmtRuDate(st.dateISO)}\n\n`;
+    const scheduleType = asg.schedule_type || null; // 'single'|'weekly'|'every_x_days'|null
+    const mark = scheduleType ? scheduleMark(scheduleType) : "①";
+
+    // "по расписанию" считаем только периодические (не single)
+    const isScheduled = !!scheduleType && scheduleType !== "single";
+
+    // Исполнители (targets). Если пусто -> (все)
+    const tRes = await pool.query(
+      `
+        SELECT u.full_name, u.username, u.work_phone
+        FROM task_assignment_targets tat
+        JOIN users u ON u.id = tat.user_id
+        WHERE tat.assignment_id = $1
+        ORDER BY u.full_name NULLS LAST, u.id
+      `,
+      [assignmentId]
+    );
+
+    const execLines = (tRes.rows || []).map(
+      (u) => `. ${fmtPerson(u.full_name, u.username, u.work_phone)}`
+    );
+
+    // Ответственные (только для задач по расписанию)
+    let respLines = [];
+    if (isScheduled) {
+      const rRes = await pool.query(
+        `
+          SELECT u.full_name, u.username, u.work_phone
+          FROM task_assignment_responsibles tar
+          JOIN users u ON u.id = tar.user_id
+          WHERE tar.assignment_id = $1
+          ORDER BY u.full_name NULLS LAST, u.id
+        `,
+        [assignmentId]
+      );
+
+      respLines = (rRes.rows || []).map(
+        (u) => `. ${fmtPerson(u.full_name, u.username, u.work_phone)}`
+      );
+    }
+
+    let text = `(${mark}) ${escHtml(asg.title)}\n\n`;
+
+    text += ` 📅 <b>Дата:</b> ${fmtRuDate(st.dateISO)}\n`;
     text += `${statusLine}\n\n`;
-    text += `👤 <b>Кто создал:</b> ${creator}\n`;
-    text += `✅ <b>Кто выполнил:</b> ${doneBy ? doneBy : "—"}\n`;
+
+    // Исполнители — всегда
+    if (execLines.length) {
+      text += `<u><b>👥 Исполнители:</b></u>\n${execLines.join("")}\n\n`;
+    } else {
+      text += `<u><b>👥 Исполнители</b></u>\n . (все)\n\n`;
+    }
+
+    // Ответственные — только для задач по расписанию (периодических)
+    if (isScheduled) {
+      if (respLines.length) {
+        text += `<u><b>🤵‍♂️ Ответственные:</b></u>\n${respLines.join("")}\n\n`;
+      } else {
+        text += `<u><b>🤵‍♂️ Ответственные</b></u>\n . (не назначены)\n\n`;
+      }
+    }
+    text += `<u><b>ℹ️ Служебная информация</b></u>\n`;
+    text += `. <b>Кто создал:</b> ${creator}\n`;
+    text += `. <b>Кто выполнил:</b> ${doneBy ? doneBy : "—"}\n`;
 
     if (doneInfo) {
       // медиа
@@ -2568,7 +2676,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       }
     }
 
-    const kb = Markup.inlineKeyboard([
+    const rows = [
       [
         Markup.button.callback(
           "📅 Перенести задачу",
@@ -2579,13 +2687,26 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
           `admin_shift_tasks_task_clone_${assignmentId}`
         ),
       ],
-      [
+    ];
+
+    // ⚙ Параметры — только для задач по расписанию (периодических)
+    if (isScheduled) {
+      rows.push([
         Markup.button.callback(
-          "⬅️ Назад к задачам",
-          "admin_shift_tasks_back_to_list"
+          "⚙ Параметры",
+          `admin_shift_tasks_sched_card_${assignmentId}`
         ),
-      ],
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback(
+        "⬅️ Назад к задачам",
+        "admin_shift_tasks_back_to_list"
+      ),
     ]);
+
+    const kb = Markup.inlineKeyboard(rows);
 
     await deliver(ctx, { text, extra: kb }, { edit: !!opts.edit });
   }
@@ -2626,7 +2747,6 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       logError("admin_shift_tasks_t", e);
     }
   });
-
 
   // открыть карточку задачи по нажатию на номер в списках (разовые / расписание на дату)
   bot.action(/^admin_shift_tasks_open_(\d+)$/, async (ctx) => {
@@ -2909,7 +3029,9 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     for (let day = start; day <= end; day++) {
       const iso = ymd(year, month, day);
       const label = iso === op.dateISO ? `✅ ${pad2(day)}` : pad2(day);
-      btns.push(Markup.button.callback(label, `admin_shift_tasks_taskop_day_set_${iso}`));
+      btns.push(
+        Markup.button.callback(label, `admin_shift_tasks_taskop_day_set_${iso}`)
+      );
     }
 
     const rows = [];
@@ -2918,9 +3040,15 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     const hasSecondPage = maxDay > 16;
     if (hasSecondPage) {
       rows.push([
-        Markup.button.callback("⬅️", `admin_shift_tasks_taskop_day_page_${page === 0 ? 0 : 0}`),
+        Markup.button.callback(
+          "⬅️",
+          `admin_shift_tasks_taskop_day_page_${page === 0 ? 0 : 0}`
+        ),
         Markup.button.callback(page === 0 ? "1–16" : "17–31", "noop"),
-        Markup.button.callback("➡️", `admin_shift_tasks_taskop_day_page_${page === 0 ? 1 : 1}`),
+        Markup.button.callback(
+          "➡️",
+          `admin_shift_tasks_taskop_day_page_${page === 0 ? 1 : 1}`
+        ),
       ]);
     }
 
@@ -2931,7 +3059,9 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     await deliver(
       ctx,
       {
-        text: `📅 <b>Выберите день</b>\n\nТекущая дата: <b>${fmtRuDate(op.dateISO)}</b>`,
+        text: `📅 <b>Выберите день</b>\n\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
         extra: Markup.inlineKeyboard(rows),
       },
       { edit: true }
@@ -2947,21 +3077,41 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     const year = d.getFullYear();
     const curMonth = d.getMonth() + 1;
 
-    const months = ["01","02","03","04","05","06","07","08","09","10","11","12"];
+    const months = [
+      "01",
+      "02",
+      "03",
+      "04",
+      "05",
+      "06",
+      "07",
+      "08",
+      "09",
+      "10",
+      "11",
+      "12",
+    ];
     const btns = months.map((mm, idx) => {
       const m = idx + 1;
       const label = m === curMonth ? `✅ ${mm}` : mm;
-      return Markup.button.callback(label, `admin_shift_tasks_taskop_month_set_${m}`);
+      return Markup.button.callback(
+        label,
+        `admin_shift_tasks_taskop_month_set_${m}`
+      );
     });
 
     const rows = [];
     for (let i = 0; i < btns.length; i += 4) rows.push(btns.slice(i, i + 4));
-    rows.push([Markup.button.callback("✅ Готово", "admin_shift_tasks_taskop_back")]);
+    rows.push([
+      Markup.button.callback("✅ Готово", "admin_shift_tasks_taskop_back"),
+    ]);
 
     await deliver(
       ctx,
       {
-        text: `📅 <b>Выберите месяц</b>\n\nГод: <b>${year}</b>\nТекущая дата: <b>${fmtRuDate(op.dateISO)}</b>`,
+        text: `📅 <b>Выберите месяц</b>\n\nГод: <b>${year}</b>\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
         extra: Markup.inlineKeyboard(rows),
       },
       { edit: true }
@@ -2980,24 +3130,37 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
 
     const btns = years.map((y) => {
       const label = y === curYear ? `✅ ${y}` : String(y);
-      return Markup.button.callback(label, `admin_shift_tasks_taskop_year_set_${y}`);
+      return Markup.button.callback(
+        label,
+        `admin_shift_tasks_taskop_year_set_${y}`
+      );
     });
 
     const rows = [];
     for (let i = 0; i < btns.length; i += 3) rows.push(btns.slice(i, i + 3));
 
     rows.push([
-      Markup.button.callback("⬅️", `admin_shift_tasks_taskop_year_page_${page - 1}`),
+      Markup.button.callback(
+        "⬅️",
+        `admin_shift_tasks_taskop_year_page_${page - 1}`
+      ),
       Markup.button.callback("", "noop"),
-      Markup.button.callback("➡️", `admin_shift_tasks_taskop_year_page_${page + 1}`),
+      Markup.button.callback(
+        "➡️",
+        `admin_shift_tasks_taskop_year_page_${page + 1}`
+      ),
     ]);
 
-    rows.push([Markup.button.callback("✅ Готово", "admin_shift_tasks_taskop_back")]);
+    rows.push([
+      Markup.button.callback("✅ Готово", "admin_shift_tasks_taskop_back"),
+    ]);
 
     await deliver(
       ctx,
       {
-        text: `📅 <b>Выберите год</b>\n\nТекущая дата: <b>${fmtRuDate(op.dateISO)}</b>`,
+        text: `📅 <b>Выберите год</b>\n\nТекущая дата: <b>${fmtRuDate(
+          op.dateISO
+        )}</b>`,
         extra: Markup.inlineKeyboard(rows),
       },
       { edit: true }
@@ -3199,21 +3362,24 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(/^admin_shift_tasks_taskop_day_set_(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
-    try {
-      await ctx.answerCbQuery().catch(() => {});
-      const user = await ensureUser(ctx);
-      if (!isAdmin(user)) return;
-      const st = getSt(ctx.from.id);
-      const op = st?.taskOp;
-      if (!op) return;
+  bot.action(
+    /^admin_shift_tasks_taskop_day_set_(\d{4}-\d{2}-\d{2})$/,
+    async (ctx) => {
+      try {
+        await ctx.answerCbQuery().catch(() => {});
+        const user = await ensureUser(ctx);
+        if (!isAdmin(user)) return;
+        const st = getSt(ctx.from.id);
+        const op = st?.taskOp;
+        if (!op) return;
 
-      setSt(ctx.from.id, { taskOp: { ...op, dateISO: ctx.match[1] } });
-      return renderTaskOpDayPicker(ctx, user, 0);
-    } catch (e) {
-      logError("taskop_day_set", e);
+        setSt(ctx.from.id, { taskOp: { ...op, dateISO: ctx.match[1] } });
+        return renderTaskOpDayPicker(ctx, user, 0);
+      } catch (e) {
+        logError("taskop_day_set", e);
+      }
     }
-  });
+  );
 
   bot.action(/^admin_shift_tasks_taskop_month_set_(\d{1,2})$/, async (ctx) => {
     try {
@@ -3268,7 +3434,9 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       const maxDay = daysInMonth(year, month);
       const safeDay = Math.min(day, maxDay);
 
-      setSt(ctx.from.id, { taskOp: { ...op, dateISO: ymd(year, month, safeDay) } });
+      setSt(ctx.from.id, {
+        taskOp: { ...op, dateISO: ymd(year, month, safeDay) },
+      });
       return renderTaskOpDayPicker(ctx, user, safeDay <= 16 ? 0 : 1);
     } catch (e) {
       logError("taskop_year_set", e);
@@ -3696,7 +3864,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   );
 
-  // Для кого? (внутри добавления задачи)
+  // Исполнители (внутри добавления задачи)
   bot.action("admin_shift_tasks_add_forwho", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -3821,8 +3989,9 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       if (!isAdmin(user)) return;
 
       const id = Number(ctx.match[1]);
+      await ensureShiftTasksSchema();
       await pool.query(
-        `UPDATE task_assignments SET is_active = FALSE WHERE id=$1`,
+        `UPDATE task_assignments SET is_active = FALSE, is_deleted = TRUE WHERE id=$1`,
         [id]
       );
 
@@ -3831,6 +4000,44 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       logError("admin_shift_tasks_sched_delete", e);
     }
   });
+
+  bot.action(/admin_shift_tasks_sched_delete_confirm_(\d+)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = await ensureUser(ctx);
+    if (!isAdmin(user)) return;
+
+    const assignmentId = Number(ctx.match[1]);
+
+    await deliver(
+      ctx,
+      {
+        text:
+          "⚠️ <b>Удалить задачу по расписанию?</b>\n\n" +
+          "Задача будет скрыта из всех списков.\n" +
+          "Это действие нельзя отменить.",
+        extra: Markup.inlineKeyboard([
+          [
+            Markup.button.callback(
+              "✅ Да, удалить",
+              `admin_shift_tasks_sched_delete_${assignmentId}`
+            ),
+          ],
+          [
+            Markup.button.callback(
+              "⬅️ Отмена",
+              `admin_shift_tasks_sched_card_${assignmentId}`
+            ),
+          ],
+        ]),
+      },
+      { edit: true }
+    );
+  } catch (e) {
+    logError("admin_shift_tasks_sched_delete_confirm", e);
+  }
+});
+
 
   bot.action(/^admin_shift_tasks_sched_period_(\d+)$/, async (ctx) => {
     try {
@@ -3879,13 +4086,41 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       if (!isAdmin(user)) return;
 
       const st = getSt(ctx.from.id);
-      setSt(ctx.from.id, { add: { ...(st.add || {}), weekdaysMask: 0 } });
+      const assignmentId = Number(st.editPickId);
+      if (!assignmentId) return;
 
+      // подгружаем текущую маску из БД (чтобы редактирование было "как есть", а не с нуля)
+      const r = await pool.query(
+        `
+        SELECT COALESCE(weekdays_mask, 0)::int AS weekdays_mask
+        FROM task_schedules
+        WHERE assignment_id = $1
+        LIMIT 1
+      `,
+        [assignmentId]
+      );
+
+      const mask = Number(r.rows[0]?.weekdays_mask || 0);
+
+      // ВАЖНО: переводим в режим редактирования days-of-week
+      // иначе toggle-хендлеры не сработают как мультивыбор
+      setSt(ctx.from.id, {
+        step: "sched_edit_weekdays",
+        editPickId: assignmentId,
+        add: {
+          ...(st.add || {}),
+          scheduleType: "weekly",
+          weekdaysMask: mask,
+        },
+      });
+
+      // ВАЖНО: используем EDIT-пикер (без "свернуть" и с "Готово"),
+      // а не ADD-пикер
       await deliver(
         ctx,
         {
           text: "Выберите дни недели (мультивыбор ✅):",
-          extra: buildWeekdaysPicker(0),
+          extra: buildWeekdaysPickerEdit(mask, assignmentId),
         },
         { edit: true }
       );
@@ -4724,7 +4959,11 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         setSt(ctx.from.id, {
           step: "sched_edit_weekdays",
           editPickId: assignmentId,
-          add: { ...(st.add || {}), scheduleType: "weekly", weekdaysMask: mask },
+          add: {
+            ...(st.add || {}),
+            scheduleType: "weekly",
+            weekdaysMask: mask,
+          },
         });
 
         await deliver(
@@ -4739,7 +4978,9 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       }
 
       // Режим создания/добавления: оставляем прежний флоу
-      setSt(ctx.from.id, { add: { ...(st.add || {}), scheduleType: "weekly" } });
+      setSt(ctx.from.id, {
+        add: { ...(st.add || {}), scheduleType: "weekly" },
+      });
 
       await deliver(
         ctx,
@@ -4753,8 +4994,6 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       logError("admin_shift_tasks_add_period_weekly", e);
     }
   });
-;
-
   bot.action(
     /^admin_shift_tasks_add_weekdays_toggle_(mon|tue|wed|thu|fri|sat|sun)$/,
     async (ctx) => {
@@ -4823,7 +5062,12 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         const key = ctx.match[2];
 
         const st = getSt(ctx.from.id);
-        if (!(st.step === "sched_edit_weekdays" && Number(st.editPickId) === assignmentId)) {
+        if (
+          !(
+            st.step === "sched_edit_weekdays" &&
+            Number(st.editPickId) === assignmentId
+          )
+        ) {
           // если потеряли контекст — просто вернём в карточку
           await renderScheduledCard(ctx, user, assignmentId);
           return;
@@ -4837,7 +5081,11 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
 
         setSt(ctx.from.id, {
           ...st,
-          add: { ...(st.add || {}), weekdaysMask: nextMask, scheduleType: "weekly" },
+          add: {
+            ...(st.add || {}),
+            weekdaysMask: nextMask,
+            scheduleType: "weekly",
+          },
         });
 
         await deliver(
@@ -4854,21 +5102,19 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   );
 
-  bot.action(
-    /^admin_shift_tasks_sched_weekdays_done_(\d+)$/,
-    async (ctx) => {
-      try {
-        await ctx.answerCbQuery().catch(() => {});
-        const user = await ensureUser(ctx);
-        if (!isAdmin(user)) return;
+  bot.action(/^admin_shift_tasks_sched_weekdays_done_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
 
-        const assignmentId = Number(ctx.match[1]);
-        const st = getSt(ctx.from.id);
+      const assignmentId = Number(ctx.match[1]);
+      const st = getSt(ctx.from.id);
 
-        const mask = Number((st.add || {}).weekdaysMask || 0);
+      const mask = Number((st.add || {}).weekdaysMask || 0);
 
-        await pool.query(
-          `
+      await pool.query(
+        `
           UPDATE task_schedules
           SET schedule_type='weekly',
               weekdays_mask=$2,
@@ -4877,20 +5123,21 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
               single_date=NULL
           WHERE assignment_id=$1
           `,
-          [assignmentId, mask]
-        );
+        [assignmentId, mask]
+      );
 
-        await ctx.answerCbQuery("Применено ✅").catch(() => {});
-        // возвращаем в карточку задачи по расписанию
-        setSt(ctx.from.id, { step: null, editPickId: null, add: { ...(st.add || {}) } });
-        await renderScheduledCard(ctx, user, assignmentId);
-      } catch (e) {
-        logError("admin_shift_tasks_sched_weekdays_done", e);
-      }
+      await ctx.answerCbQuery("Применено ✅").catch(() => {});
+      // возвращаем в карточку задачи по расписанию
+      setSt(ctx.from.id, {
+        step: null,
+        editPickId: null,
+        add: { ...(st.add || {}) },
+      });
+      await renderScheduledCard(ctx, user, assignmentId);
+    } catch (e) {
+      logError("admin_shift_tasks_sched_weekdays_done", e);
     }
-  );
-
-
+  });
 
   bot.action("admin_shift_tasks_add_weekdays_close", async (ctx) => {
     try {
@@ -5138,7 +5385,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         [
           Markup.button.callback(
             "🗑 Удалить",
-            `admin_shift_tasks_sched_resp_rm_ok_${assignmentId}_${userId}`
+            `admin_shift_tasks_sched_delete_confirm_${assignmentId}_${userId}`
           ),
         ],
         [
@@ -5391,7 +5638,6 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   );
 
-  
   // toggle оповещений о выполнении (без подтверждения)
   bot.action(
     /^admin_shift_tasks_sched_resp_completion_on_(\d+)$/,
@@ -5402,9 +5648,13 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         if (!isAdmin(user)) return;
 
         const assignmentId = Number(ctx.match[1]);
-        await upsertSchedRespSettings(assignmentId, { completion_enabled: true });
+        await upsertSchedRespSettings(assignmentId, {
+          completion_enabled: true,
+        });
         await ctx
-          .answerCbQuery("🔔 Оповещения о выполнении включены", { show_alert: false })
+          .answerCbQuery("🔔 Оповещения о выполнении включены", {
+            show_alert: false,
+          })
           .catch(() => {});
         await renderSchedRespScreen(ctx, user, assignmentId);
       } catch (e) {
@@ -5422,9 +5672,13 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
         if (!isAdmin(user)) return;
 
         const assignmentId = Number(ctx.match[1]);
-        await upsertSchedRespSettings(assignmentId, { completion_enabled: false });
+        await upsertSchedRespSettings(assignmentId, {
+          completion_enabled: false,
+        });
         await ctx
-          .answerCbQuery("🔕 Оповещения о выполнении выключены", { show_alert: false })
+          .answerCbQuery("🔕 Оповещения о выполнении выключены", {
+            show_alert: false,
+          })
           .catch(() => {});
         await renderSchedRespScreen(ctx, user, assignmentId);
       } catch (e) {
@@ -5433,7 +5687,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
     }
   );
 
-// ----- SCHEDULE FILTER + EDIT PERIOD -----
+  // ----- SCHEDULE FILTER + EDIT PERIOD -----
   bot.action("admin_shift_tasks_sched_root", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -5469,8 +5723,6 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       logError("admin_shift_tasks_single_root", e);
     }
   });
-
-
 
   bot.action(/^admin_shift_tasks_edit_pick_(\d+)$/, async (ctx) => {
     try {
@@ -5611,7 +5863,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
 
   // ----- TEXT INPUT HANDLER (add task / set time / set everyX) -----
 
-  // ловим пересланные сообщения для выбора "Для кого?"
+  // ловим пересланные сообщения для выбора "Исполнители"
   bot.on("message", async (ctx, next) => {
     try {
       const st = getSt(ctx.from.id);
@@ -5775,7 +6027,7 @@ function registerAdminShiftTasks(bot, ensureUser, logError) {
       return;
     }
 
-    // 0.1) поиск пользователя для "Для кого?"
+    // 0.1) поиск пользователя для "Исполнители"
     if (st.step === "add_forwho_input" && st.mode === "add") {
       const candidates = await searchUsersForWho(txt);
       if (!candidates.length) {
