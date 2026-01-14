@@ -58,43 +58,124 @@ async function showProfileShiftScreen(ctx, user, { edit = true } = {}) {
 
   const baseText = await buildStatusText(user);
 
-  let shiftBlock = "\n\n<b>Смена</b>\n";
+  let shiftBlock = "\n<u><b>Смена</b></u>\n";
   if (activeShift) {
-    shiftBlock += `🟢 Активна (<b>${activeShift.point_title || "—"}</b>)\n`;
+    shiftBlock +=
+      `🟢 Активна (<b>${activeShift.point_title || "—"}</b>)\n` +
+      `📋 Задачи: 1/3 выполнены \n\n`;
   } else {
     shiftBlock += `⚪️ Не открыта\n`;
   }
+  shiftBlock += `<u><b>Текущие показатели:</b></u>\n`;
+  shiftBlock += `• <b>Выручка:</b> 12 000 ₽\n`;
+  shiftBlock += `• <b>Выплата за смену:</b> 1 200 ₽\n\n`;
+
+  shiftBlock += `<u><b>До премии +10%:</b></u>\n`;
+  shiftBlock += `🔥 Осталось <b>100 ₽</b> выручки\n`;
+  shiftBlock += `(+300 ₽ к выплате)`;
 
   const rows = [];
 
-  if (activeShift) {
-    rows.push([Markup.button.callback("🛑 Закрыть смену", "lk_shift_toggle")]);
-    rows.push([Markup.button.callback("📋 Задачи смены", "lk_tasks_today")]);
+  // 1) Группа "Смена"
+  rows.push([
+    Markup.button.callback(" 🚀 Смена (📋 - 💬 - 📝)", "lk_shift_group"),
+  ]);
 
-    rows.push([
-      Markup.button.callback(
-        "💬 Замечание по прошлой смене",
-        "lk_prev_shift_complaints"
-      ),
-    ]);
+  // 2) Группа "Операции"
+  rows.push([Markup.button.callback("🧩 Операции (🚫 - 📦 - 📖)", "lk_ops_group")]);
 
+  // 3/4) Отчёты vs Аналитика и отчёты
+  if (isAdminRole(user.role)) {
     rows.push([
-      Markup.button.callback(
-        "📝 Комментарий для следующей смены",
-        "lk_next_shift_comment"
-      ),
+      Markup.button.callback(" 📊 Аналитика и отчёты", "lk_analytics_group"),
     ]);
   } else {
-    rows.push([Markup.button.callback("🚀 Открыть смену", "lk_shift_toggle")]);
+    rows.push([Markup.button.callback("📊 Отчёты", "lk_reports")]);
   }
 
-  rows.push([Markup.button.callback("📊 Отчёты", "lk_reports")]);
   rows.push([Markup.button.callback("⬅️ В меню", "lk_main_menu")]);
 
   await deliver(
     ctx,
     {
-      text: `${baseText}${shiftBlock}\n\nВыберите действие:`,
+      text:
+        `${baseText}${shiftBlock}\n` +
+        `______________________________\n`,
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
+async function showShiftGroupMenu(ctx, user, { edit = true } = {}) {
+  const activeShift = await getActiveShift(user.id);
+  const rows = [];
+
+  // 1.1 Закрыть/Открыть смену (callback один и тот же, как было)
+  rows.push([
+    Markup.button.callback(
+      activeShift ? "🛑 Закрыть смену" : "🚀 Открыть смену",
+      "lk_shift_toggle"
+    ),
+  ]);
+
+  // Остальные пункты актуальны, когда смена активна
+  if (activeShift) {
+    rows.push([Markup.button.callback("📋 Задачи смены", "lk_tasks_today")]);
+    rows.push([
+      Markup.button.callback(
+        "💬 Комментарий для следующей смены",
+        "lk_next_shift_comment"
+      ),
+    ]);
+    rows.push([
+      Markup.button.callback(
+        "📝 Замечания по прошлой смене",
+        "lk_prev_shift_complaints"
+      ),
+    ]);
+  }
+
+  rows.push([Markup.button.callback("⬅️ Назад", "lk_profile_shift")]);
+
+  await deliver(
+    ctx,
+    {
+      text: " 🚀 Смена (📋 - 💬 - 📝)\n\nВыберите действие:",
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
+async function showOpsGroupMenu(ctx, user, { edit = true } = {}) {
+  const rows = [];
+
+  rows.push([Markup.button.callback("🚫 Стоп-листы", "lk_ops_stoplists_stub")]);
+  rows.push([Markup.button.callback("📦 Склад", "lk_ops_warehouse_wip")]);
+
+  rows.push([Markup.button.callback("⬅️ Назад", "lk_profile_shift")]);
+
+  await deliver(
+    ctx,
+    {
+      text: "🧩 Операции (🚫 - 📦 - 📖)\n\nВыберите раздел:",
+      extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
+    },
+    { edit }
+  );
+}
+
+async function showAnalyticsGroupMenu(ctx, user, { edit = true } = {}) {
+  const rows = [
+    [Markup.button.callback("📊 Отчёты", "lk_reports")],
+    [Markup.button.callback("⬅️ Назад", "lk_profile_shift")],
+  ];
+
+  await deliver(
+    ctx,
+    {
+      text: "📊 Аналитика и отчёты\n\nВыберите раздел:",
       extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
     },
     { edit }
@@ -304,7 +385,6 @@ async function buildStatusText(user) {
   text += `${statusLine}\n`;
   if (roleLine) text += roleLine;
   if (positionLine) text += positionLine;
-  text += "\nЛичный кабинет активен";
 
   return text;
 }
@@ -458,6 +538,58 @@ function registerMenu(bot, ensureUser, logError) {
       await showProfileShiftScreen(ctx, user, { edit: true });
     } catch (err) {
       logError("lk_profile_shift", err);
+    }
+  });
+
+  // Группа "Смена"
+  bot.action("lk_shift_group", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await showShiftGroupMenu(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_shift_group", err);
+    }
+  });
+
+  // Группа "Операции"
+  bot.action("lk_ops_group", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      await showOpsGroupMenu(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_ops_group", err);
+    }
+  });
+
+  // Заглушки
+  bot.action("lk_ops_stoplists_stub", async (ctx) => {
+    await ctx.answerCbQuery("Пока заглушка").catch(() => {});
+  });
+
+  bot.action("lk_ops_warehouse_wip", async (ctx) => {
+    await ctx.answerCbQuery("В разработке").catch(() => {});
+  });
+
+  // Аналитика/отчёты (только админы)
+  bot.action("lk_analytics_group", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      if (!isAdminRole(user.role)) {
+        // на всякий случай — если вдруг кнопка появится не тому
+        await ctx.answerCbQuery("Недоступно").catch(() => {});
+        return;
+      }
+
+      await showAnalyticsGroupMenu(ctx, user, { edit: true });
+    } catch (err) {
+      logError("lk_analytics_group", err);
     }
   });
 

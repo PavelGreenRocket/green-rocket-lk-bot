@@ -258,8 +258,10 @@ async function showPerformanceHome(ctx, candidateId) {
 
   const header =
     `📊 <b>Успеваемость</b>\n\n` +
-    `${user.name}${user.username ? `\n${user.username}` : ""}\n\n` +
-    `Здесь можно отслеживать успехи, активность пользователя и проводить аттестацию:`;
+    `<b>имя:</b> ${user.name}${user.username ? `\n${user.username}` : ""}\n\n` +
+    `Здесь можно отслеживать <b>KPI</b>, <b>активность</b> пользователя и проводить <b>аттестацию</b>\n\n` +
+    `<u>🏅 <b>→</b> это группы которые относится\n к повышению квалификации.</u>\n` +
+    `•   <b>За выполнение</b> каждой группы обычно прилагаются <b>доп. выплаты</b>\n\n` 
 
   const rows = [];
   for (const g of groups) {
@@ -289,12 +291,16 @@ async function showPerformanceHome(ctx, candidateId) {
       ),
     ]);
   }
-  rows.push([Markup.button.callback("📋 KPI", `lk_perf_kpi_${candidateId}`)]);
+  rows.push([Markup.button.callback("📋 KPI (по работе)", `lk_perf_kpi_${candidateId}`)]);
   rows.push([
-    Markup.button.callback("📊 Тесты", `lk_perf_tests_${candidateId}`),
+    Markup.button.callback("📊 Тесты (проверь активность)", `lk_perf_tests_${candidateId}`),
   ]);
   rows.push([
-    Markup.button.callback("⬅️ Назад к карточке", `candidate_${candidateId}`),
+    // возвращаемся в карточку стажёра (тот же колбэк, что и в candidateCard.js)
+    Markup.button.callback(
+      "⬅️ Назад к карточке",
+      `lk_cards_switch_trainee_${candidateId}`
+    ),
   ]);
 
   return safeEdit(ctx, header, Markup.inlineKeyboard(rows));
@@ -789,26 +795,12 @@ function registerPerformance(bot, ensureUser, logError) {
     }
   });
 
-  bot.action(/^lk_perf_menu_(\d+)$/, async (ctx) => {
+  bot.action(/lk_perf_menu_(\d+)/, async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
       const candidateId = Number(ctx.match[1]);
-      const brief = await getCandidateBrief(candidateId);
-      const displayName = brief.username ? `${brief.name} @${brief.username}` : brief.name;
-
-      const text =
-        `📊 Успеваемость:\n\n` +
-        `${displayName}\n\n` +
-        `Здесь можно отслеживать успехи, активность пользователя и проводить аттестацию:`;
-
-      const keyboard = [
-        [{ text: "🏅 Аттестация", callback_data: `lk_perf_attest_${candidateId}` }],
-        [{ text: "📋 KPI", callback_data: `lk_perf_kpi_${candidateId}` }],
-        [{ text: "📊 Тесты", callback_data: `lk_perf_tests_${candidateId}` }],
-        [{ text: "⬅️ Назад", callback_data: `lk_cards_switch_trainee_${candidateId}` }],
-      ];
-
-      await ctx.editMessageText(text, { reply_markup: { inline_keyboard: keyboard } });
+      // По ТЗ: сразу показываем группы аттестаций + KPI/Тесты (без отдельной кнопки "аттестация")
+      await showPerformanceHome(ctx, candidateId);
     } catch (e) {
       logError("lk_perf_menu_x", e);
     }
