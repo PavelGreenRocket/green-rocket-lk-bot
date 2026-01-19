@@ -122,7 +122,7 @@ function buildRestoreKeyboard(candidate) {
   buttons.push([
     Markup.button.callback(
       "✏️ Изменить общую информацию",
-      `lk_cand_edit_common_${candidate.id}`
+      `lk_cand_edit_common_${candidate.id}`,
     ),
   ]);
 
@@ -131,7 +131,7 @@ function buildRestoreKeyboard(candidate) {
       buttons.push([
         Markup.button.callback(
           "🗓 Изменить собеседование",
-          `lk_cand_edit_interview_${candidate.id}`
+          `lk_cand_edit_interview_${candidate.id}`,
         ),
       ]);
     }
@@ -140,7 +140,7 @@ function buildRestoreKeyboard(candidate) {
       buttons.push([
         Markup.button.callback(
           "🚀 Изменить стажировку",
-          `lk_cand_edit_internship_${candidate.id}`
+          `lk_cand_edit_internship_${candidate.id}`,
         ),
       ]);
     }
@@ -149,14 +149,14 @@ function buildRestoreKeyboard(candidate) {
   buttons.push([
     Markup.button.callback(
       "♻️ Восстановить и оповестить",
-      `lk_cand_restore_apply_${candidate.id}`
+      `lk_cand_restore_apply_${candidate.id}`,
     ),
   ]);
 
   buttons.push([
     Markup.button.callback(
       "❌ Отмена",
-      `lk_cand_restore_cancel_${candidate.id}`
+      `lk_cand_restore_cancel_${candidate.id}`,
     ),
   ]);
 
@@ -175,7 +175,7 @@ async function getActiveShiftToday(userId) {
     ORDER BY s.id DESC
     LIMIT 1
     `,
-    [userId]
+    [userId],
   );
   return rows[0] || null;
 }
@@ -242,7 +242,7 @@ FROM candidates c
         LEFT JOIN users       u_link       ON u_link.candidate_id   = c.id
       WHERE c.id = $1
     `,
-    [candidateId]
+    [candidateId],
   );
 
   if (!res.rows.length) {
@@ -268,14 +268,13 @@ FROM candidates c
     try {
       const tr = await pool.query(
         `SELECT training_completed_at FROM users WHERE id = $1 LIMIT 1`,
-        [cand.lk_user_id]
+        [cand.lk_user_id],
       );
       trainingCompletedAt = tr.rows[0]?.training_completed_at || null;
     } catch (_) {
       trainingCompletedAt = null;
     }
   }
-
 
   // Когда открываем карточку кандидата через переключатель со стажёра/сотрудника,
   // хотим показывать текст как на этапе "приглашён на стажировку" (скрин 3).
@@ -294,12 +293,12 @@ FROM candidates c
       WHERE user_id = $1
       ORDER BY id DESC
       `,
-      [cand.lk_user_id]
+      [cand.lk_user_id],
     );
 
     const sessions = sRes.rows || [];
     finishedInternshipCount = sessions.filter(
-      (s) => s.finished_at && !s.is_canceled
+      (s) => s.finished_at && !s.is_canceled,
     ).length;
 
     activeInternshipSession =
@@ -329,7 +328,7 @@ ORDER BY
 LIMIT 1
 
       `,
-      [candidateId, activeInternshipSession?.id ?? null]
+      [candidateId, activeInternshipSession?.id ?? null],
     );
 
     schedule = schRes.rows[0] || null;
@@ -374,8 +373,8 @@ LIMIT 1
   let header = isRestoreMode
     ? "🔻 КАНДИДАТ — ВОССТАНОВЛЕНИЕ (♻️)"
     : isEditMode
-    ? `${editHeaderBase} — РЕЖИМ ИЗМЕНЕНИЯ (✏️)`
-    : normalHeader;
+      ? `${editHeaderBase} — РЕЖИМ ИЗМЕНЕНИЯ (✏️)`
+      : normalHeader;
 
   // ✅ если нужно переопределить заголовок (например "ЭТАП ПРОЙДЕН")
   if (options.headerOverride) header = options.headerOverride;
@@ -502,7 +501,7 @@ LIMIT 1
         const dateLabel = formatDateWithWeekday(planDate);
         if (planFrom && planTo) {
           text += `• *Дата стажировки:* ${dateLabel} (с ${String(
-            planFrom
+            planFrom,
           ).slice(0, 5)} до ${String(planTo).slice(0, 5)})\n`;
         } else {
           text += `• *Дата стажировки:* ${dateLabel}\n`;
@@ -517,27 +516,28 @@ LIMIT 1
       // стажировка завершена (нет активной сессии)
       text += `• *Пройденных стажировок:* ${finishedInternshipCount}\n\n`;
 
-
-// общий % изученного (как в "данные стажировок")
-if (lkUserId) {
-  try {
-    const userMetaRes = await pool.query(
-      `SELECT training_completed_at, post_training_can_work_under_control
+      // общий % изученного (как в "данные стажировок")
+      if (lkUserId) {
+        try {
+          const userMetaRes = await pool.query(
+            `SELECT training_completed_at, post_training_can_work_under_control
        FROM users WHERE id = $1`,
-      [lkUserId]
-    );
-    const trainingCompletedAt = userMetaRes.rows[0]?.training_completed_at || null;
-    const canWorkUnderControl = userMetaRes.rows[0]?.post_training_can_work_under_control; // boolean|null
+            [lkUserId],
+          );
+          const trainingCompletedAt =
+            userMetaRes.rows[0]?.training_completed_at || null;
+          const canWorkUnderControl =
+            userMetaRes.rows[0]?.post_training_can_work_under_control; // boolean|null
 
-    const totalStepsRes = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM internship_steps`
-    );
-    const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
+          const totalStepsRes = await pool.query(
+            `SELECT COUNT(*)::int AS cnt FROM internship_steps`,
+          );
+          const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
 
-    let overallPercent = 0;
-    if (totalSteps > 0) {
-      const passedAllRes = await pool.query(
-        `
+          let overallPercent = 0;
+          if (totalSteps > 0) {
+            const passedAllRes = await pool.query(
+              `
         SELECT COUNT(DISTINCT r.step_id)::int AS cnt
         FROM internship_step_results r
         JOIN internship_sessions s ON s.id = r.session_id
@@ -545,32 +545,32 @@ if (lkUserId) {
           AND s.is_canceled = FALSE
           AND r.is_passed = TRUE
         `,
-        [lkUserId]
-      );
-      const passedAll = passedAllRes.rows[0]?.cnt || 0;
-      overallPercent = Math.round((passedAll / totalSteps) * 100);
-    }
+              [lkUserId],
+            );
+            const passedAll = passedAllRes.rows[0]?.cnt || 0;
+            overallPercent = Math.round((passedAll / totalSteps) * 100);
+          }
 
-    // если академия уже поставила метку завершения — считаем курс пройденным
-    if (trainingCompletedAt) overallPercent = 100;
+          // если академия уже поставила метку завершения — считаем курс пройденным
+          if (trainingCompletedAt) overallPercent = 100;
 
-    text += `• *общий % изученного:* ${overallPercent}%\n`;
+          text += `• *общий % изученного:* ${overallPercent}%\n`;
 
-    if (overallPercent >= 100) {
-      if (canWorkUnderControl === false) {
-        text += `• *Курс пройден, но стажёр пока не может работать самостоятельно под контролем*\n`;
-      } else if (canWorkUnderControl === true) {
-        text += `• *Курс пройден: работа самостоятельно под контролем*\n`;
-      } else {
-        text += `• *Курс пройден, но режим контроля не выбран наставником*\n`;
+          if (overallPercent >= 100) {
+            if (canWorkUnderControl === false) {
+              text += `• *Курс пройден, но стажёр пока не может работать самостоятельно под контролем*\n`;
+            } else if (canWorkUnderControl === true) {
+              text += `• *Курс пройден: работа самостоятельно под контролем*\n`;
+            } else {
+              text += `• *Курс пройден, но режим контроля не выбран наставником*\n`;
+            }
+          }
+
+          text += `\n`;
+        } catch (e) {
+          // не ломаем карточку, если где-то нет таблиц/данных
+        }
       }
-    }
-
-    text += `\n`;
-  } catch (e) {
-    // не ломаем карточку, если где-то нет таблиц/данных
-  }
-}
 
       // Следующая стажировка показывается ТОЛЬКО если есть planned в internship_schedules
       const nextDate =
@@ -590,7 +590,7 @@ if (lkUserId) {
 
         if (nextFrom && nextTo) {
           text += `• *Дата стажировки:* ${dateLabel} (с ${String(
-            nextFrom
+            nextFrom,
           ).slice(0, 5)} до ${String(nextTo).slice(0, 5)})\n`;
         } else {
           text += `• *Дата стажировки:* ${dateLabel}\n`;
@@ -618,7 +618,7 @@ if (lkUserId) {
         if (cand.internship_time_from && cand.internship_time_to) {
           text += `• *Дата стажировки:* ${dateLabel} (с ${cand.internship_time_from.slice(
             0,
-            5
+            5,
           )} до ${cand.internship_time_to.slice(0, 5)})\n`;
         } else {
           text += `• *Дата стажировки:* ${dateLabel}\n`;
@@ -651,7 +651,7 @@ if (lkUserId) {
     rows.push([
       Markup.button.callback(
         "⬆️ Повысить до сотрудника",
-        `lk_intern_settings_promote_${cand.id}`
+        `lk_intern_settings_promote_${cand.id}`,
       ),
     ]);
 
@@ -662,35 +662,35 @@ if (lkUserId) {
         lkEnabled ? "🔒 Закрыть доступ в ЛК" : "🔓 Открыть доступ в ЛК",
         lkEnabled
           ? `lk_intern_settings_close_lk_${cand.id}`
-          : `lk_intern_settings_open_lk_${cand.id}`
+          : `lk_intern_settings_open_lk_${cand.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         "✏️ Изменить карточку",
-        `lk_intern_settings_edit_${cand.id}`
+        `lk_intern_settings_edit_${cand.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         "❌ Отказать стажёру",
-        `lk_intern_settings_decline_${cand.id}`
+        `lk_intern_settings_decline_${cand.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         "📋 Открыть другую карточку",
-        `lk_internship_open_cards_${cand.id}`
+        `lk_internship_open_cards_${cand.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         "⬅️ Назад к карточке",
-        `lk_intern_settings_back_${cand.id}`
+        `lk_intern_settings_back_${cand.id}`,
       ),
     ]);
 
@@ -712,7 +712,7 @@ if (lkUserId) {
     await deliverFn(
       ctx,
       { text, extra: { ...kb, parse_mode: "Markdown" } },
-      { edit }
+      { edit },
     );
 
     return;
@@ -733,14 +733,14 @@ if (lkUserId) {
     rows.push([
       Markup.button.callback(
         "▾карточки (скрыть)",
-        `lk_internship_toggle_cards_${cand.id}`
+        `lk_internship_toggle_cards_${cand.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         candBtnText,
-        `lk_cards_switch_candidate_${cand.id}`
+        `lk_cards_switch_candidate_${cand.id}`,
       ),
       Markup.button.callback(trBtnText, `lk_cards_switch_trainee_${cand.id}`),
       Markup.button.callback("Сотрудник", `lk_cards_switch_worker_${cand.id}`),
@@ -755,13 +755,13 @@ if (lkUserId) {
       rows.push([
         Markup.button.callback(
           "✅ Собеседование пройдено",
-          `lk_cand_passed_${cand.id}`
+          `lk_cand_passed_${cand.id}`,
         ),
       ]);
       rows.push([
         Markup.button.callback(
           "❌ отказать кандидату",
-          `lk_cand_decline_reason_${cand.id}`
+          `lk_cand_decline_reason_${cand.id}`,
         ),
       ]);
     } else if (cand.status === "interviewed") {
@@ -769,13 +769,13 @@ if (lkUserId) {
       rows.push([
         Markup.button.callback(
           "✅ пригласить на стажировку",
-          `lk_cand_invite_${cand.id}`
+          `lk_cand_invite_${cand.id}`,
         ),
       ]);
       rows.push([
         Markup.button.callback(
           "❌ отказать кандидату",
-          `lk_cand_decline_reason_${cand.id}`
+          `lk_cand_decline_reason_${cand.id}`,
         ),
       ]);
     } else if (
@@ -805,14 +805,14 @@ if (lkUserId) {
               rows.push([
                 Markup.button.callback(
                   "⏺️ завершить стажировку",
-                  `lk_internship_finish_${cand.id}`
+                  `lk_internship_finish_${cand.id}`,
                 ),
               ]);
             } else {
               rows.push([
                 Markup.button.url(
                   "⏺️ Перейти к обучению",
-                  "https://t.me/baristaAcademy_GR_bot"
+                  "https://t.me/baristaAcademy_GR_bot",
                 ),
               ]);
             }
@@ -820,7 +820,7 @@ if (lkUserId) {
             rows.push([
               Markup.button.callback(
                 "⏺️ идёт обучение",
-                `lk_internship_training_locked_${cand.id}`
+                `lk_internship_training_locked_${cand.id}`,
               ),
             ]);
           }
@@ -828,7 +828,7 @@ if (lkUserId) {
             rows.push([
               Markup.button.callback(
                 "📝 задачи смены",
-                `lk_intern_shift_tasks_${cand.id}`
+                `lk_intern_shift_tasks_${cand.id}`,
               ),
             ]);
           }
@@ -842,14 +842,14 @@ if (lkUserId) {
             rows.push([
               Markup.button.callback(
                 "🗓 назначить стажировку",
-                `lk_cand_invite_${cand.id}`
+                `lk_cand_invite_${cand.id}`,
               ),
             ]);
           } else if (isMentor) {
             rows.push([
               Markup.button.callback(
                 "▶️ начать стажировку",
-                `lk_cand_start_intern_${cand.id}`
+                `lk_cand_start_intern_${cand.id}`,
               ),
             ]);
           }
@@ -858,10 +858,7 @@ if (lkUserId) {
         // 2) 📊 успеваемость (заглушка-экран)
 
         rows.push([
-          Markup.button.callback(
-            "📊 успеваемость",
-            `lk_perf_menu_${cand.id}`
-          ),
+          Markup.button.callback("📊 успеваемость", `lk_perf_menu_${cand.id}`),
         ]);
       } else {
         // Если это кандидатская карточка, открытая через "открыть другую карточку" (этап пройден),
@@ -875,7 +872,7 @@ if (lkUserId) {
           rows.push([
             Markup.button.callback(
               "📋 открыть другую карточку",
-              `lk_internship_open_cards_${cand.id}`
+              `lk_internship_open_cards_${cand.id}`,
             ),
           ]);
         } else {
@@ -883,13 +880,13 @@ if (lkUserId) {
           rows.push([
             Markup.button.callback(
               "▶️ начать стажировку",
-              `lk_cand_start_intern_${cand.id}`
+              `lk_cand_start_intern_${cand.id}`,
             ),
           ]);
           rows.push([
             Markup.button.callback(
               "❌ отказать кандидату",
-              `lk_cand_decline_reason_${cand.id}`
+              `lk_cand_decline_reason_${cand.id}`,
             ),
           ]);
         }
@@ -899,7 +896,7 @@ if (lkUserId) {
       rows.push([
         Markup.button.callback(
           "♻️ восстановить кандидата",
-          `lk_cand_restore_${cand.id}`
+          `lk_cand_restore_${cand.id}`,
         ),
       ]);
 
@@ -907,14 +904,14 @@ if (lkUserId) {
         rows.push([
           Markup.button.callback(
             "↩️🗑️ убрать из отложенных",
-            `lk_cand_unpostpone_${cand.id}`
+            `lk_cand_unpostpone_${cand.id}`,
           ),
         ]);
       } else {
         rows.push([
           Markup.button.callback(
             "🗑️ перенести в отложенные",
-            `lk_cand_postpone_${cand.id}`
+            `lk_cand_postpone_${cand.id}`,
           ),
         ]);
       }
@@ -932,8 +929,8 @@ if (lkUserId) {
     isTraineeMode
       ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
       : options.backTo === "interns"
-      ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
-      : Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
+        ? Markup.button.callback("◀️ К стажёрам", "admin_users_interns")
+        : Markup.button.callback("◀️ К кандидатам", "admin_users_candidates"),
   ]);
 
   let keyboard;
@@ -970,7 +967,7 @@ if (lkUserId) {
           chatId,
           messageId,
           undefined,
-          keyboard.reply_markup
+          keyboard.reply_markup,
         )
         .catch(() => {});
     }
@@ -992,7 +989,7 @@ if (lkUserId) {
   await deliverFn(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
-    { edit }
+    { edit },
   );
 }
 
@@ -1081,7 +1078,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         traineeCardsExpandedByTgId.set(ctx.from.id, true);
         setTraineeCardsView(
           ctx.from.id,
-          mode === "candidate" ? "candidate" : "trainee"
+          mode === "candidate" ? "candidate" : "trainee",
         );
 
         if (mode === "candidate") {
@@ -1105,7 +1102,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       } catch (err) {
         logError("lk_cards_switch", err);
       }
-    }
+    },
   );
 
   // 📊 успеваемость вынесена в отдельный модуль (src/bot/admin/users/performance.js)
@@ -1138,7 +1135,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       rows[rows.length - 1] = [
         Markup.button.callback(
           "⬅️ Назад",
-          `lk_intern_settings_back_${candidateId}`
+          `lk_intern_settings_back_${candidateId}`,
         ),
       ];
       const kb = Markup.inlineKeyboard(rows);
@@ -1196,7 +1193,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         WHERE u.candidate_id = $1
         LIMIT 1
         `,
-        [candidateId]
+        [candidateId],
       );
 
       const u = r.rows[0];
@@ -1218,10 +1215,10 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
           [
             Markup.button.callback(
               "🏠 Перейти в личный кабинет",
-              "lk_open_menu"
+              "lk_open_menu",
             ),
           ],
-        ])
+        ]),
       );
 
       await ctx
@@ -1255,7 +1252,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       WHERE u.candidate_id = $1
       LIMIT 1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       const u = r.rows[0];
@@ -1276,7 +1273,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         await ctx.telegram
           .sendMessage(
             Number(u.telegram_id),
-            "🔒 Доступ в личный кабинет закрыт."
+            "🔒 Доступ в личный кабинет закрыт.",
           )
           .catch(() => {});
       }
@@ -1318,18 +1315,18 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
             [
               Markup.button.callback(
                 "⬆️ Повысить",
-                `lk_intern_settings_promote_apply_${candidateId}`
+                `lk_intern_settings_promote_apply_${candidateId}`,
               ),
             ],
             [
               Markup.button.callback(
                 "⬅️ Назад",
-                `lk_intern_settings_back_${candidateId}`
+                `lk_intern_settings_back_${candidateId}`,
               ),
             ],
           ]),
         },
-        { edit: true }
+        { edit: true },
       );
     } catch (err) {
       logError("lk_intern_settings_promote", err);
@@ -1362,7 +1359,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       WHERE u.id = $1
       LIMIT 1
       `,
-      [workerId]
+      [workerId],
     );
 
     if (!res.rows.length) {
@@ -1421,7 +1418,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       [
         Markup.button.callback(
           "📊 успеваемость",
-          `lk_worker_performance_${u.id}`
+          `lk_worker_performance_${u.id}`,
         ),
       ],
       [Markup.button.callback("⚙️ Настройки", `admin_worker_settings_${u.id}`)],
@@ -1431,7 +1428,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     await deliver(
       ctx,
       { text, extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" } },
-      { edit: true }
+      { edit: true },
     );
   }
 
@@ -1452,7 +1449,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         WHERE candidate_id = $1
         LIMIT 1
         `,
-        [candidateId]
+        [candidateId],
       );
       const u = r.rows[0];
       if (!u?.user_id) {
@@ -1465,7 +1462,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       }
 
       // уже сотрудник
-      if (u.staff_status === "worker") {
+      if (u.staff_status === "employee") {
         await renderWorkerCardAfterPromote(ctx, u.user_id);
         return;
       }
@@ -1481,13 +1478,16 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         ORDER BY id DESC
         LIMIT 1
         `,
-        [u.user_id]
+        [u.user_id],
       );
       if (act.rows.length) {
         await ctx
-          .answerCbQuery("❌ Нельзя повысить: сейчас идёт активная стажировка", {
-            show_alert: false,
-          })
+          .answerCbQuery(
+            "❌ Нельзя повысить: сейчас идёт активная стажировка",
+            {
+              show_alert: false,
+            },
+          )
           .catch(() => {});
         return;
       }
@@ -1497,7 +1497,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         await ctx
           .answerCbQuery(
             "❌ Нельзя повысить: сначала нужно пройти курс стажёра в Академии",
-            { show_alert: false }
+            { show_alert: false },
           )
           .catch(() => {});
         return;
@@ -1505,15 +1505,15 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
 
       // 4) повышаем
       await pool.query(
-        `UPDATE users SET staff_status = 'worker' WHERE id = $1`,
-        [u.user_id]
+        `UPDATE users SET staff_status = 'employee' WHERE id = $1`,
+        [u.user_id],
       );
 
       if (u.telegram_id) {
         await ctx.telegram
           .sendMessage(
             Number(u.telegram_id),
-            "🎉 Вы повышены до сотрудника!\n\nДоступ к функциям сотрудника открыт."
+            "🎉 Вы повышены до сотрудника!\n\nДоступ к функциям сотрудника открыт.",
           )
           .catch(() => {});
       }
@@ -1559,7 +1559,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         [
           Markup.button.callback(
             "⬅️ Назад",
-            `lk_cand_settings_back_${candidateId}`
+            `lk_cand_settings_back_${candidateId}`,
           ),
         ],
       ]);
@@ -1570,7 +1570,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     rows.push([
       Markup.button.callback(
         "Общая информация (изменить)",
-        `lk_cand_edit_common_${candidateId}`
+        `lk_cand_edit_common_${candidateId}`,
       ),
     ]);
 
@@ -1578,14 +1578,14 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       rows.push([
         Markup.button.callback(
           "О собеседовании (изменить)",
-          `lk_cand_edit_interview_${candidateId}`
+          `lk_cand_edit_interview_${candidateId}`,
         ),
       ]);
     } else if (status === "internship_invited" || status === "intern") {
       rows.push([
         Markup.button.callback(
           "О стажировке (изменить)",
-          `lk_cand_edit_internship_${candidateId}`
+          `lk_cand_edit_internship_${candidateId}`,
         ),
       ]);
     }
@@ -1593,7 +1593,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     rows.push([
       Markup.button.callback(
         "Другое (изменить)",
-        `lk_cand_settings_other_${candidateId}`
+        `lk_cand_settings_other_${candidateId}`,
       ),
     ]);
 
@@ -1601,7 +1601,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     rows.push([
       Markup.button.callback(
         "⬅️ Назад",
-        `lk_cand_settings_back_${candidateId}`
+        `lk_cand_settings_back_${candidateId}`,
       ),
     ]);
 
@@ -1621,7 +1621,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       // берём статус, чтобы решить: "о собеседовании" / "о стажировке" / ничего
       const r = await pool.query(
         `SELECT status FROM candidates WHERE id = $1`,
-        [candidateId]
+        [candidateId],
       );
 
       const kb = await buildEditSectionsKeyboard(candidateId);
@@ -1659,7 +1659,6 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
     }
   });
 
-  
   // ⏺️ завершить стажировку (для наставника, когда курс уже пройден)
   bot.action(/^lk_internship_finish_(\d+)$/, async (ctx) => {
     try {
@@ -1677,7 +1676,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         [
           Markup.button.callback(
             "✅ завершить",
-            `lk_internship_finish_confirm_${candId}`
+            `lk_internship_finish_confirm_${candId}`,
           ),
         ],
         [Markup.button.callback("⬅️ отмена", `lk_cand_open_${candId}`)],
@@ -1700,14 +1699,17 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       // user_id по кандидату
       const ur = await pool.query(
         `SELECT id FROM users WHERE candidate_id = $1 LIMIT 1`,
-        [candId]
+        [candId],
       );
       const userId = ur.rows[0]?.id;
       if (!userId) {
         await ctx
           .answerCbQuery("❌ Пользователь не привязан", { show_alert: false })
           .catch(() => {});
-        await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+        await showCandidateCardLk(ctx, candId, {
+          edit: true,
+          forceMode: "trainee",
+        });
         return;
       }
 
@@ -1722,42 +1724,49 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         ORDER BY id DESC
         LIMIT 1
         `,
-        [userId]
+        [userId],
       );
 
       const sessionId = sr.rows[0]?.id;
       if (!sessionId) {
         await ctx
-          .answerCbQuery("⚠️ Активная стажировка не найдена", { show_alert: false })
+          .answerCbQuery("⚠️ Активная стажировка не найдена", {
+            show_alert: false,
+          })
           .catch(() => {});
-        await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+        await showCandidateCardLk(ctx, candId, {
+          edit: true,
+          forceMode: "trainee",
+        });
         return;
       }
 
       // закрываем
       await pool.query(
         `UPDATE internship_sessions SET finished_at = NOW() WHERE id = $1`,
-        [sessionId]
+        [sessionId],
       );
 
       // помечаем schedule завершённым (если есть)
       await pool.query(
         `UPDATE internship_schedules SET status = 'finished' WHERE session_id = $1`,
-        [sessionId]
+        [sessionId],
       );
 
       await ctx
         .answerCbQuery("✅ Стажировка завершена", { show_alert: false })
         .catch(() => {});
 
-      await showCandidateCardLk(ctx, candId, { edit: true, forceMode: "trainee" });
+      await showCandidateCardLk(ctx, candId, {
+        edit: true,
+        forceMode: "trainee",
+      });
     } catch (err) {
       logError("lk_internship_finish_confirm", err);
     }
   });
 
-
-// "идёт обучение" — тост
+  // "идёт обучение" — тост
   bot.action(/^lk_internship_training_locked_(\d+)$/, async (ctx) => {
     try {
       await ctx
@@ -1912,7 +1921,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         WHERE c.id = $1
         LIMIT 1
         `,
-        [candId]
+        [candId],
       );
       const userId = uRes.rows[0]?.user_id;
       if (!userId) {
@@ -1925,7 +1934,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
       // тип шага
       const stRes = await pool.query(
         `SELECT id, step_type FROM internship_steps WHERE id = $1 LIMIT 1`,
-        [stepId]
+        [stepId],
       );
       const stepType = stRes.rows[0]?.step_type;
 
@@ -1941,7 +1950,7 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
         ORDER BY r.is_passed DESC, r.checked_at DESC
         LIMIT 1
         `,
-        [userId, stepId]
+        [userId, stepId],
       );
 
       const row = rRes.rows[0] || null;
@@ -1975,13 +1984,13 @@ function registerCandidateCard(bot, ensureUser, logError, deliver) {
           [
             Markup.button.callback(
               "⬅️ Назад к этапам",
-              `lk_internship_data_part_${candId}_${partId}`
+              `lk_internship_data_part_${candId}_${partId}`,
             ),
           ],
           [
             Markup.button.callback(
               "⬅️ Назад в карточку",
-              `lk_internship_data_back_${candId}`
+              `lk_internship_data_back_${candId}`,
             ),
           ],
         ]);
@@ -2030,7 +2039,7 @@ u.training_completed_at
       WHERE c.id = $1
       LIMIT 1
       `,
-      [candId]
+      [candId],
     );
 
     if (!candRes.rows.length) {
@@ -2057,7 +2066,7 @@ u.training_completed_at
         WHERE user_id = $1
         ORDER BY day_number ASC, id ASC
         `,
-        [userId]
+        [userId],
       );
 
       const set = new Set();
@@ -2072,7 +2081,7 @@ u.training_completed_at
 
     // 3) общий процент изученного (по всем шагам)
     const totalStepsRes = await pool.query(
-      `SELECT COUNT(*)::int AS cnt FROM internship_steps`
+      `SELECT COUNT(*)::int AS cnt FROM internship_steps`,
     );
     const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
 
@@ -2087,7 +2096,7 @@ u.training_completed_at
           AND s.is_canceled = FALSE
           AND r.is_passed = TRUE
         `,
-        [userId]
+        [userId],
       );
       const passedAll = passedAllRes.rows[0]?.cnt || 0;
       overallPercent = Math.round((passedAll / totalSteps) * 100);
@@ -2096,12 +2105,11 @@ u.training_completed_at
     const agePart = cand.age ? ` (${cand.age})` : "";
     const phonePart = cand.phone ? ` ${escapeHtml(cand.phone)}` : "";
 
+    let internshipName = "🌱 Данные стажировок";
 
-let  internshipName = "🌱 Данные стажировок";
-
-if (mode === "day") {
-  internshipName = `🌱 Данные стажировок — день ${st.selectedDay}`;
-}
+    if (mode === "day") {
+      internshipName = `🌱 Данные стажировок — день ${st.selectedDay}`;
+    }
     let text =
       `<u><b>${internshipName}</b></u>\n\n` +
       `• Имя: ${escapeHtml(cand.name || "—")}${agePart}${phonePart}\n` +
@@ -2137,13 +2145,13 @@ if (mode === "day") {
 
       // список частей с прогрессом done/total по overall
       const partsRes = await pool.query(
-        `SELECT id, title, order_index FROM internship_parts ORDER BY order_index ASC, id ASC`
+        `SELECT id, title, order_index FROM internship_parts ORDER BY order_index ASC, id ASC`,
       );
 
       for (const p of partsRes.rows || []) {
         const totalRes = await pool.query(
           `SELECT COUNT(*)::int AS cnt FROM internship_steps WHERE part_id = $1`,
-          [p.id]
+          [p.id],
         );
         const total = totalRes.rows[0]?.cnt || 0;
 
@@ -2160,7 +2168,7 @@ if (mode === "day") {
               AND r.is_passed = TRUE
               AND st.part_id = $2
             `,
-            [userId, p.id]
+            [userId, p.id],
           );
           done = doneRes.rows[0]?.cnt || 0;
         }
@@ -2172,7 +2180,7 @@ if (mode === "day") {
         buttons.push([
           Markup.button.callback(
             `${icon} Часть: ${p.title} — ${done}/${total} этапов (${pct}%)`,
-            `lk_internship_data_part_${candId}_${p.id}`
+            `lk_internship_data_part_${candId}_${p.id}`,
           ),
         ]);
       }
@@ -2180,14 +2188,14 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "▾ Подробнее по дням",
-          `lk_internship_data_toggle_days_${candId}`
+          `lk_internship_data_toggle_days_${candId}`,
         ),
       ]);
 
       buttons.push([
         Markup.button.callback(
           "⬅️ назад в карточку",
-          `lk_internship_data_back_${candId}`
+          `lk_internship_data_back_${candId}`,
         ),
       ]);
     }
@@ -2198,7 +2206,7 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "▴ Подробнее по дням",
-          `lk_internship_data_toggle_days_${candId}`
+          `lk_internship_data_toggle_days_${candId}`,
         ),
       ]);
 
@@ -2206,8 +2214,8 @@ if (mode === "day") {
       const dayBtns = finishedDays.map((d) =>
         Markup.button.callback(
           `${d}дн`,
-          `lk_internship_data_day_${candId}_${d}`
-        )
+          `lk_internship_data_day_${candId}_${d}`,
+        ),
       );
 
       for (let i = 0; i < dayBtns.length; i += 3) {
@@ -2217,13 +2225,13 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "⬅️ назад в карточку",
-          `lk_internship_data_back_${candId}`
+          `lk_internship_data_back_${candId}`,
         ),
       ]);
     }
 
     // ---- MODE: конкретный день (текст дня + дни остаются) ----
-    if (mode === "day") { 
+    if (mode === "day") {
       const dayNumber = Number(st.selectedDay);
 
       // 1) session выбранного дня
@@ -2245,7 +2253,7 @@ if (mode === "day") {
           ORDER BY s.id DESC
           LIMIT 1
           `,
-          [userId, dayNumber]
+          [userId, dayNumber],
         );
         session = sesRes.rows[0] || null;
       }
@@ -2262,7 +2270,7 @@ if (mode === "day") {
           WHERE session_id = $1
           ORDER BY id ASC
           `,
-          [session.id]
+          [session.id],
         );
 
         // 3) план времени из internship_schedules по session_id (fallback на candidates)
@@ -2276,7 +2284,7 @@ if (mode === "day") {
             ORDER BY id DESC
             LIMIT 1
             `,
-            [session.id]
+            [session.id],
           );
           const sch = schRes.rows[0] || null;
           const from = sch?.planned_time_from || cand.internship_time_from;
@@ -2284,7 +2292,7 @@ if (mode === "day") {
           if (from && to) {
             planTimeText = `с ${String(from).slice(0, 5)} до ${String(to).slice(
               0,
-              5
+              5,
             )}`;
           }
         } catch (_) {}
@@ -2329,7 +2337,7 @@ if (mode === "day") {
           JOIN internship_parts p ON p.id = s.part_id
           WHERE s.duration_days IS NOT NULL
           ORDER BY p.order_index ASC, s.order_index ASC
-          `
+          `,
         );
 
         const dayToSteps = new Map(); // day -> [step_id]
@@ -2346,7 +2354,7 @@ if (mode === "day") {
             WHERE section_id = $1
             ORDER BY order_index ASC, id ASC
             `,
-            [sec.id]
+            [sec.id],
           );
           const stepIds = stepsRes.rows.map((r) => Number(r.id));
 
@@ -2374,7 +2382,7 @@ if (mode === "day") {
         }
 
         const plannedStepIds = (dayToSteps.get(dayNumber) || []).filter(
-          Boolean
+          Boolean,
         );
         const plannedTotal = plannedStepIds.length;
 
@@ -2390,7 +2398,7 @@ if (mode === "day") {
               AND r.is_passed = TRUE
               AND r.step_id = ANY($2::int[])
             `,
-            [userId, plannedStepIds]
+            [userId, plannedStepIds],
           );
           plannedPassed = passPlanRes.rows[0]?.cnt || 0;
         }
@@ -2405,15 +2413,15 @@ if (mode === "day") {
         text += `<b>О стажировке</b>\n`;
         text += `<b>Дата и время стажировки:</b>\n`;
         text += `  • <b>план:</b> ${escapeHtml(dateLabel)} (${escapeHtml(
-          planTimeText
+          planTimeText,
         )})\n`;
         text += `  • <b>итог:</b> ${escapeHtml(dateLabel)} (с ${escapeHtml(
-          factFrom
+          factFrom,
         )} до ${escapeHtml(factTo)})\n\n`;
 
         text += `<b>Место стажировки:</b>\n`;
         text += `  • ${escapeHtml(
-          session.trade_point_title || "не указано"
+          session.trade_point_title || "не указано",
         )}\n\n`;
 
         text += `<b>Ответственный по стажировке:</b>\n`;
@@ -2441,7 +2449,7 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "▴ Подробнее по дням",
-          `lk_internship_data_toggle_days_${candId}`
+          `lk_internship_data_toggle_days_${candId}`,
         ),
       ]);
 
@@ -2449,7 +2457,7 @@ if (mode === "day") {
         const label = d === dayNumber ? `✅${d}дн` : `${d}дн`;
         return Markup.button.callback(
           label,
-          `lk_internship_data_day_${candId}_${d}`
+          `lk_internship_data_day_${candId}_${d}`,
         );
       });
 
@@ -2460,7 +2468,7 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "⬅️ назад в карточку",
-          `lk_internship_data_back_${candId}`
+          `lk_internship_data_back_${candId}`,
         ),
       ]);
     }
@@ -2471,7 +2479,7 @@ if (mode === "day") {
 
       const partRes = await pool.query(
         `SELECT id, title FROM internship_parts WHERE id = $1 LIMIT 1`,
-        [partId]
+        [partId],
       );
       const partTitle = partRes.rows[0]?.title || `#${partId}`;
 
@@ -2485,7 +2493,7 @@ if (mode === "day") {
         WHERE part_id = $1
         ORDER BY order_index ASC, id ASC
         `,
-        [partId]
+        [partId],
       );
 
       const academyUser =
@@ -2511,7 +2519,7 @@ if (mode === "day") {
             ORDER BY r.is_passed DESC, r.checked_at DESC
             LIMIT 1
             `,
-            [userId, s.id]
+            [userId, s.id],
           );
           passedRow = rRes.rows[0] || null;
         }
@@ -2519,11 +2527,7 @@ if (mode === "day") {
         const isPassed = passedRow?.is_passed === true;
 
         const typeIcon =
-          s.step_type === "photo"
-            ? "📷"
-            : s.step_type === "video"
-            ? "🎥"
-            : "⚪";
+          s.step_type === "photo" ? "📷" : s.step_type === "video" ? "🎥" : ".";
         const statusIcon = isPassed ? "✅" : "❌";
 
         let suffix = "";
@@ -2534,7 +2538,7 @@ if (mode === "day") {
           const hh = String(dt.getHours()).padStart(2, "0");
           const mi = String(dt.getMinutes()).padStart(2, "0");
           suffix = ` (${escapeHtml(
-            passedRow.checker_name
+            passedRow.checker_name,
           )}, ${dd}.${mm}, ${hh}:${mi})`;
         }
 
@@ -2551,7 +2555,7 @@ if (mode === "day") {
           buttons.push([
             Markup.button.callback(
               label,
-              `lk_internship_data_step_${s.id}_${candId}_${partId}`
+              `lk_internship_data_step_${s.id}_${candId}_${partId}`,
             ),
           ]);
         }
@@ -2560,13 +2564,13 @@ if (mode === "day") {
       buttons.push([
         Markup.button.callback(
           "⬅️ к списку частей",
-          `lk_internship_data_part_back_${candId}`
+          `lk_internship_data_part_back_${candId}`,
         ),
       ]);
       buttons.push([
         Markup.button.callback(
           "⬅️ назад в карточку",
-          `lk_internship_data_back_${candId}`
+          `lk_internship_data_back_${candId}`,
         ),
       ]);
     }
@@ -2599,7 +2603,7 @@ if (mode === "day") {
   WHERE c.id = $1
   LIMIT 1
   `,
-        [candId]
+        [candId],
       );
 
       if (!candRes.rows.length) {
@@ -2633,7 +2637,7 @@ WHERE s.user_id = $1
 ORDER BY s.id DESC
 LIMIT 1
         `,
-        [userId, dayNumber]
+        [userId, dayNumber],
       );
 
       if (!sesRes.rows.length) {
@@ -2656,12 +2660,12 @@ LIMIT 1
         WHERE c.session_id = $1
         ORDER BY c.id ASC
         `,
-        [session.id]
+        [session.id],
       );
 
       // 4) Общий % изученного (накопительно по всем дням)
       const totalStepsRes = await pool.query(
-        `SELECT COUNT(*)::int AS cnt FROM internship_steps`
+        `SELECT COUNT(*)::int AS cnt FROM internship_steps`,
       );
       const totalSteps = totalStepsRes.rows[0]?.cnt || 0;
 
@@ -2674,7 +2678,7 @@ LIMIT 1
           AND s.is_canceled = FALSE
           AND r.is_passed = TRUE
         `,
-        [userId]
+        [userId],
       );
       const passedAll = passedAllRes.rows[0]?.cnt || 0;
 
@@ -2695,7 +2699,7 @@ LIMIT 1
         JOIN internship_parts p ON p.id = s.part_id
         WHERE s.duration_days IS NOT NULL
         ORDER BY p.order_index ASC, s.order_index ASC
-        `
+        `,
       );
 
       const dayToSteps = new Map(); // day -> [step_id]
@@ -2712,7 +2716,7 @@ LIMIT 1
           WHERE section_id = $1
           ORDER BY order_index ASC, id ASC
           `,
-          [sec.id]
+          [sec.id],
         );
         const stepIds = stepsRes.rows.map((r) => Number(r.id));
 
@@ -2755,7 +2759,7 @@ LIMIT 1
             AND r.is_passed = TRUE
             AND r.step_id = ANY($2::int[])
           `,
-          [userId, plannedStepIds]
+          [userId, plannedStepIds],
         );
 
         plannedPassed = passPlanRes.rows[0]?.cnt || 0;
@@ -2779,7 +2783,7 @@ LIMIT 1
           ORDER BY id DESC
           LIMIT 1
           `,
-          [session.id]
+          [session.id],
         );
 
         const sch = schRes.rows[0] || null;
@@ -2789,7 +2793,7 @@ LIMIT 1
         if (from && to) {
           planTimeText = `с ${String(from).slice(0, 5)} до ${String(to).slice(
             0,
-            5
+            5,
           )}`;
         }
       } catch (_) {
@@ -2837,8 +2841,8 @@ LIMIT 1
       const who = cand.lk_username
         ? `@${cand.lk_username}`
         : cand.phone
-        ? cand.phone
-        : "—";
+          ? cand.phone
+          : "—";
 
       let text =
         `🔹 *Общая информация*\n` +
@@ -2871,7 +2875,7 @@ LIMIT 1
         [
           Markup.button.callback(
             "⬅️ Назад к дням",
-            `lk_internship_data_${candId}`
+            `lk_internship_data_${candId}`,
           ),
         ],
       ]);
@@ -2882,7 +2886,7 @@ LIMIT 1
           text,
           extra: { ...kb, parse_mode: "Markdown" },
         },
-        { edit: true }
+        { edit: true },
       );
     } catch (err) {
       logError("lk_internship_day", err);
@@ -2896,7 +2900,7 @@ LIMIT 1
       await ctx
         .answerCbQuery(
           "Идёт процесс обучения, данные появятся после завершения",
-          { show_alert: false }
+          { show_alert: false },
         )
         .catch(() => {});
     } catch (err) {
@@ -2917,7 +2921,7 @@ LIMIT 1
     WHERE c.id = $1
     LIMIT 1
     `,
-      [candId]
+      [candId],
     );
 
     const lkUserId = cRes.rows[0]?.lk_user_id || null;
@@ -2925,7 +2929,7 @@ LIMIT 1
 
     if (!lkUserId) {
       await ctx.editMessageText(
-        "⚠️ У стажёра нет привязанного пользователя ЛК."
+        "⚠️ У стажёра нет привязанного пользователя ЛК.",
       );
       return;
     }
@@ -2933,7 +2937,7 @@ LIMIT 1
     const activeShift = await getActiveShiftToday(lkUserId);
     if (!activeShift) {
       await ctx.editMessageText(
-        "⚠️ У пользователя нет активной смены сегодня."
+        "⚠️ У пользователя нет активной смены сегодня.",
       );
       return;
     }
@@ -2963,13 +2967,13 @@ LIMIT 1
       AND ti.for_date = CURRENT_DATE
     ORDER BY ti.id
     `,
-      [lkUserId]
+      [lkUserId],
     );
 
     let text = `📝 <b>Задачи смены</b>\n\n`;
     text += `👤 <b>${escHtml(fullName)}</b>\n`;
     text += `📍 Точка: <b>${escHtml(
-      activeShift.point_title || "не указано"
+      activeShift.point_title || "не указано",
     )}</b>\n\n`;
 
     if (!tRes.rows.length) {
@@ -2990,7 +2994,7 @@ LIMIT 1
     rows.push([
       Markup.button.callback(
         "➕ создать ещё задачу",
-        `admin_shift_tasks_point_${activeShift.trade_point_id}`
+        `admin_shift_tasks_point_${activeShift.trade_point_id}`,
       ),
     ]);
 

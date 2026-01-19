@@ -20,7 +20,13 @@ function stSet(tgId, patch) {
 }
 function stClear(tgId) {
   const st = stGet(tgId);
-  if (st) clearUserState(tgId);
+  if (!st) return;
+
+  const returnTo = st.returnTo || null;
+  clearUserState(tgId);
+
+  // сохраняем "куда назад" если оно задано
+  if (returnTo) stSet(tgId, { returnTo });
 }
 
 async function loadPoints() {
@@ -277,7 +283,7 @@ async function showRoot(ctx) {
     [
       {
         text: "🚀 контроль открытия смены",
-        callback_data: "admin_resp_kind_shift_opening_control",
+        callback_data: "admin_shift_settings_opening_control",
       },
     ],
     [
@@ -305,7 +311,8 @@ async function showPickPoint(ctx, kind) {
     Markup.button.callback("🏬 Все точки", `admin_resp_point_${kind}_all`),
   ]);
 
-  rows.push([Markup.button.callback("⬅️ Назад", "admin_resp_root")]);
+  const backTo = stGet(ctx.from.id)?.returnTo || "admin_resp_root";
+  rows.push([Markup.button.callback("⬅️ Назад", backTo)]);
 
   await deliver(
     ctx,
@@ -593,6 +600,22 @@ function registerAdminResponsibles(bot, ensureUser, logError) {
       await showRoot(ctx);
     } catch (e) {
       logError("admin_resp_root", e);
+    }
+  });
+
+  bot.action("admin_shift_settings_opening_control", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      // запоминаем, что "назад" надо вернуть в Настройку смен
+      stSet(ctx.from.id, { returnTo: "admin_shift_settings" });
+
+      // открываем тот же экран выбора точки, что и обычный вход
+      await showPickPoint(ctx, "shift_opening_control");
+    } catch (e) {
+      logError("admin_shift_settings_opening_control", e);
     }
   });
 

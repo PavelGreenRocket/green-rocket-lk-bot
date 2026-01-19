@@ -4,6 +4,8 @@
 const { Markup } = require("telegraf");
 const pool = require("../../../db/pool");
 
+const { registerTheoryExamRoutes } = require("./theory_exam");
+
 // state: waiting for file or theory test
 const states = new Map();
 const setState = (tgId, s) => states.set(tgId, s);
@@ -174,14 +176,24 @@ async function fetchTheoryTopicsWithCards(level) {
 
 async function fetchLatestTopicResults(candidateId, mode) {
   // mode: mentor_basic / mentor_adv
+  // В ТВОЕЙ СХЕМЕ test_sessions нет checked_by/checked_at/passed.
+  // Поэтому:
+  // passed      = correct_count == question_count
+  // checked_by  = conducted_by
+  // checked_at  = created_at
+
   const r = await pool.query(
     `SELECT DISTINCT ON (topic_id)
-       topic_id, passed, checked_by, checked_at
+       topic_id,
+       (correct_count = question_count) AS passed,
+       conducted_by AS checked_by,
+       created_at AS checked_at
      FROM test_sessions
      WHERE user_id=$1 AND mode=$2
-     ORDER BY topic_id, checked_at DESC NULLS LAST, id DESC`,
+     ORDER BY topic_id, id DESC`,
     [candidateId, mode]
   );
+
   const map = new Map();
   for (const row of r.rows) map.set(Number(row.topic_id), row);
   return map;
@@ -259,9 +271,13 @@ async function showPerformanceHome(ctx, candidateId) {
   const header =
     `📊 <b>Успеваемость</b>\n\n` +
     `<b>имя:</b> ${user.name}${user.username ? `\n${user.username}` : ""}\n\n` +
-    `Здесь можно отслеживать <b>KPI</b>, <b>активность</b> пользователя и проводить <b>аттестацию</b>\n\n` +
-    `<u>🏅 <b>→</b> это группы которые относится\n к повышению квалификации.</u>\n` +
-    `•   <b>За выполнение</b> каждой группы обычно прилагаются <b>доп. выплаты</b>\n\n` 
+    `<u>Здесь можно проводить:</u>\n` +
+    `1. 🏅 <b>аттестацию</b> (по квалификации)\n` +
+    `2. 📋 Отслеживать <b>KPI</b> (по работе)\n` +
+    `3. 📊 <b>активность</b> пользователя (тесты)\n` +
+    `__________________________\n` +
+    `🏅 <b>→</b> это группы которые относится\n к повышению квалификации ↓\n ` +
+    `  →   <b>За выполнение</b> каждой группы обычно прилагаются <b>доп. выплаты</b>\n\n`;
 
   const rows = [];
   for (const g of groups) {
@@ -291,9 +307,14 @@ async function showPerformanceHome(ctx, candidateId) {
       ),
     ]);
   }
-  rows.push([Markup.button.callback("📋 KPI (по работе)", `lk_perf_kpi_${candidateId}`)]);
   rows.push([
-    Markup.button.callback("📊 Тесты (проверь активность)", `lk_perf_tests_${candidateId}`),
+    Markup.button.callback("📋 KPI (по работе)", `lk_perf_kpi_${candidateId}`),
+  ]);
+  rows.push([
+    Markup.button.callback(
+      "📊 Тесты (проверь активность)",
+      `lk_perf_tests_${candidateId}`
+    ),
   ]);
   rows.push([
     // возвращаемся в карточку стажёра (тот же колбэк, что и в candidateCard.js)
@@ -614,21 +635,74 @@ async function showTheoryTopicEntry(ctx, candidateId, level, topicId) {
   const topic = topicRes.rows[0];
   if (!topic) return;
 
-  const rows = [
-    [
+  const normalizedLevel = level === "basic" ? "basic" : "adv";
+  const mode = normalizedLevel === "basic" ? "mentor_basic" : "mentor_adv";
+
+  const lastRes = await pool.query(
+    `
+    SELECT s.id, s.question_count, s.correct_count,
+           COALESCE(s.passed,false) AS passed,
+           s.checked_at, s.checked_by, s.conducted_by,
+           u.full_name  AS checked_by_name,
+           u2.full_name AS conducted_by_name
+    FROM test_sessions s
+    LEFT JOIN users u  ON u.id  = s.checked_by
+    LEFT JOIN users u2 ON u2.id = s.conducted_by
+    WHERE s.user_id=$1 AND s.topic_id=$2 AND s.mode=$3
+    ORDER BY s.id DESC
+    LIMIT 1
+    `,
+    [candidateId, topicId, mode]
+  );
+  const last = lastRes.rows[0] || null;
+
+  let info = "";
+  if (last && last.checked_at) {
+    const pct =
+      last.question_count > 0
+        ? Math.round((100 * Number(last.correct_count || 0)) / Number(last.question_count))
+        : 0;
+    const who =
+      last.checked_by_name ||
+      last.conducted_by_name ||
+      String(last.checked_by || last.conducted_by || "");
+    const when = new Date(last.checked_at).toLocaleString("ru-RU");
+    info =
+      `\n\n<b>Последний результат:</b> ${last.correct_count}/${last.question_count} (${pct}%)\n` +
+      `<b>Итог:</b> ${last.passed ? "✅ СДАЛ" : "❌ НЕ СДАЛ"}\n` +
+      (who ? `<b>Наставник:</b> ${who}\n` : "") +
+      `<b>Дата:</b> ${when}`;
+  }
+
+  const rows = [];
+
+  // Если уже ✅ сдал — кнопку старта не показываем
+  if (!(last && last.checked_at && last.passed)) {
+    rows.push([
       Markup.button.callback(
         "▶️ Перейти к тестированию",
-        `lk_perf_theory_start_${candidateId}_${level}_${topicId}`
+        `lk_theory_exam_start_${candidateId}_${normalizedLevel}_${topicId}`
       ),
-    ],
-    [
-      Markup.button.callback(
-        "⬅️ Назад",
-        `lk_perf_theory_${candidateId}_${level === "basic" ? "basic" : "adv"}`
-      ),
-    ],
-  ];
-  const text = `Тема: <b>${topic.title}</b>\n\nПерейти к тестированию?`;
+    ]);
+  }
+
+  rows.push([
+    Markup.button.callback(
+      "📜 История",
+      `lk_theory_exam_history_${candidateId}_${normalizedLevel}_${topicId}`
+    ),
+  ]);
+
+  rows.push([
+    Markup.button.callback(
+      "⬅️ Назад",
+      `lk_perf_theory_${candidateId}_${normalizedLevel === "basic" ? "basic" : "adv"}`
+    ),
+  ]);
+
+  const text =
+    `Тема: <b>${topic.title}</b>${info}\n\n` +
+    `Рекомендация: зачёт при <b>≥95%</b> (решение принимает наставник).`;
   return safeEdit(ctx, text, Markup.inlineKeyboard(rows));
 }
 

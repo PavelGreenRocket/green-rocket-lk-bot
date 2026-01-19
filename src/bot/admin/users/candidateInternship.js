@@ -67,17 +67,17 @@ async function askDate(ctx, candidateId) {
     [
       Markup.button.callback(
         "Сегодня",
-        `lk_cand_invite_date_today_${candidateId}`
+        `lk_cand_invite_date_today_${candidateId}`,
       ),
       Markup.button.callback(
         "Завтра",
-        `lk_cand_invite_date_tomorrow_${candidateId}`
+        `lk_cand_invite_date_tomorrow_${candidateId}`,
       ),
     ],
     [
       Markup.button.callback(
         "❌ Отмена",
-        `lk_cand_invite_cancel_${candidateId}`
+        `lk_cand_invite_cancel_${candidateId}`,
       ),
     ],
   ]);
@@ -100,7 +100,7 @@ async function askTimeFrom(ctx, candidateId) {
     [
       Markup.button.callback(
         "❌ Отмена",
-        `lk_cand_invite_cancel_${candidateId}`
+        `lk_cand_invite_cancel_${candidateId}`,
       ),
     ],
   ]);
@@ -121,7 +121,7 @@ async function askTimeTo(ctx, candidateId) {
     [
       Markup.button.callback(
         "❌ Отмена",
-        `lk_cand_invite_cancel_${candidateId}`
+        `lk_cand_invite_cancel_${candidateId}`,
       ),
     ],
   ]);
@@ -135,12 +135,12 @@ async function askTimeTo(ctx, candidateId) {
 
 async function askPoint(ctx, candidateId) {
   const { rows } = await pool.query(
-    `SELECT id, title FROM trade_points WHERE is_active = TRUE ORDER BY id`
+    `SELECT id, title FROM trade_points WHERE is_active = TRUE ORDER BY id`,
   );
 
   if (!rows.length) {
     await ctx.reply(
-      "Нет активных торговых точек. Добавьте точку в настройках и повторите."
+      "Нет активных торговых точек. Добавьте точку в настройках и повторите.",
     );
     clearState(ctx.from.id);
     return;
@@ -153,7 +153,7 @@ async function askPoint(ctx, candidateId) {
   buttons.push([
     Markup.button.callback(
       "Назначу позже",
-      `lk_cand_invite_point_later_${candidateId}`
+      `lk_cand_invite_point_later_${candidateId}`,
     ),
   ]);
   buttons.push([
@@ -174,16 +174,17 @@ async function askPoint(ctx, candidateId) {
 async function askAdmin(ctx, candidateId) {
   const { rows } = await pool.query(
     `
-      SELECT id, full_name, role
-        FROM users
-       WHERE role IN ('admin','super_admin','worker','intern')
-       ORDER BY role, full_name
-    `
+   SELECT id, full_name, role
+  FROM users
+ WHERE role IN ('admin','super_admin')
+ ORDER BY role, full_name
+
+    `,
   );
 
   if (!rows.length) {
     await ctx.reply(
-      "Нет доступных наставников. Добавьте сотрудников и повторите."
+      "Нет доступных наставников. Добавьте сотрудников и повторите.",
     );
     clearState(ctx.from.id);
     return;
@@ -192,14 +193,14 @@ async function askAdmin(ctx, candidateId) {
   const buttons = rows.map((u) => [
     Markup.button.callback(
       `${u.full_name || "Без имени"} (${u.role})`,
-      `lk_cand_invite_admin_${u.id}`
+      `lk_cand_invite_admin_${u.id}`,
     ),
   ]);
 
   buttons.push([
     Markup.button.callback(
       "Назначу позже",
-      `lk_cand_invite_admin_later_${candidateId}`
+      `lk_cand_invite_admin_later_${candidateId}`,
     ),
   ]);
   buttons.push([
@@ -227,13 +228,13 @@ async function askLinkUser(ctx, candidateId) {
     [
       Markup.button.callback(
         "🔗 Привязать существующего пользователя",
-        `lk_cand_invite_link_existing_${candidateId}`
+        `lk_cand_invite_link_existing_${candidateId}`,
       ),
     ],
     [
       Markup.button.callback(
         "⏳ Привяжу позже",
-        `lk_cand_invite_link_later_${candidateId}`
+        `lk_cand_invite_link_later_${candidateId}`,
       ),
     ],
   ]);
@@ -257,19 +258,19 @@ async function askPostTrainingControl(ctx, candidateId) {
     [
       Markup.button.callback(
         "✅ Может работать под контролем",
-        `lk_cand_invite_post_training_control_${candidateId}_yes`
+        `lk_cand_invite_post_training_control_${candidateId}_yes`,
       ),
     ],
     [
       Markup.button.callback(
         "❌ нужен полный контроль",
-        `lk_cand_invite_post_training_control_${candidateId}_no`
+        `lk_cand_invite_post_training_control_${candidateId}_no`,
       ),
     ],
     [
       Markup.button.callback(
         "❌ Отмена",
-        `lk_cand_invite_cancel_${candidateId}`
+        `lk_cand_invite_cancel_${candidateId}`,
       ),
     ],
   ]);
@@ -284,7 +285,7 @@ async function askPostTrainingControl(ctx, candidateId) {
 async function askLinkUserOrFinish(ctx, candidateId, ensureUser) {
   const res = await pool.query(
     `SELECT id FROM users WHERE candidate_id = $1 LIMIT 1`,
-    [candidateId]
+    [candidateId],
   );
 
   const st = getState(ctx.from.id);
@@ -299,7 +300,7 @@ async function askLinkUserOrFinish(ctx, candidateId, ensureUser) {
     // Если курс уже пройден — уточняем режим контроля перед назначением
     const uRes = await pool.query(
       `SELECT training_completed_at FROM users WHERE id = $1`,
-      [existingUserId]
+      [existingUserId],
     );
     const trainingCompleted = !!uRes.rows?.[0]?.training_completed_at;
 
@@ -327,13 +328,13 @@ async function showExistingUsersForLink(ctx, candidateId, ensureUser) {
       FROM lk_waiting_users
       WHERE status = 'new'
       ORDER BY created_at DESC
-    `
+    `,
   );
 
   if (!rows.length) {
     await ctx.reply(
       "Пока нет новых пользователей, которые вошли в Личный кабинет.\n" +
-        "Можно будет привязать человека позже из настроек кандидата."
+        "Можно будет привязать человека позже из настроек кандидата.",
     );
     const adminUser = await ensureUser(ctx);
     await finishInternshipInvite(ctx, ctx.from.id, adminUser, {
@@ -363,7 +364,7 @@ async function showExistingUsersForLink(ctx, candidateId, ensureUser) {
       Markup.button.callback(
         label,
         // В КОЛБЭК передаём id записи из lk_waiting_users
-        `lk_cand_invite_link_select_${candidateId}_${u.id}`
+        `lk_cand_invite_link_select_${candidateId}_${u.id}`,
       ),
     ];
   });
@@ -371,7 +372,7 @@ async function showExistingUsersForLink(ctx, candidateId, ensureUser) {
   buttons.push([
     Markup.button.callback(
       "⏳ Привязать позже",
-      `lk_cand_invite_link_later_${candidateId}`
+      `lk_cand_invite_link_later_${candidateId}`,
     ),
   ]);
 
@@ -394,7 +395,7 @@ async function pushOutboxEvent(destination, eventType, payload) {
     INSERT INTO outbox_events (destination, event_type, payload)
     VALUES ($1, $2, $3::jsonb)
     `,
-    [destination, eventType, JSON.stringify(payload)]
+    [destination, eventType, JSON.stringify(payload)],
   );
 }
 
@@ -425,7 +426,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
              internship_admin_id = $6
        WHERE id = $1
       `,
-      [candidateId, dateIso, timeFrom, timeTo, pointId, adminId]
+      [candidateId, dateIso, timeFrom, timeTo, pointId, adminId],
     );
 
     // 2а) Привязка к существующему users.id
@@ -438,7 +439,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
          WHERE id = $2
          RETURNING id, telegram_id, full_name
         `,
-        [candidateId, options.linkUserId]
+        [candidateId, options.linkUserId],
       );
 
       if (res.rows.length) {
@@ -459,7 +460,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
        SET post_training_can_work_under_control = $2
      WHERE id = $1
     `,
-        [linkedUserId, options.postTrainingCanWorkUnderControl]
+        [linkedUserId, options.postTrainingCanWorkUnderControl],
       );
     }
 
@@ -471,7 +472,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
         FROM lk_waiting_users
         WHERE id = $1
         `,
-        [options.waitingId]
+        [options.waitingId],
       );
 
       if (wRes.rows.length) {
@@ -487,7 +488,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
                 candidate_id = $3
           RETURNING id, telegram_id, full_name
           `,
-          [w.telegram_id, w.full_name, candidateId]
+          [w.telegram_id, w.full_name, candidateId],
         );
 
         const u = userRes.rows[0];
@@ -504,7 +505,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
                  linked_at = NOW()
            WHERE id = $1
           `,
-          [w.id, u.id]
+          [w.id, u.id],
         );
       }
     }
@@ -532,7 +533,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
         planned_time_from = EXCLUDED.planned_time_from,
         planned_time_to = EXCLUDED.planned_time_to
       `,
-      [candidateId, linkedUserId, pointId, adminId, dateIso, timeFrom, timeTo]
+      [candidateId, linkedUserId, pointId, adminId, dateIso, timeFrom, timeTo],
     );
 
     await client.query("COMMIT");
@@ -572,7 +573,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
       LEFT JOIN users u ON u.id = c.internship_admin_id
       WHERE c.id = $1
       `,
-      [candidateId]
+      [candidateId],
     );
 
     if (cRes.rows.length) {
@@ -629,12 +630,12 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
 
       let text =
         `${escapeHtml(
-          nameForText
+          nameForText,
         )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
         `<b>📄 Детали стажировки</b>\n` +
         `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
         `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
-          timeToText
+          timeToText,
         )}\n` +
         `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
         `• <b>Наставник:</b> ${mentorLine}\n`;
@@ -642,7 +643,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
       if (phoneDisplay) {
         if (phoneHref) {
           text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
-            phoneHref
+            phoneHref,
           )}">${escapeHtml(phoneDisplay)}</a>\n`;
         } else {
           text += `• <b>Телефон для связи:</b> ${escapeHtml(phoneDisplay)}\n`;
@@ -658,7 +659,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
         try {
           const lkRes = await pool.query(
             "SELECT lk_enabled FROM users WHERE id = $1",
-            [linkedUserId]
+            [linkedUserId],
           );
           linkedLkEnabled = lkRes.rows[0]?.lk_enabled === true;
         } catch (e) {}
@@ -711,13 +712,13 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
           adminTextLines.push("🕒 *Новая запланированная стажировка*");
           adminTextLines.push("");
           adminTextLines.push(
-            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`,
           );
           adminTextLines.push(`• Дата: ${datePart}`);
           adminTextLines.push(
             `• Время: с ${timeFromText || "не указано"} до ${
               timeToText || "не указано"
-            }`
+            }`,
           );
           adminTextLines.push(`• Точка: ${c.point_title || "не указана"}`);
           if (pointAddress) adminTextLines.push(`• Адрес: ${pointAddress}`);
@@ -745,7 +746,7 @@ async function finishInternshipInvite(ctx, tgId, user, options = {}) {
             {
               parse_mode: "Markdown",
               reply_markup: adminKeyboard,
-            }
+            },
           );
         } catch (e) {}
       }
@@ -821,17 +822,23 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         const choice = String(ctx.match[2]);
 
         const st = getState(ctx.from.id);
-        if (!st || st.candidateId !== candidateId || st.step !== "post_training_control") {
+        if (
+          !st ||
+          st.candidateId !== candidateId ||
+          st.step !== "post_training_control"
+        ) {
           await ctx.answerCbQuery("Сценарий не активен").catch(() => {});
           return;
         }
 
         const linkUserId = Number(st.pending_link_user_id);
         if (!Number.isFinite(linkUserId) || linkUserId <= 0) {
-          await ctx.answerCbQuery("Не найден пользователь для привязки").catch(() => {});
+          await ctx
+            .answerCbQuery("Не найден пользователь для привязки")
+            .catch(() => {});
           clearState(ctx.from.id);
           await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
-            () => {}
+            () => {},
           );
           return;
         }
@@ -844,7 +851,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
              SET post_training_can_work_under_control = $2
            WHERE id = $1
           `,
-          [linkUserId, canWorkUnderControl]
+          [linkUserId, canWorkUnderControl],
         );
 
         await ctx.answerCbQuery().catch(() => {});
@@ -856,7 +863,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       } catch (err) {
         logError("lk_cand_invite_post_training_control", err);
       }
-    }
+    },
   );
 
   // Дата: сегодня / завтра
@@ -1030,7 +1037,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         const iso = parseRuDateToIso(raw);
         if (!iso) {
           await ctx.reply(
-            "Дата не распознана. Укажите в формате ДД.ММ, например 05.12"
+            "Дата не распознана. Укажите в формате ДД.ММ, например 05.12",
           );
           return;
         }
@@ -1044,7 +1051,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         const t = parseTimeHHMM(raw);
         if (!t) {
           await ctx.reply(
-            "Время не распознано. Укажите в формате ЧЧ:ММ, например 11:00"
+            "Время не распознано. Укажите в формате ЧЧ:ММ, например 11:00",
           );
           return;
         }
@@ -1058,7 +1065,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         const t = parseTimeHHMM(raw);
         if (!t) {
           await ctx.reply(
-            "Время не распознано. Укажите в формате ЧЧ:ММ, например 16:00"
+            "Время не распознано. Укажите в формате ЧЧ:ММ, например 16:00",
           );
           return;
         }
@@ -1105,7 +1112,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         WHERE c.id = $1
         LIMIT 1
         `,
-        [candidateId]
+        [candidateId],
       );
 
       if (!cRes.rows.length) {
@@ -1130,7 +1137,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       if (!c.intern_user_id || !c.intern_telegram_id) {
         await ctx
           .answerCbQuery(
-            "Нет привязанного пользователя ЛК (некому начать обучение)"
+            "Нет привязанного пользователя ЛК (некому начать обучение)",
           )
           .catch(() => {});
         return;
@@ -1172,13 +1179,13 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         [
           Markup.button.callback(
             "✅ Пришёл вовремя",
-            `lk_intern_start_late_no_${c.id}`
+            `lk_intern_start_late_no_${c.id}`,
           ),
         ],
         [
           Markup.button.callback(
             "⚠️ Опоздал",
-            `lk_intern_start_late_yes_${c.id}`
+            `lk_intern_start_late_yes_${c.id}`,
           ),
         ],
         [Markup.button.callback("❌ Отмена", `lk_intern_start_cancel_${c.id}`)],
@@ -1246,7 +1253,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         ORDER BY id DESC
         LIMIT 1
         `,
-        [internUserId]
+        [internUserId],
       );
 
       if (activeRes.rows.length) {
@@ -1265,7 +1272,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         FROM internship_sessions
         WHERE user_id = $1
         `,
-        [internUserId]
+        [internUserId],
       );
       const nextDay = Number(dayRes.rows[0]?.next_day || 1);
 
@@ -1292,7 +1299,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
           tradePointId || null,
           wasLate ? true : false,
           comment,
-        ]
+        ],
       );
 
       const sessionId = Number(insRes.rows[0]?.id);
@@ -1305,7 +1312,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
    WHERE id = $1
      AND status IN ('internship_invited', 'intern')
   `,
-        [candidateId]
+        [candidateId],
       );
 
       // 4.1) переводим пользователя (users) в intern — КЛЮЧЕВО для /start и ЛК
@@ -1316,7 +1323,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
    WHERE id = $1
      AND staff_status = 'candidate'
   `,
-        [internUserId]
+        [internUserId],
       );
 
       // 5) planned -> started + привязка к session_id
@@ -1366,7 +1373,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
           internUserId,
           tradePointId || null,
           mentorUserId || null,
-        ]
+        ],
       );
 
       // ВАЖНО:
@@ -1376,13 +1383,13 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // 4) переводим кандидата в intern (если ещё не переведён)
       await pool.query(
         `UPDATE candidates SET status = 'intern' WHERE id = $1`,
-        [candidateId]
+        [candidateId],
       );
 
       // 4) переводим кандидата в intern (если ещё не переведён)
       await pool.query(
         `UPDATE candidates SET status = 'intern' WHERE id = $1`,
-        [candidateId]
+        [candidateId],
       );
 
       // ВАЖНО:
@@ -1394,7 +1401,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       // Академический worker слушает destination='academy' и event_type='internship_started'
       const trRes = await pool.query(
         "SELECT training_completed_at FROM users WHERE id = $1",
-        [internUserId]
+        [internUserId],
       );
       const trainingCompletedAt = trRes.rows[0]?.training_completed_at || null;
 
@@ -1437,7 +1444,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       logError("doStartInternship", err);
       await ctx.reply("Не удалось начать стажировку. Попробуйте ещё раз.");
       await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
-        () => {}
+        () => {},
       );
     }
   }
@@ -1461,7 +1468,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       if (!st || Number(st.candidateId) !== candidateId) {
         await ctx.answerCbQuery("Сценарий старта не активен").catch(() => {});
         await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
-          () => {}
+          () => {},
         );
         return;
       }
@@ -1479,17 +1486,17 @@ function registerCandidateInternship(bot, ensureUser, logError) {
               [
                 Markup.button.callback(
                   "↩️ Назад",
-                  `lk_intern_start_late_back_${candidateId}`
+                  `lk_intern_start_late_back_${candidateId}`,
                 ),
               ],
               [
                 Markup.button.callback(
                   "❌ Отмена",
-                  `lk_intern_start_cancel_${candidateId}`
+                  `lk_intern_start_cancel_${candidateId}`,
                 ),
               ],
             ]),
-          }
+          },
         )
         .catch(async () => {
           await ctx.reply(
@@ -1500,17 +1507,17 @@ function registerCandidateInternship(bot, ensureUser, logError) {
                 [
                   Markup.button.callback(
                     "↩️ Назад",
-                    `lk_intern_start_late_back_${candidateId}`
+                    `lk_intern_start_late_back_${candidateId}`,
                   ),
                 ],
                 [
                   Markup.button.callback(
                     "❌ Отмена",
-                    `lk_intern_start_cancel_${candidateId}`
+                    `lk_intern_start_cancel_${candidateId}`,
                   ),
                 ],
               ]),
-            }
+            },
           );
         });
     } catch (err) {
@@ -1525,7 +1532,7 @@ function registerCandidateInternship(bot, ensureUser, logError) {
       if (!st || Number(st.candidateId) !== candidateId) {
         await ctx.answerCbQuery("Сценарий старта не активен").catch(() => {});
         await showCandidateCardLk(ctx, candidateId, { edit: true }).catch(
-          () => {}
+          () => {},
         );
         return;
       }
@@ -1539,19 +1546,19 @@ function registerCandidateInternship(bot, ensureUser, logError) {
         [
           Markup.button.callback(
             "✅ Пришёл вовремя",
-            `lk_intern_start_late_no_${candidateId}`
+            `lk_intern_start_late_no_${candidateId}`,
           ),
         ],
         [
           Markup.button.callback(
             "⚠️ Опоздал",
-            `lk_intern_start_late_yes_${candidateId}`
+            `lk_intern_start_late_yes_${candidateId}`,
           ),
         ],
         [
           Markup.button.callback(
             "❌ Отмена",
-            `lk_intern_start_cancel_${candidateId}`
+            `lk_intern_start_cancel_${candidateId}`,
           ),
         ],
       ]);

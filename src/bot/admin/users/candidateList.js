@@ -217,7 +217,7 @@ FROM candidates c
 WHERE ${where}
 ORDER BY c.interview_date NULLS LAST, c.interview_time NULLS LAST, c.id
     `,
-    params
+    params,
   );
 
   return res.rows;
@@ -307,7 +307,7 @@ async function askWorkerLink(ctx) {
     [
       Markup.button.callback(
         "🔗 Привязать пользователя",
-        "lk_add_worker_link_existing"
+        "lk_add_worker_link_existing",
       ),
     ],
     [Markup.button.callback("⏳ Привяжу позже", "lk_add_worker_link_later")],
@@ -328,13 +328,13 @@ async function showWaitingUsersForWorkerLink(ctx) {
     FROM lk_waiting_users
     WHERE status = 'new'
     ORDER BY created_at DESC
-    `
+    `,
   );
 
   if (!rows.length) {
     await ctx.reply(
       "Пока нет новых пользователей ЛК для привязки.\n" +
-        "Можно привязать позже из настроек сотрудника."
+        "Можно привязать позже из настроек сотрудника.",
     );
     await ctx.answerCbQuery().catch(() => {});
     await finalizeWorkerCreate(ctx, null, null);
@@ -373,13 +373,13 @@ async function showWaitingUsersForInternLink(ctx) {
     FROM lk_waiting_users
     WHERE status = 'new'
     ORDER BY created_at DESC
-    `
+    `,
   );
 
   if (!rows.length) {
     await ctx.reply(
       "Пока нет новых пользователей ЛК для привязки.\n" +
-        "Пусть сотрудник сначала нажмёт «Я уже сотрудник» в ЛК и появится в списке ожидания."
+        "Пусть сотрудник сначала нажмёт «Я уже сотрудник» в ЛК и появится в списке ожидания.",
     );
     await ctx.answerCbQuery().catch(() => {});
     return;
@@ -401,7 +401,7 @@ async function showWaitingUsersForInternLink(ctx) {
       {
         ...keyboard,
         parse_mode: "Markdown",
-      }
+      },
     )
     .catch(async () => {
       await ctx.reply(
@@ -409,7 +409,7 @@ async function showWaitingUsersForInternLink(ctx) {
         {
           ...keyboard,
           parse_mode: "Markdown",
-        }
+        },
       );
     });
 }
@@ -418,7 +418,7 @@ async function finalizeInternCreate(ctx, admin, waitingId) {
   // берём telegram_id + имя из списка ожидания
   const wRes = await pool.query(
     `SELECT id, telegram_id, full_name FROM lk_waiting_users WHERE id = $1 LIMIT 1`,
-    [waitingId]
+    [waitingId],
   );
   if (!wRes.rows.length) {
     await ctx.reply("Пользователь ожидания не найден.");
@@ -433,7 +433,7 @@ async function finalizeInternCreate(ctx, admin, waitingId) {
     VALUES ($1, $2, 'user', 'intern')
     RETURNING id
     `,
-    [w.telegram_id || null, w.full_name || null]
+    [w.telegram_id || null, w.full_name || null],
   );
   const userId = ins.rows[0].id;
 
@@ -446,7 +446,7 @@ async function finalizeInternCreate(ctx, admin, waitingId) {
         linked_at = NOW()
     WHERE id = $1
     `,
-    [waitingId, userId]
+    [waitingId, userId],
   );
 
   // возвращаем в таб стажёров
@@ -470,7 +470,7 @@ async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
   if (waitingId) {
     const wRes = await pool.query(
       `SELECT telegram_id FROM lk_waiting_users WHERE id = $1 LIMIT 1`,
-      [waitingId]
+      [waitingId],
     );
     if (wRes.rows.length) {
       telegramId = wRes.rows[0].telegram_id;
@@ -485,22 +485,24 @@ async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
   try {
     const ins = await pool.query(
       `
-      INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone, qualification_status)
-      VALUES ($1, $2, 'worker', 'worker', $3, $4, $5)
-      RETURNING id
+    INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone, qualification_status)
+VALUES ($1, $2, 'user', 'employee', $3, $4, $5)
+RETURNING id
+
       `,
-      [telegramId, name, position, phone, qual]
+      [telegramId, name, position, phone, qual],
     );
     userId = ins.rows[0].id;
   } catch (e) {
     // если qualification_status отсутствует — создадим без него
     const ins2 = await pool.query(
       `
-      INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone)
-      VALUES ($1, $2, 'worker', 'worker', $3, $4)
-      RETURNING id
+     INSERT INTO users (telegram_id, full_name, role, staff_status, position, work_phone)
+VALUES ($1, $2, 'user', 'employee', $3, $4)
+RETURNING id
+
       `,
-      [telegramId, name, position, phone]
+      [telegramId, name, position, phone],
     );
     userId = ins2.rows[0].id;
   }
@@ -516,7 +518,7 @@ async function finalizeWorkerCreate(ctx, waitingId, telegramIdOverride) {
           linked_at = NOW()
       WHERE id = $1
       `,
-        [waitingId, userId]
+        [waitingId, userId],
       )
       .catch(() => {});
   }
@@ -556,7 +558,7 @@ WHERE u.id = $1
 
 ORDER BY c.internship_date NULLS LAST, c.internship_time_from NULLS LAST, c.id
     `,
-    params
+    params,
   );
 
   return res.rows;
@@ -574,7 +576,7 @@ AND s.closed_at IS NULL
     ORDER BY s.opened_at DESC NULLS LAST, s.id DESC
     LIMIT 1
     `,
-    [userId]
+    [userId],
   );
   return rows[0] || null;
 }
@@ -654,7 +656,7 @@ async function showInternsListLk(ctx, user, options = {}) {
   WHERE ${where}
   ORDER BY c.internship_date NULLS LAST, c.id
   `,
-    params
+    params,
   );
 
   const interns = res.rows;
@@ -688,7 +690,7 @@ async function showInternsListLk(ctx, user, options = {}) {
     const when = formatInternshipLabel(
       c.internship_date,
       c.internship_time_from,
-      c.internship_time_to
+      c.internship_time_to,
     );
 
     const openCb =
@@ -699,7 +701,7 @@ async function showInternsListLk(ctx, user, options = {}) {
     rows.push([
       Markup.button.callback(
         `${icon} ${dayText} ${name}${ageText} – ${when}`,
-        openCb
+        openCb,
       ),
     ]);
   }
@@ -732,11 +734,11 @@ async function showInternsListLk(ctx, user, options = {}) {
     rows.push([
       Markup.button.callback(
         filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
-        "lk_cand_filter_scope_personal"
+        "lk_cand_filter_scope_personal",
       ),
       Markup.button.callback(
         filters.scope === "all" ? "✅ 👥 все" : "👥 все",
-        "lk_cand_filter_scope_all"
+        "lk_cand_filter_scope_all",
       ),
     ]);
 
@@ -804,7 +806,7 @@ async function showCandidatesListLk(ctx, user, options = {}) {
       const dt = formatInternshipLabel(
         c.internship_date,
         c.internship_time_from,
-        c.internship_time_to
+        c.internship_time_to,
       );
       label = `${icon} ${c.name}${agePart} — ${dt}`;
     }
@@ -866,19 +868,19 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     rows.push([
       Markup.button.callback(
         filters.waiting ? "🕒" : "➖🕒",
-        "lk_cand_filter_status_waiting"
+        "lk_cand_filter_status_waiting",
       ),
       Markup.button.callback(
         filters.arrived ? "✔️" : "➖✔️",
-        "lk_cand_filter_status_arrived"
+        "lk_cand_filter_status_arrived",
       ),
       Markup.button.callback(
         filters.internshipInvited ? "☑️" : "➖☑️",
-        "lk_cand_filter_status_internship"
+        "lk_cand_filter_status_internship",
       ),
       Markup.button.callback(
         filters.cancelled ? "❌" : "➖❌",
-        "lk_cand_filter_status_cancelled"
+        "lk_cand_filter_status_cancelled",
       ),
     ]);
 
@@ -886,11 +888,11 @@ async function showCandidatesListLk(ctx, user, options = {}) {
     rows.push([
       Markup.button.callback(
         filters.scope === "personal" ? "✅ 👤 личные" : "👤 личные",
-        "lk_cand_filter_scope_personal"
+        "lk_cand_filter_scope_personal",
       ),
       Markup.button.callback(
         filters.scope === "all" ? "✅ 👥 все" : "👥 все",
-        "lk_cand_filter_scope_all"
+        "lk_cand_filter_scope_all",
       ),
     ]);
 
@@ -964,7 +966,7 @@ async function showWorkerPositionPicker(ctx, workerId, options = {}) {
       : ctx.updateType === "callback_query";
 
   const { rows } = await pool.query(
-    `SELECT id, title FROM positions WHERE is_active = TRUE ORDER BY title`
+    `SELECT id, title FROM positions WHERE is_active = TRUE ORDER BY title`,
   );
 
   let text = "💼 *Выберите должность сотрудника:*";
@@ -977,7 +979,7 @@ async function showWorkerPositionPicker(ctx, workerId, options = {}) {
       buttons.push([
         Markup.button.callback(
           p.title,
-          `lk_worker_set_position_${workerId}_${p.id}`
+          `lk_worker_set_position_${workerId}_${p.id}`,
         ),
       ]);
     }
@@ -991,14 +993,14 @@ async function showWorkerPositionPicker(ctx, workerId, options = {}) {
   await deliver(
     ctx,
     { text, extra: { ...keyboard, parse_mode: "Markdown" } },
-    { edit: shouldEdit }
+    { edit: shouldEdit },
   );
 }
 
 async function setWorkerPosition(workerId, positionId) {
   const { rows } = await pool.query(
     `SELECT title FROM positions WHERE id = $1 AND is_active = TRUE LIMIT 1`,
-    [positionId]
+    [positionId],
   );
   if (!rows.length) return { ok: false, reason: "not_found" };
 
@@ -1018,7 +1020,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     ensureUser,
     logError,
     showCandidateCardLk,
-    isRestoreModeFor
+    isRestoreModeFor,
   );
 
   bot.action(/^admin_worker_edit_age_(\d+)$/, async (ctx) => {
@@ -1036,7 +1038,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       // Берём текущего юзера
       const ur = await pool.query(
         `SELECT id, full_name, candidate_id FROM users WHERE id = $1 LIMIT 1`,
-        [workerId]
+        [workerId],
       );
       const u = ur.rows[0];
       if (!u) {
@@ -1058,7 +1060,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         VALUES ($1, 'rejected', true, 'служебная анкета для сотрудника', NOW(), $2)
         RETURNING id
         `,
-          [name, admin.id]
+          [name, admin.id],
         );
 
         candidateId = cr.rows[0].id;
@@ -1078,7 +1080,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       });
 
       await ctx.reply(
-        "🎂 Введи возраст (число).\nЧтобы очистить — отправь «-».\nДля отмены — /cancel"
+        "🎂 Введи возраст (число).\nЧтобы очистить — отправь «-».\nДля отмены — /cancel",
       );
     } catch (err) {
       logError("admin_worker_edit_age", err);
@@ -1169,7 +1171,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       // если у этого users есть candidate_id — откроем полноценную карточку кандидата/стажёра
       const { rows } = await pool.query(
         `SELECT candidate_id FROM users WHERE id = $1 LIMIT 1`,
-        [userId]
+        [userId],
       );
 
       if (rows.length && rows[0].candidate_id) {
@@ -1246,7 +1248,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         const n = Number(raw.replace(/[^\d]/g, ""));
         if (!Number.isFinite(n) || n <= 0 || n > 120) {
           await ctx.reply(
-            "Возраст не распознан. Введите число (например 22) или нажмите «Пропустить»."
+            "Возраст не распознан. Введите число (например 22) или нажмите «Пропустить».",
           );
           return;
         }
@@ -1275,7 +1277,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       logError("lk_add_worker_text", err);
       clearAddWorkerState(ctx.from.id);
       await ctx.reply(
-        "Не удалось сохранить данные сотрудника. Попробуйте снова."
+        "Не удалось сохранить данные сотрудника. Попробуйте снова.",
       );
     }
   });
@@ -1563,7 +1565,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         [
           Markup.button.callback(
             "👤 история кандидатов",
-            "lk_history_candidates"
+            "lk_history_candidates",
           ),
         ],
         [Markup.button.callback("🎓 история стажёров", "lk_history_interns")],
@@ -1605,7 +1607,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     deleteLabel,
     postponeLabel,
     deleteAction,
-    postponeAction
+    postponeAction,
   ) {
     const text =
       `📜 <b>${title}</b>\n\n` +
@@ -1635,7 +1637,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         "Кандидаты на удалении",
         "Отложенные кандидаты",
         "lk_hist_del_open",
-        "lk_hist_def_open"
+        "lk_hist_def_open",
       );
     } catch (err) {
       logError("lk_history_candidates", err);
@@ -1652,7 +1654,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         "Кандидаты на удалении",
         "Отложенные кандидаты",
         "lk_hist_del_open",
-        "lk_hist_def_open"
+        "lk_hist_def_open",
       );
     } catch (err) {
       logError("lk_history_interns", err);
@@ -1669,7 +1671,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
         "Кандидаты на удалении",
         "Отложенные кандидаты",
         "lk_hist_del_open",
-        "lk_hist_def_open"
+        "lk_hist_def_open",
       );
     } catch (err) {
       logError("lk_history_staff", err);
@@ -1705,7 +1707,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
              declined_at = NULL
        WHERE id = $1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       await showCandidateCardLk(ctx, candidateId, { edit: true });
@@ -1765,7 +1767,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       ORDER BY c.declined_at DESC, c.id DESC
       LIMIT 20
     `,
-      params
+      params,
     );
 
     const total = res.rows.length;
@@ -1840,7 +1842,7 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
       ORDER BY c.id DESC
       LIMIT 20
     `,
-      params
+      params,
     );
 
     const total = res.rows.length;
@@ -1938,9 +1940,6 @@ function registerCandidateListHandlers(bot, ensureUser, logError) {
     await showDeferredCandidates(ctx, { edit: true });
   });
 
-
-  
-
   // ----- СПИСОК СОТРУДНИКОВ -----
 
   async function showWorkersListLk(ctx, currentUser, options = {}) {
@@ -1989,7 +1988,7 @@ sh.trade_point_id,
     ${qualWhere}
   ORDER BY u.full_name
   `,
-        params
+        params,
       );
     } catch (e) {
       res = await pool.query(
@@ -2003,7 +2002,7 @@ sh.trade_point_id,
     LEFT JOIN candidates c ON c.id = u.candidate_id
     WHERE u.staff_status = 'worker'
     ORDER BY u.full_name
-  `
+  `,
       );
     }
 
@@ -2038,7 +2037,7 @@ sh.trade_point_id,
       rows.push([
         Markup.button.callback(
           `${icon} ${name}${ageText}${onShiftTail}`,
-          `admin_worker_open_${w.id}`
+          `admin_worker_open_${w.id}`,
         ),
       ]);
     }
@@ -2084,19 +2083,19 @@ sh.trade_point_id,
       rows.push([
         Markup.button.callback(
           filters.workerQual === "red" ? "🔴 ✅" : "🔴",
-          "lk_workers_filter_red"
+          "lk_workers_filter_red",
         ),
         Markup.button.callback(
           filters.workerQual === "yellow" ? "🟡 ✅" : "🟡",
-          "lk_workers_filter_yellow"
+          "lk_workers_filter_yellow",
         ),
         Markup.button.callback(
           filters.workerQual === "green" ? "🟢 ✅" : "🟢",
-          "lk_workers_filter_green"
+          "lk_workers_filter_green",
         ),
         Markup.button.callback(
           filters.workerQual === "all" ? "все ✅" : "все",
-          "lk_workers_filter_all"
+          "lk_workers_filter_all",
         ),
       ]);
 
@@ -2104,7 +2103,7 @@ sh.trade_point_id,
       rows.push([
         Markup.button.callback(
           "📉 Отстающие по программе",
-          "lk_workers_filter_program"
+          "lk_workers_filter_program",
         ),
       ]);
 
@@ -2112,7 +2111,7 @@ sh.trade_point_id,
       rows.push([
         Markup.button.callback(
           filters.workerOnShift ? "💼 на смене ✅" : "💼 на смене",
-          "lk_workers_filter_onshift"
+          "lk_workers_filter_onshift",
         ),
       ]);
 
@@ -2163,7 +2162,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
 WHERE u.id = $1
 
       `,
-      [workerId]
+      [workerId],
     );
 
     if (!res.rows.length) {
@@ -2231,18 +2230,16 @@ WHERE u.id = $1
       rows.push([
         Markup.button.callback(
           "📝 задачи смены",
-          `lk_worker_shift_tasks_${workerId}`
+          `lk_worker_shift_tasks_${workerId}`,
         ),
       ]);
     }
-
- 
 
     // 2) успеваемость
     rows.push([
       Markup.button.callback(
         "📊 успеваемость",
-        `lk_worker_performance_${u.id}`
+        `lk_worker_performance_${u.id}`,
       ),
     ]);
 
@@ -2256,7 +2253,7 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         expanded ? "▴ Скрыть карточку" : " Открыть карточку",
-        `lk_worker_toggle_cards_${u.id}`
+        `lk_worker_toggle_cards_${u.id}`,
       ),
     ]);
 
@@ -2301,7 +2298,7 @@ WHERE u.id = $1
       LEFT JOIN candidates c ON c.id = u.candidate_id
       WHERE u.id = $1
       `,
-      [workerId]
+      [workerId],
     );
 
     if (!res.rows.length) {
@@ -2357,7 +2354,7 @@ WHERE u.id = $1
         lkEnabled ? "🔒 Закрыть доступ в ЛК" : "🔓 Открыть доступ в ЛК",
         lkEnabled
           ? `admin_worker_settings_close_lk_${u.id}`
-          : `admin_worker_settings_open_lk_${u.id}`
+          : `admin_worker_settings_open_lk_${u.id}`,
       ),
     ]);
 
@@ -2365,7 +2362,7 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         "✏️ Изменить карточку",
-        `admin_worker_edit_card_${u.id}`
+        `admin_worker_edit_card_${u.id}`,
       ),
     ]);
 
@@ -2373,7 +2370,7 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         "🗑 Удалить пользователя",
-        `admin_worker_delete_stub_${u.id}`
+        `admin_worker_delete_stub_${u.id}`,
       ),
     ]);
 
@@ -2381,7 +2378,7 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         "📋 Открыть другую карточку",
-        `admin_worker_open_other_card_stub_${u.id}`
+        `admin_worker_open_other_card_stub_${u.id}`,
       ),
     ]);
 
@@ -2421,7 +2418,7 @@ LEFT JOIN candidates c ON c.id = u.candidate_id
 WHERE u.id = $1
 
       `,
-      [workerId]
+      [workerId],
     );
 
     if (!res.rows.length) {
@@ -2477,53 +2474,53 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         "📞 Рабочий номер",
-        `admin_worker_edit_phone_${u.id}`
+        `admin_worker_edit_phone_${u.id}`,
       ),
     ]);
     rows.push([
       Markup.button.callback(
         "@ Username",
-        `admin_worker_edit_username_${u.id}`
+        `admin_worker_edit_username_${u.id}`,
       ),
     ]);
     rows.push([
       Markup.button.callback(
         "✏️ Изменить имя",
-        `admin_worker_edit_name_${u.id}`
+        `admin_worker_edit_name_${u.id}`,
       ),
     ]);
     rows.push([
       Markup.button.callback(
         "✏️ Изменить возраст",
-        `admin_worker_edit_age_${u.id}`
+        `admin_worker_edit_age_${u.id}`,
       ),
     ]);
 
     rows.push([
       Markup.button.callback(
         "✏️ Изменить должность",
-        `lk_worker_edit_position_${workerId}`
+        `lk_worker_edit_position_${workerId}`,
       ),
     ]);
     // статус — пока заглушка
     rows.push([
       Markup.button.callback(
         "✏️ Изменить статус",
-        `admin_worker_change_status_stub_${u.id}`
+        `admin_worker_change_status_stub_${u.id}`,
       ),
     ]);
 
     // роль — показываем только супер-админу (тому, кто открыл меню)
     const me = await pool.query(
       `SELECT role FROM users WHERE telegram_id = $1 LIMIT 1`,
-      [ctx.from.id]
+      [ctx.from.id],
     );
     const isSuperAdmin = me.rows[0]?.role === "super_admin";
     if (isSuperAdmin) {
       rows.push([
         Markup.button.callback(
           "✏️ Изменить роль",
-          `admin_worker_change_role_${u.id}`
+          `admin_worker_change_role_${u.id}`,
         ),
       ]);
     }
@@ -2716,7 +2713,7 @@ WHERE u.id = $1
 
     const uRes = await pool.query(
       `SELECT id, COALESCE(full_name,'Без имени') AS full_name FROM users WHERE id = $1 LIMIT 1`,
-      [workerId]
+      [workerId],
     );
     const fullName = uRes.rows[0]?.full_name || "Без имени";
 
@@ -2738,13 +2735,13 @@ WHERE u.id = $1
       AND ti.for_date = CURRENT_DATE
     ORDER BY ti.id
     `,
-      [workerId]
+      [workerId],
     );
 
     let text = `📝 <b>Задачи смены</b>\n\n`;
     text += `👤 <b>${escHtml(fullName)}</b>\n`;
     text += `📍 Точка: <b>${escHtml(
-      activeShift.point_title || "не указано"
+      activeShift.point_title || "не указано",
     )}</b>\n\n`;
 
     if (!tRes.rows.length) {
@@ -2762,7 +2759,7 @@ WHERE u.id = $1
     rows.push([
       Markup.button.callback(
         "➕ создать ещё задачу",
-        `admin_shift_tasks_point_${activeShift.trade_point_id}`
+        `admin_shift_tasks_point_${activeShift.trade_point_id}`,
       ),
     ]);
     rows.push([
@@ -2783,7 +2780,7 @@ WHERE u.id = $1
 
       const r = await pool.query(
         `SELECT id, candidate_id, COALESCE(full_name,'Без имени') AS full_name FROM users WHERE id = $1 LIMIT 1`,
-        [workerId]
+        [workerId],
       );
       const u = r.rows[0];
       if (!u) {
@@ -2803,14 +2800,14 @@ WHERE u.id = $1
         rows.push([
           Markup.button.callback(
             "🌱 данные стажировок",
-            `lk_internship_data_${u.candidate_id}`
+            `lk_internship_data_${u.candidate_id}`,
           ),
         ]);
       } else {
         rows.push([
           Markup.button.callback(
             "🌱 данные стажировок",
-            `lk_worker_no_internship_data_${workerId}`
+            `lk_worker_no_internship_data_${workerId}`,
           ),
         ]);
       }
@@ -2820,8 +2817,11 @@ WHERE u.id = $1
 
       await deliver(
         ctx,
-        { text, extra: { ...Markup.inlineKeyboard(rows), parse_mode: "Markdown" } },
-        { edit: true }
+        {
+          text,
+          extra: { ...Markup.inlineKeyboard(rows), parse_mode: "Markdown" },
+        },
+        { edit: true },
       );
     } catch (err) {
       logError("lk_worker_performance", err);
@@ -2857,7 +2857,7 @@ WHERE u.id = $1
       await ctx.reply(
         "Введи рабочий номер для этого сотрудника.\n" +
           "Чтобы очистить — отправь «-».\n" +
-          "Для отмены — /cancel."
+          "Для отмены — /cancel.",
       );
     } catch (err) {
       logError("admin_worker_edit_phone", err);
@@ -2881,7 +2881,7 @@ WHERE u.id = $1
       await ctx.reply(
         "Введи username сотрудника (можно с @).\n" +
           "Чтобы очистить — отправь «-».\n" +
-          "Для отмены — /cancel."
+          "Для отмены — /cancel.",
       );
     } catch (err) {
       logError("admin_worker_edit_username", err);
@@ -2904,7 +2904,7 @@ WHERE u.id = $1
 
       await ctx.reply(
         "Введи новое имя (ФИО) для этого сотрудника.\n" +
-          "Для отмены — /cancel."
+          "Для отмены — /cancel.",
       );
     } catch (err) {
       logError("admin_worker_edit_name", err);
@@ -2922,7 +2922,7 @@ WHERE u.id = $1
       const workerId = Number(ctx.match[1]);
       const res = await pool.query(
         `SELECT full_name, staff_status FROM users WHERE id = $1`,
-        [workerId]
+        [workerId],
       );
       if (!res.rows.length) {
         await ctx.reply("Сотрудник не найден.");
@@ -2940,7 +2940,7 @@ WHERE u.id = $1
         rows.push([
           Markup.button.callback(
             (isCurrent ? "✅ " : "⚪ ") + s.label,
-            `admin_worker_set_status_${workerId}_${s.code}`
+            `admin_worker_set_status_${workerId}_${s.code}`,
           ),
         ]);
       }
@@ -2948,7 +2948,7 @@ WHERE u.id = $1
       rows.push([
         Markup.button.callback(
           "⬅️ Назад к настройкам",
-          `admin_worker_settings_${workerId}`
+          `admin_worker_settings_${workerId}`,
         ),
       ]);
 
@@ -2992,7 +2992,7 @@ WHERE u.id = $1
       const workerId = Number(ctx.match[1]);
       const res = await pool.query(
         `SELECT full_name, role FROM users WHERE id = $1`,
-        [workerId]
+        [workerId],
       );
       if (!res.rows.length) {
         await ctx.reply("Сотрудник не найден.");
@@ -3019,7 +3019,7 @@ WHERE u.id = $1
         rows.push([
           Markup.button.callback(
             (isCurrent ? "✅ " : "") + r.code,
-            `admin_worker_set_role_${workerId}_${r.code}`
+            `admin_worker_set_role_${workerId}_${r.code}`,
           ),
         ]);
       }
@@ -3027,7 +3027,7 @@ WHERE u.id = $1
       rows.push([
         Markup.button.callback(
           "⬅️ Назад к настройкам",
-          `admin_worker_settings_${workerId}`
+          `admin_worker_settings_${workerId}`,
         ),
       ]);
 
@@ -3088,7 +3088,7 @@ WHERE u.id = $1
         if (!candidateId) {
           clearWorkerEditState(ctx.from.id);
           await ctx.reply(
-            "У сотрудника нет анкеты кандидата — возраст менять нельзя."
+            "У сотрудника нет анкеты кандидата — возраст менять нельзя.",
           );
           return;
         }
@@ -3106,7 +3106,7 @@ WHERE u.id = $1
         const n = Number(text);
         if (!Number.isInteger(n) || n < 14 || n > 90) {
           await ctx.reply(
-            "Возраст должен быть числом от 14 до 90. Или «-» чтобы очистить, или /cancel."
+            "Возраст должен быть числом от 14 до 90. Или «-» чтобы очистить, или /cancel.",
           );
           return;
         }
@@ -3154,7 +3154,7 @@ WHERE u.id = $1
       if (state.field === "full_name") {
         if (text.length < 2) {
           await ctx.reply(
-            "Имя слишком короткое, попробуй ещё раз или /cancel."
+            "Имя слишком короткое, попробуй ещё раз или /cancel.",
           );
           return;
         }
@@ -3438,25 +3438,25 @@ WHERE u.id = $1
         [
           Markup.button.callback(
             "🚫 не пришёл и не предупредил",
-            `lk_cand_decline_apply_${candidateId}_no_show`
+            `lk_cand_decline_apply_${candidateId}_no_show`,
           ),
         ],
         [
           Markup.button.callback(
             "📩 предупредил, что не придёт",
-            `lk_cand_decline_apply_${candidateId}_warned`
+            `lk_cand_decline_apply_${candidateId}_warned`,
           ),
         ],
         [
           Markup.button.callback(
             "🤔 странное поведение",
-            `lk_cand_decline_apply_${candidateId}_weird`
+            `lk_cand_decline_apply_${candidateId}_weird`,
           ),
         ],
         [
           Markup.button.callback(
             "⬅️ Отмена",
-            `lk_cand_decline_cancel_${candidateId}`
+            `lk_cand_decline_cancel_${candidateId}`,
           ),
         ],
       ]);
@@ -3495,7 +3495,7 @@ WHERE u.id = $1
              closed_by_admin_id = $3
        WHERE id = $1
     `,
-      [candidateId, reason, adminDbId || null]
+      [candidateId, reason, adminDbId || null],
     );
 
     // 2) Пытаемся уведомить кандидата (ТОЛЬКО если есть привязанный user с telegram_id)
@@ -3509,7 +3509,7 @@ WHERE u.id = $1
         ORDER BY id DESC
         LIMIT 1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       const candidateTelegramId = uRes.rows[0]?.telegram_id;
@@ -3543,7 +3543,7 @@ WHERE u.id = $1
       ctx,
       Number(ctx.match[1]),
       "Не пришёл и не предупредил",
-      admin.id
+      admin.id,
     );
   });
 
@@ -3558,7 +3558,7 @@ WHERE u.id = $1
       ctx,
       Number(ctx.match[1]),
       "Предупредил, что не придёт",
-      admin.id
+      admin.id,
     );
   });
 
@@ -3573,7 +3573,7 @@ WHERE u.id = $1
       ctx,
       Number(ctx.match[1]),
       "Странное поведение",
-      admin.id
+      admin.id,
     );
   });
   // ================================
@@ -3622,7 +3622,7 @@ WHERE u.id = $1
              declined_at = COALESCE(declined_at, NOW())
        WHERE id = $1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       await showCandidateCardLk(ctx, candidateId, { edit: true });
@@ -3642,7 +3642,7 @@ WHERE u.id = $1
       // берём состояние ДО апдейта
       const { rows } = await pool.query(
         "SELECT id, closed_from_status FROM candidates WHERE id = $1",
-        [candidateId]
+        [candidateId],
       );
       const cand = rows[0];
       if (!cand) return;
@@ -3660,7 +3660,7 @@ WHERE u.id = $1
              closed_by_admin_id = NULL
        WHERE id = $1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       restoreModeStates.delete(ctx.from.id);
@@ -3678,14 +3678,14 @@ WHERE u.id = $1
   ORDER BY id DESC
   LIMIT 1
   `,
-          [candidateId]
+          [candidateId],
         );
 
         const tgId = uRes.rows[0]?.telegram_id;
         if (tgId) {
           await notifyCandidateAfterRestore(
             { candidateId, restoredStatus, candidateTelegramId: tgId },
-            ctx
+            ctx,
           );
         }
       }
@@ -3762,7 +3762,7 @@ WHERE u.id = $1
         LEFT JOIN users a         ON a.id = c.admin_id
         WHERE c.id = $1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       const c = res.rows[0];
@@ -3831,7 +3831,7 @@ WHERE u.id = $1
           adminTextLines.push("♻️ *Восстановление кандидата (собеседование)*");
           adminTextLines.push("");
           adminTextLines.push(
-            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`,
           );
           adminTextLines.push(`• Дата: ${dateStr}`);
           adminTextLines.push(`• Время: ${timeStr}`);
@@ -3859,12 +3859,12 @@ WHERE u.id = $1
             {
               parse_mode: "Markdown",
               reply_markup: adminKeyboard,
-            }
+            },
           );
         } catch (err) {
           console.error(
             "[notifyCandidateAfterRestore] notify admin error",
-            err
+            err,
           );
         }
       }
@@ -3897,7 +3897,7 @@ WHERE u.id = $1
         LEFT JOIN users u ON u.id = c.internship_admin_id
         WHERE c.id = $1
       `,
-        [candidateId]
+        [candidateId],
       );
 
       const c = cRes.rows[0];
@@ -3917,12 +3917,12 @@ WHERE u.id = $1
 
       let text =
         `${escapeHtml(
-          nameForText
+          nameForText,
         )}, вы приглашены на стажировку в Green Rocket! 🚀\n\n` +
         `<b>📄 Детали стажировки</b>\n` +
         `• <b>Дата:</b> ${escapeHtml(datePart)}\n` +
         `• <b>Время:</b> с ${escapeHtml(timeFromText)} до ${escapeHtml(
-          timeToText
+          timeToText,
         )}\n` +
         `• <b>Адрес:</b> ${escapeHtml(pointAddress)}\n` +
         `• <b>Наставник:</b> ${escapeHtml(mentorName)}\n`;
@@ -3930,7 +3930,7 @@ WHERE u.id = $1
       if (phone.display) {
         if (phone.href) {
           text += `• <b>Телефон для связи:</b> <a href="tel:${escapeHtml(
-            phone.href
+            phone.href,
           )}">${escapeHtml(phone.display)}</a>\n`;
         } else {
           text += `• <b>Телефон для связи:</b> ${escapeHtml(phone.display)}\n`;
@@ -3980,7 +3980,7 @@ WHERE u.id = $1
           mentorTextLines.push("♻️ *Восстановление кандидата (стажировка)*");
           mentorTextLines.push("");
           mentorTextLines.push(
-            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`
+            `• Кандидат: ${c.name || "без имени"}${c.age ? ` (${c.age})` : ""}`,
           );
           mentorTextLines.push(`• Дата: ${datePart}`);
           mentorTextLines.push(`• Время: с ${timeFromText} до ${timeToText}`);
@@ -4010,12 +4010,12 @@ WHERE u.id = $1
             {
               parse_mode: "Markdown",
               reply_markup: mentorKeyboard,
-            }
+            },
           );
         } catch (err) {
           console.error(
             "[notifyCandidateAfterRestore] notify mentor error",
-            err
+            err,
           );
         }
       }

@@ -301,6 +301,66 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       const rows = [
         [
           {
+            text: "📋 задачи смены",
+            callback_data: "admin_shift_settings_tasks_group",
+          },
+        ],
+        [
+          {
+            text: "💸 недостачи / излишки",
+            callback_data: "admin_shift_settings_cashdiff_group",
+          },
+        ],
+        [
+          {
+            text: "🚀 контроль открытия смены",
+            callback_data: "admin_resp_kind_shift_opening_control",
+          },
+        ],
+        [
+          {
+            text: "👤 Назначение ответственных",
+            callback_data: "admin_resp_root",
+          },
+        ],
+        [{ text: "⬅️ Назад", callback_data: "admin_settings_company" }],
+      ];
+
+      // Только для super_admin
+      if (user.role === "super_admin") {
+        rows.splice(2, 0, [
+          { text: "🟢 Активные смены", callback_data: "admin_active_shifts" },
+        ]);
+      }
+
+      const keyboard = Markup.inlineKeyboard(rows);
+
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_shift_settings", err);
+    }
+  });
+
+  // -----------------------------
+  // Группа: 📋 задачи смены
+  // -----------------------------
+  bot.action("admin_shift_settings_tasks_group", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const text =
+        "📋 <b>Задачи смены</b>\n\n" +
+        "Здесь настраиваются задачи:\n" +
+        "• открытия смены\n" +
+        "• в течение дня\n" +
+        "• закрытия смены\n\n" +
+        "Выберите раздел:";
+
+      const kb = Markup.inlineKeyboard([
+        [
+          {
             text: "🚀 Задачи открытия смены",
             callback_data: "admin_shift_opening_root",
           },
@@ -317,6 +377,32 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
             callback_data: "admin_shift_closing_root",
           },
         ],
+        [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+      ]);
+
+      await deliver(ctx, { text, extra: kb }, { edit: true });
+    } catch (err) {
+      logError("admin_shift_settings_tasks_group", err);
+    }
+  });
+
+  // -----------------------------
+  // Группа: 💸 недостачи / излишки
+  // -----------------------------
+  bot.action("admin_shift_settings_cashdiff_group", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!isAdmin(user)) return;
+
+      const text =
+        "💸 <b>Недостачи / излишки</b>\n\n" +
+        "В этом разделе:\n" +
+        "• настраиваются пороги недостачи/излишка\n" +
+        "• назначаются ответственные за контроль\n\n" +
+        "Выберите действие:";
+
+      const kb = Markup.inlineKeyboard([
         [
           {
             text: "❗ Порог недостачи",
@@ -331,25 +417,18 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
         ],
         [
           {
-            text: "👤 Назначение ответственных",
-            callback_data: "admin_resp_root",
+            text: "👤 назначение ответственных",
+            // Дубликат быстрого доступа:
+            // тот же функционал, что кнопка "💸 контроль недостач/излишек" внутри Назначение ответственных
+            callback_data: "admin_resp_kind_cash_diff",
           },
         ],
-        [{ text: "⬅️ Назад", callback_data: "admin_settings_company" }],
-      ];
+        [{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }],
+      ]);
 
-      // Только для super_admin
-      if (user.role === "super_admin") {
-        rows.splice(3, 0, [
-          { text: "🟢 Активные смены", callback_data: "admin_active_shifts" },
-        ]);
-      }
-
-      const keyboard = Markup.inlineKeyboard(rows);
-
-      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+      await deliver(ctx, { text, extra: kb }, { edit: true });
     } catch (err) {
-      logError("admin_shift_settings", err);
+      logError("admin_shift_settings_cashdiff_group", err);
     }
   });
 
@@ -466,7 +545,6 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
     }
   });
 
-
   // -----------------------------
   // Активные смены (только super_admin)
   // -----------------------------
@@ -505,7 +583,8 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
           ? "Выберите точку:"
           : "Сейчас нет активных смен (за последние ~18 часов).");
 
-          text += "\n\n<i>Данный раздел создан для того, чтобы принудительно завершать  смены в случае необходимости</i>.";
+      text +=
+        "\n\n<i>Данный раздел создан для того, чтобы принудительно завершать  смены в случае необходимости</i>.";
 
       const kbRows = rows.map((p) => [
         {
@@ -514,9 +593,15 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
         },
       ]);
 
-      kbRows.push([{ text: "⬅️ Назад", callback_data: "admin_shift_settings" }]);
+      kbRows.push([
+        { text: "⬅️ Назад", callback_data: "admin_shift_settings" },
+      ]);
 
-      await deliver(ctx, { text, extra: Markup.inlineKeyboard(kbRows) }, { edit: true });
+      await deliver(
+        ctx,
+        { text, extra: Markup.inlineKeyboard(kbRows) },
+        { edit: true }
+      );
     } catch (err) {
       logError("admin_active_shifts", err);
     }
@@ -559,7 +644,9 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       const text =
         `🟢 <b>Активные смены</b>\n\n` +
         `Точка: <b>${esc(pointTitle)}</b>\n\n` +
-        (rows.length ? "Выберите сотрудника:" : "На этой точке нет активных смен.");
+        (rows.length
+          ? "Выберите сотрудника:"
+          : "На этой точке нет активных смен.");
 
       const kbRows = rows.map((s) => [
         {
@@ -570,7 +657,11 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
 
       kbRows.push([{ text: "⬅️ Назад", callback_data: "admin_active_shifts" }]);
 
-      await deliver(ctx, { text, extra: Markup.inlineKeyboard(kbRows) }, { edit: true });
+      await deliver(
+        ctx,
+        { text, extra: Markup.inlineKeyboard(kbRows) },
+        { edit: true }
+      );
     } catch (err) {
       logError("admin_active_shifts_point", err);
     }
@@ -717,7 +808,6 @@ function registerAdminShiftSettings(bot, ensureUser, logError) {
       logError("admin_active_shifts_forceclose", err);
     }
   });
-
 }
 
 module.exports = { registerAdminShiftSettings };

@@ -6,6 +6,7 @@ const registerCandidateInterview = require("./candidateInterview");
 const registerCandidateInternship = require("./candidateInternship");
 const registerPerformance = require("./performance");
 const { registerCandidateCreate } = require("./candidateCreate");
+const { registerTheoryExamRoutes } = require("./theory_exam");
 
 module.exports = function registerAdminUsers(
   bot,
@@ -30,4 +31,6 @@ module.exports = function registerAdminUsers(
 
   // Создание нового кандидата (опрос)
   registerCandidateCreate(bot, ensureUser, logError, deliver);
+
+  registerTheoryExamRoutes(bot);
 };

@@ -62,16 +62,14 @@ function registerAdminSettings(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin"))
         return;
 
-      const text = "⚙️ *Настройки*\n\nВыберите категорию:";
+      const text = "⚙️ <b>Настройки</b>\n\nВыберите раздел:";
+
       const keyboard = Markup.inlineKeyboard([
-        [
-          {
-            text: "🏢🔧 Настройка компании",
-            callback_data: "admin_settings_company",
-          },
-        ],
-        [{ text: "🔮🔧 Настройка ИИ", callback_data: "admin_settings_ai" }],
-        [{ text: "👥🔧 Пользователи", callback_data: "admin_settings_users" }],
+        [{ text: "🏢 Настройки компании", callback_data: "admin_settings_company" }],
+        [{ text: "👥 Пользователи", callback_data: "admin_settings_users" }],
+        [{ text: "🤖 AI / Академия", callback_data: "admin_settings_ai" }],
+        [{ text: "🎓 Академия (раздел)", callback_data: "admin_settings_academy" }],
+        [{ text: "📦 Склад (раздел)", callback_data: "admin_settings_stock" }],
         [{ text: "⬅️ Назад", callback_data: "lk_admin_menu" }],
       ]);
 
@@ -91,7 +89,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
       if (!user || (user.role !== "admin" && user.role !== "super_admin"))
         return;
 
-      const text = "🏢 *Настройки компании*\n\nВыберите раздел:";
+      const text = "🏢 <b>Настройки компании</b>\n\nВыберите раздел:";
       const keyboard = Markup.inlineKeyboard([
         [{ text: "🏬 Торговые точки", callback_data: "admin_tp_list" }],
         [{ text: "🛠️ Настройка смен", callback_data: "admin_shift_settings" }],
@@ -177,7 +175,7 @@ function registerAdminSettings(bot, ensureUser, logError) {
   async function showTradePointCard(ctx, pointId) {
     const res = await pool.query(
       `
-     SELECT id, title, address, work_hours, work_hours_weekdays, work_hours_weekends, landmark, is_active
+     SELECT id, title, address, work_hours, work_hours_weekdays, work_hours_weekends, landmark, is_active, pos_retail_point_uuid
 FROM trade_points
 WHERE id = $1
       `,
@@ -190,6 +188,8 @@ WHERE id = $1
     }
 
     const tp = res.rows[0];
+
+    const user = await ensureUser(ctx).catch(() => null);
 
     const photosCount = await getTradePointPhotosCount(pointId);
     const shortName = tp.title || "не указано";
@@ -220,7 +220,11 @@ WHERE id = $1
     text += `• <b>Фото ориентиров:</b> ${photosCount} / 3\n`;
     text += `• <b>Статус:</b> ${isActive ? "активна ✅" : "отключена ⚪️"}\n`;
 
-    const keyboard = Markup.inlineKeyboard([
+    const posUuid = tp.pos_retail_point_uuid ? String(tp.pos_retail_point_uuid) : null;
+    const hasPos = Boolean(posUuid);
+
+
+    const buttons = [
       [
         Markup.button.callback(
           "✏️ Короткое имя",
@@ -251,6 +255,19 @@ WHERE id = $1
           `admin_tp_photos_${tp.id}`
         ),
       ],
+    ];
+
+    // 📟 Привязка кассы — только для super_admin
+    if (user?.role === "super_admin") {
+      buttons.push([
+        Markup.button.callback(
+          hasPos ? "📟 касса (прикреплена)" : "📟 связать с кассой",
+          hasPos ? `admin_tp_pos_show_${tp.id}` : `admin_tp_pos_bind_${tp.id}`
+        ),
+      ]);
+    }
+
+    buttons.push(
       [
         Markup.button.callback(
           isActive ? "⚪️ Выключить точку" : "🟢 Включить точку",
@@ -258,8 +275,10 @@ WHERE id = $1
         ),
       ],
       [Markup.button.callback("🗑 Удалить точку", `admin_tp_delete_${tp.id}`)],
-      [Markup.button.callback("⬅️ К списку точек", "admin_tp_list")],
-    ]);
+      [Markup.button.callback("⬅️ К списку точек", "admin_tp_list")]
+    );
+
+    const keyboard = Markup.inlineKeyboard(buttons);
 
     await deliver(ctx, { text, extra: keyboard }, { edit: true });
   }
@@ -275,6 +294,77 @@ WHERE id = $1
       await showTradePointCard(ctx, pointId);
     } catch (err) {
       logError("admin_tp_open", err);
+    }
+  });
+
+  // -----------------------------
+  // 📟 ПРИВЯЗКА КАССЫ (ModulPOS retailPointUuid)
+  // -----------------------------
+  bot.action(/^admin_tp_pos_show_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const pointId = Number(ctx.match[1]);
+      const res = await pool.query(
+        `SELECT id, title, pos_retail_point_uuid FROM trade_points WHERE id = $1`,
+        [pointId]
+      );
+      const tp = res.rows[0];
+      if (!tp) {
+        await ctx.reply("Точка не найдена.");
+        return;
+      }
+
+      const uuid = tp.pos_retail_point_uuid
+        ? String(tp.pos_retail_point_uuid)
+        : "не привязано";
+
+      const text =
+        "📟 <b>Касса (ModulPOS)</b>\n\n" +
+        `Точка: <b>${tp.title || `#${tp.id}`}</b>\n` +
+        `retailPointUuid: <code>${uuid}</code>`;
+
+      const keyboard = Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "🔁 Заменить",
+            `admin_tp_pos_bind_${tp.id}`
+          ),
+        ],
+        [Markup.button.callback("⬅️ Назад", `admin_tp_open_${tp.id}`)],
+      ]);
+
+      await deliver(ctx, { text, extra: keyboard }, { edit: true });
+    } catch (err) {
+      logError("admin_tp_pos_show", err);
+      try {
+        await ctx.answerCbQuery("⚠️ Ошибка", { show_alert: false });
+      } catch (_) {}
+    }
+  });
+
+  bot.action(/^admin_tp_pos_bind_(\d+)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || user.role !== "super_admin") return;
+
+      const pointId = Number(ctx.match[1]);
+      setTpState(ctx.from.id, {
+        mode: "pos_bind",
+        step: "await_uuid",
+        pointId,
+      });
+
+      await ctx.reply(
+        "📟 Пришли <b>retailPointUuid</b> (UUID) этой торговой точки из ModulPOS.\n\n" +
+          "Отмена: /cancel",
+        { parse_mode: "HTML" }
+      );
+    } catch (err) {
+      logError("admin_tp_pos_bind", err);
     }
   });
 
@@ -745,6 +835,35 @@ WHERE id = $1
         clearTpState(tgId);
         await ctx.reply("Ок, изменения отменены.");
         return;
+      }
+
+      // ------- POS BIND FLOW -------
+      if (state.mode === 'pos_bind') {
+        const pointId = Number(state.pointId);
+
+        if (state.step === 'await_uuid') {
+          const uuid = String(text).trim();
+          const ok = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid);
+          if (!ok) {
+            await ctx.reply(
+              'Не похоже на UUID. Пришли retailPointUuid в формате UUID.\n' +
+                'Отмена: /cancel'
+            );
+            return;
+          }
+
+          await pool.query(
+            `UPDATE trade_points
+             SET pos_retail_point_uuid = $1
+             WHERE id = $2`,
+            [uuid.toLowerCase(), pointId]
+          );
+
+          clearTpState(tgId);
+          await ctx.reply('✅ Касса прикреплена к торговой точке.');
+          await showTradePointCard(ctx, pointId);
+          return;
+        }
       }
 
       // ------- CREATE FLOW -------

@@ -1,18 +1,23 @@
 const { registerTextImport } = require("./text");
 const { Markup } = require("telegraf");
 const { registerStandardImport } = require("./standard");
+const { registerCashImport } = require("./cash");
+const { deliver } = require("../../../utils/renderHelpers");
+
+function isAdminLocal(user) {
+  return user?.role === "admin" || user?.role === "super_admin";
+}
 
 function registerReportImports(bot, deps) {
   const {
     ensureUser,
-    isAdmin,
     toast,
-    deliver,
-    showReportsSettings,
     setSt,
     getSt,
     logError,
   } = deps;
+
+  const isAdmin = typeof deps?.isAdmin === "function" ? deps.isAdmin : isAdminLocal;
 
   bot.action("lk_reports_import_menu", async (ctx) => {
     try {
@@ -28,7 +33,7 @@ function registerReportImports(bot, deps) {
         `Выберите способ загрузки:\n` +
         `1) Google Sheets (скоро)\n` +
         `2) Текстом (готово)\n` +
-        `3) Из кассы (скоро)`;
+        `3) Из кассы (ModulPOS)`;
 
       const kb = Markup.inlineKeyboard([
         [
@@ -52,8 +57,8 @@ function registerReportImports(bot, deps) {
 
         [
           Markup.button.callback(
-            "🏪 Из кассы (скоро)",
-            "lk_reports_import_cash_stub"
+            "🏪 Из кассы (ModulPOS)",
+            "lk_reports_import_cash_menu"
           ),
         ],
         [Markup.button.callback("⬅️ Назад", "lk_reports_settings")],
@@ -79,6 +84,8 @@ function registerReportImports(bot, deps) {
   bot.action("lk_reports_import_cash_stub", async (ctx) => {
     await ctx.answerCbQuery("Скоро 🙂", { show_alert: false }).catch(() => {});
   });
+
+  registerCashImport(bot, deps);
 
   // экран инструкции для текстовой загрузки
   bot.action("lk_reports_import_text", async (ctx) => {
