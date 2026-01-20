@@ -11,9 +11,14 @@ const { registerReportMore } = require("./more");
 const {
   loadProductsPage,
   countProducts,
+  hasAnyProducts,
+  loadCashSummary,
+  loadCashAnalysisRows,
   renderProductsTable,
   getPointsWithNoPosBinding,
 } = require("./products");
+
+const { importModulposSales } = require("../integrations/modulpos/importer");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -660,6 +665,24 @@ function parsePgDateToDate(s) {
   return new Date(y, mo, d);
 }
 
+function fmtPgDate(d) {
+  if (!d) return "";
+  const yyyy = String(d.getFullYear());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function diffDaysIso(fromIso, toIso) {
+  const a = parsePgDateToDate(fromIso);
+  const b = parsePgDateToDate(toIso);
+  if (!a || !b) return 0;
+  const ms = 24 * 60 * 60 * 1000;
+  const da = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+  const db = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.round((db - da) / ms);
+}
+
 function fmtPeriodRangeLabel(st) {
   const from = parsePgDateToDate(st?.periodFrom);
   const to = parsePgDateToDate(st?.periodTo);
@@ -1186,44 +1209,106 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   let productsTotalPages = 1;
 
   if (format === "products") {
-    const perPage = 25;
+    const topActive = st.productsTopActive !== false;
+    const perPage = topActive ? 20 : 25;
     const pointIds = Array.isArray(filters.pointIds) ? filters.pointIds : [];
 
-    const totalCnt = await countProducts({
-      dateFrom: filters.dateFrom,
-      dateTo: filters.dateTo,
-      pointIds: pointIds.length ? pointIds : null,
-    });
-    productsTotalPages = Math.max(1, Math.ceil((Number(totalCnt) || 0) / perPage));
+    // ── Автоподгрузка из кассы по правилам:
+    // 1) старый период + есть данные -> только БД
+    // 2) старый период + нет данных -> импорт (лимит 31 день)
+    // 3) период = сегодня -> на каждый заход делаем импорт, но импортёр сам пропускает уже загруженные чеки
+    try {
+      const df = String(filters.dateFrom || "");
+      const dt = String(filters.dateTo || "");
+      const todayStr = fmtPgDate(todayLocalDate());
+      const isToday = df === todayStr && dt === todayStr;
 
-    const safePage = Math.min(
-      Math.max(0, Number.isInteger(page) ? page : 0),
-      productsTotalPages - 1
-    );
-    if (safePage !== page) setSt(ctx.from.id, { page: safePage });
+      const hasLocal = await hasAnyProducts({
+        dateFrom: df,
+        dateTo: dt,
+        pointIds: pointIds.length ? pointIds : null,
+      });
 
-    const offset = safePage * perPage;
+      let needImport = false;
+      let importDays = 0;
+
+      if (isToday) {
+        needImport = true;
+        importDays = 1;
+      } else if (!hasLocal) {
+        needImport = true;
+
+        // лимит 31 день, даже если период больше
+        const days = diffDaysIso(df, dt) + 1;
+        importDays = Math.min(31, Math.max(1, days || 31));
+      }
+
+      if (needImport) {
+        const res = await importModulposSales({ pool, days: importDays });
+        // тост только если реально что-то подтянули
+        if ((res?.docsInserted || 0) > 0 || (res?.itemsInserted || 0) > 0) {
+          await toast(ctx, "Прогрузилось");
+        }
+      }
+    } catch (_) {
+      // автозагрузка не должна ломать экран
+    }
+
+    let safePage = 0;
+    let offset = 0;
+    if (!topActive) {
+      const totalCnt = await countProducts({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds: pointIds.length ? pointIds : null,
+      });
+      productsTotalPages = Math.max(1, Math.ceil((Number(totalCnt) || 0) / perPage));
+
+      safePage = Math.min(
+        Math.max(0, Number.isInteger(page) ? page : 0),
+        productsTotalPages - 1
+      );
+      if (safePage !== page) setSt(ctx.from.id, { page: safePage });
+      offset = safePage * perPage;
+    } else {
+      productsTotalPages = 1;
+      safePage = 0;
+      offset = 0;
+    }
     rows = await loadProductsPage({
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
       pointIds: pointIds.length ? pointIds : null,
       limit: perPage,
       offset,
+      sort: st.productsTopMode || "to",
     });
 
-    hasMore = safePage < productsTotalPages - 1;
+    hasMore = topActive ? false : safePage < productsTotalPages - 1;
     setSt(ctx.from.id, { hasMore });
   } else {
-    const limit = isAnalysis ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
+    if (format === "analysis1" || format === "analysis2") {
+      // аналитика теперь берётся с кассы (POS)
+      rows = await loadCashAnalysisRows({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds: Array.isArray(filters.pointIds) && filters.pointIds.length ? filters.pointIds : null,
+        weekdays: Array.isArray(filters.weekdays) && filters.weekdays.length ? filters.weekdays : null,
+      });
+      hasMore = false;
+      setSt(ctx.from.id, { hasMore: false });
+    } else {
+      const limit = isAnalysis ? LIST_LIMIT_ANALYTICS : LIST_LIMIT_CASH;
 
-    // housekeeping (best-effort)
-    await purgeOldDeletedReports();
+      // housekeeping (best-effort)
+      await purgeOldDeletedReports();
 
-    const r = await loadReportsPage({ page, filters, limit });
-    rows = r.rows;
-    hasMore = r.hasMore;
-    workersMap = await loadWorkersForShiftIds(rows.map((x) => x.shift_id));
-    setSt(ctx.from.id, { hasMore });
+      const r = await loadReportsPage({ page, filters, limit });
+      rows = r.rows;
+      hasMore = r.hasMore;
+      workersMap = await loadWorkersForShiftIds(rows.map((x) => x.shift_id));
+      setSt(ctx.from.id, { hasMore });
+    }
   }
 
   const inDateUi = Boolean(st.dateUi); // открыт выбор периода
@@ -1339,97 +1424,96 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     }
   }
 
-  // Сводка показывается ТОЛЬКО когда фильтр закрыт (и только для формата анализа)
+  // Сводка показывается ТОЛЬКО когда фильтр закрыт
+  // И теперь источник истины — касса (POS) для аналитики и товаров.
   let summaryBlock = null;
 
-  if (!filterOpened && isAnalysis && rows.length) {
-    // месяц берём из выбранного периода (periodFrom)
-    const base = st.periodFrom
-      ? new Date(
-          Number(st.periodFrom.split("-")[0]),
-          Number(st.periodFrom.split("-")[1]) - 1,
-          1
-        )
-      : startOfMonth(todayLocalDate());
+  if (!filterOpened && (isAnalysis || format === "products")) {
+    const fromIso = String(st.periodFrom || filters.dateFrom || "");
+    const toIso = String(st.periodTo || filters.dateTo || "");
 
-    const monthStart = new Date(base.getFullYear(), base.getMonth(), 1);
-    const monthEnd = new Date(base.getFullYear(), base.getMonth() + 1, 0); // последний день месяца
+    const fromD = parsePgDateToDate(fromIso);
+    const toD = parsePgDateToDate(toIso);
 
-    const msPerDay = 24 * 60 * 60 * 1000;
-    const daysInMonth = monthEnd.getDate();
+    if (fromD && toD) {
+      const msPerDay = 24 * 60 * 60 * 1000;
+      const totalDays = Math.max(1, Math.round((toD - fromD) / msPerDay) + 1);
 
-    // продажи/чеки считаем по rows (они уже отфильтрованы датами/точками/днями недели)
-    const sumSales = rows.reduce(
-      (acc, r) => acc + (Number(r.sales_total) || 0),
-      0
-    );
-    const sumChecks = rows.reduce(
-      (acc, r) => acc + (Number(r.checks_count) || 0),
-      0
-    );
+      // суммы за полный выбранный период
+      const cash = await loadCashSummary({
+        dateFrom: fromIso,
+        dateTo: toIso,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
 
-    const fmtRub0 = (n) =>
-      `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
-        Math.round(Number(n) || 0)
-      )} ₽`;
+      const sumSales = Number(cash.sales_total) || 0;
+      const sumChecks = Number(cash.checks_count) || 0;
 
-    const fmtRub1 = (n) =>
-      `${new Intl.NumberFormat("ru-RU", {
-        minimumFractionDigits: 1,
-        maximumFractionDigits: 1,
-      }).format(n)} ₽`;
+      // для пропущенных дней: если период включает сегодня — считаем только до сегодня
+      const today = todayLocalDate();
+      const elapsedEnd = toD > today ? today : toD;
+      const elapsedDays = Math.max(
+        1,
+        Math.round((elapsedEnd - fromD) / msPerDay) + 1
+      );
 
-    const periodFrom = fmtDateShort(monthStart);
-    const periodTo = fmtDateShort(monthEnd);
+      const active = await loadCashSummary({
+        dateFrom: fromIso,
+        dateTo: fmtPgDate(elapsedEnd),
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
+      const activeDays = Number(active.active_days) || 0;
+      const missed = Math.max(0, elapsedDays - activeDays);
 
-    const avgChecksPerDay = sumChecks ? sumChecks / daysInMonth : 0;
-    const avgCheck = sumChecks ? sumSales / sumChecks : 0;
-    const avgSalesPerDay = sumSales ? sumSales / daysInMonth : 0;
+      const fmtRub0 = (n) =>
+        `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+          Math.round(Number(n) || 0)
+        )} ₽`;
 
-    // ── Пропущенные дни
-    // считаем сколько дней "прошло" в месяце: до today (если это текущий месяц), иначе весь месяц
-    const today = todayLocalDate();
-    const isCurrentMonth =
-      today.getFullYear() === monthStart.getFullYear() &&
-      today.getMonth() === monthStart.getMonth();
+      const fmtRub1 = (n) =>
+        `${new Intl.NumberFormat("ru-RU", {
+          minimumFractionDigits: 1,
+          maximumFractionDigits: 1,
+        }).format(n)} ₽`;
 
-    const elapsedEnd = isCurrentMonth ? today : monthEnd;
-    const elapsedDays = Math.max(
-      1,
-      Math.round((elapsedEnd - monthStart) / msPerDay) + 1
-    );
+      const avgCheck = sumChecks ? sumSales / sumChecks : 0;
+      const avgSalesPerDay = sumSales ? sumSales / totalDays : 0;
+      const avgChecksPerDay = sumChecks ? sumChecks / totalDays : 0;
 
-    // дни, в которые реально были смены (хотя бы 1), в пределах elapsed
-    const worked = new Set();
-    for (const r of rows) {
-      if (!r.opened_at) continue;
-      const d = new Date(r.opened_at);
-      const ds = new Date(d.getFullYear(), d.getMonth(), d.getDate()); // dayStart
-      if (ds < monthStart || ds > elapsedEnd) continue;
-      worked.add(ds.getTime());
+      summaryBlock = [
+        `📊 ${fmtDateShort(fromD)} — ${fmtDateShort(toD)} (${totalDays} дн.)`,
+        `<b>Пропущенных дней:</b> ${missed}`,
+        "",
+        `<u><b>Финансы</b></u>`,
+        `• <b>Продажи (ТО):</b> ${fmtRub0(sumSales)}`,
+        `• <b>Валовая прибыль (ВП):</b> —`,
+        `• <b>Чистая прибыль (ЧП):</b> —`,
+        `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
+        "",
+        `\n<u><b>Поведение гостей</b></u>`,
+        `• <b>Кол-во чеков за период:</b> ${fmtMoney(sumChecks)}`,
+        `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
+        `• <b>Среднее кол-во чеков в день:</b> ${
+          avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
+        }`,
+      ]
+        .filter(Boolean)
+        .join("\n");
     }
-
-    const missed = Math.max(0, elapsedDays - worked.size);
-
-    summaryBlock = [
-      `📊 ${periodFrom} — ${periodTo} (${daysInMonth} дн.)`,
-      missed > 0 ? `<b>Пропущенных дней:</b> ${missed}\n` : "",
-      "",
-      `<u><b>Финансы</b></u>`,
-      `• <b>Продажи (ТО):</b> ${fmtRub0(sumSales)}`,
-      `• <b>Валовая прибыль (ВП):</b> —`,
-      `• <b>Чистая прибыль (ЧП):</b> —`,
-      `• <b>Средние продажи в день:</b> ${fmtRub0(avgSalesPerDay)}`,
-      "",
-      `\n<u><b>Поведение гостей</b></u>`,
-      `• <b>Кол-во чеков за период:</b> ${fmtMoney(sumChecks)}`,
-      `• <b>Средний чек:</b> ${avgCheck ? fmtRub1(avgCheck) : "—"}`,
-      `• <b>Среднее кол-во чеков в день:</b> ${
-        avgChecksPerDay ? avgChecksPerDay.toFixed(0) : "—"
-      }`,
-    ]
-      .filter(Boolean)
-      .join("\n");
   }
 
   const formatTitle = (() => {
@@ -2592,6 +2676,20 @@ function renderDateMainKeyboard(st) {
     btn(preset === "today" ? "✅ сегодня" : "сегодня", "date_preset:today"),
   ];
 
+  // 4.5) Топ по (только для формата товаров)
+  const isProducts = st?.format === "products";
+  const topActive = st?.productsTopActive !== false; // по умолчанию ВКЛ
+  const topMode = topActive ? st?.productsTopMode || "to" : null;
+  const rowTopBy = isProducts
+    ? [
+        btn("Топ по:", "noop"),
+        btn(topMode === "to" ? "✅ ТО" : "ТО", "lk_products_top_to"),
+        btn(topMode === "vp" ? "✅ ВП" : "ВП", "lk_products_top_vp"),
+        btn(topMode === "qty" ? "✅ кол-ву" : "кол-ву", "lk_products_top_qty"),
+        btn("⟲", "lk_products_top_reset"),
+      ]
+    : null;
+
   // 5) нижний ряд: 🔙 | 🔍 | 📍 | 🎛️ | ⚙
   const admin = Boolean(st.__admin); // проставим перед рендером клавы
   const filterOpened = Boolean(st.filterOpened);
@@ -2610,6 +2708,7 @@ function renderDateMainKeyboard(st) {
     rowDates,
     rowWeekMonth,
     rowYesterdayToday,
+    ...(rowTopBy ? [rowTopBy] : []),
     rowBottom,
   ]);
 }
@@ -3544,12 +3643,65 @@ function registerReports(bot, ensureUser, logError) {
         cashDetailed: false,
         page: 0,
         formatUi: null,
+        productsTopMode: "to",
+        productsTopActive: true,
       });
 
       await saveFormatSetting(user.id, "products");
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_format_set_products", e);
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────
+  // Products: top mode (ТО / ВП / кол-ву) + reset
+  // ───────────────────────────────────────────────────────────────
+  bot.action("lk_products_top_to", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setSt(ctx.from.id, { productsTopMode: "to", productsTopActive: true, page: 0 });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_products_top_to", e);
+    }
+  });
+
+  bot.action("lk_products_top_vp", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setSt(ctx.from.id, { productsTopMode: "vp", productsTopActive: true, page: 0 });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_products_top_vp", e);
+    }
+  });
+
+  bot.action("lk_products_top_qty", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setSt(ctx.from.id, { productsTopMode: "qty", productsTopActive: true, page: 0 });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_products_top_qty", e);
+    }
+  });
+
+  bot.action("lk_products_top_reset", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+      setSt(ctx.from.id, { productsTopActive: false, page: 0 });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_products_top_reset", e);
     }
   });
 

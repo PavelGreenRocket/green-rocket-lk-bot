@@ -328,6 +328,30 @@ async function importModulposSales({ pool, days = 1 }) {
     }
 
     try {
+      // Для ускорения (особенно для "сегодня" на каждом заходе):
+      // заранее подгружаем уже импортированные cash_doc_id за период,
+      // чтобы не тратить время на getCashDocInfo для уже известных чеков.
+      let existingCashDocIds = new Set();
+      try {
+        // begin_datetime должен быть в pos_sales_docs (миграция ModulPOS)
+        const backDays = Math.max(0, Number(days) - 1);
+        const ex = await pool.query(
+          `
+            SELECT cash_doc_id
+            FROM pos_sales_docs
+            WHERE trade_point_id = $1
+              AND begin_datetime >= (CURRENT_DATE - $2::int)
+          `,
+          [tp.id, backDays]
+        );
+        existingCashDocIds = new Set(
+          (ex.rows || []).map((r) => String(r.cash_doc_id || "")).filter(Boolean)
+        );
+      } catch (_) {
+        // если схема ещё не на 100% совпадает — просто не оптимизируем
+        existingCashDocIds = new Set();
+      }
+
       const shifts = (await getRecentShifts(retailPointUuid, days)) || [];
       for (const shift of shifts) {
         const shiftDocId = shift?.id;
@@ -337,6 +361,9 @@ async function importModulposSales({ pool, days = 1 }) {
         for (const cd of cashDocs) {
           const cashDocId = cd?.id;
           if (!cashDocId) continue;
+
+          // Уже есть в БД за выбранный период — пропускаем API-детализацию
+          if (existingCashDocIds.has(String(cashDocId))) continue;
 
           const info = await getCashDocInfo(retailPointUuid, shiftDocId, cashDocId);
 
@@ -355,6 +382,9 @@ async function importModulposSales({ pool, days = 1 }) {
           );
 
           docsInserted += docRes.rowCount || 0;
+
+          // помечаем как уже обработанный
+          existingCashDocIds.add(String(cashDocId));
 
           const agg = aggPositions(info?.inventPositions);
 

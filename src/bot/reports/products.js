@@ -38,6 +38,12 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
+function toIntQty(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n);
+}
+
 function renderProductsTable(rows, { limit = 50 } = {}) {
   const list = Array.isArray(rows) ? rows : [];
   const top = list.slice(0, Math.max(1, limit));
@@ -46,7 +52,10 @@ function renderProductsTable(rows, { limit = 50 } = {}) {
     28,
     Math.max(5, ...top.map((r) => escapePipes(truncateName(r.item_name)).length))
   );
-  const qtyW = Math.min(8, Math.max(4, ...top.map((r) => String(r.qty).length)));
+  const qtyW = Math.min(
+    8,
+    Math.max(4, ...top.map((r) => String(toIntQty(r.qty)).length))
+  );
   const toW = Math.min(
     10,
     Math.max(2, ...top.map((r) => fmtMoney(r.to_sum).length))
@@ -62,10 +71,13 @@ function renderProductsTable(rows, { limit = 50 } = {}) {
 
   for (const r of top) {
     const name = escapePipes(truncateName(r.item_name));
-    const qty = r.qty;
+    const qty = toIntQty(r.qty);
     const to = fmtMoney(r.to_sum);
     lines.push(
-      `${padRight(name, nameW)} | ${padLeft(qty, qtyW)} | ${padLeft(to, toW)} | —`
+      `${padRight(name, nameW)} | ${padLeft(qty, qtyW)} | ${padLeft(
+        to,
+        toW
+      )} | —`
     );
   }
 
@@ -110,7 +122,7 @@ async function detectPosSchema() {
   return { useCash, useDocId, docsIdCol };
 }
 
-function buildWhere({ dateFrom, dateTo, pointIds }) {
+function buildWhere({ dateFrom, dateTo, pointIds, weekdays }) {
   const params = [];
   const where = [];
 
@@ -126,17 +138,47 @@ function buildWhere({ dateFrom, dateTo, pointIds }) {
     params.push(pointIds);
     where.push(`d.trade_point_id = ANY($${params.length}::int[])`);
   }
+  if (Array.isArray(weekdays) && weekdays.length) {
+    // weekdays: 1..7 (пн..вс)
+    params.push(weekdays);
+    where.push(`EXTRACT(ISODOW FROM d.begin_datetime)::int = ANY($${params.length}::int[])`);
+  }
 
   return { params, where };
 }
 
-async function loadProductsPage({ dateFrom, dateTo, pointIds, limit = 30, offset = 0 }) {
-  const { useCash, useDocId, docsIdCol } = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds });
-
-  const joinSql = useDocId
-    ? `JOIN pos_sales_docs d ON d.trade_point_id = i.trade_point_id AND d.${docsIdCol} = i.doc_id`
+function buildJoinSql(schema) {
+  return schema.useDocId
+    ? `JOIN pos_sales_docs d ON d.trade_point_id = i.trade_point_id AND d.${schema.docsIdCol} = i.doc_id`
     : `JOIN pos_sales_docs d ON d.trade_point_id = i.trade_point_id AND d.cash_doc_id = i.cash_doc_id`;
+}
+
+function buildDocKeyExpr(schema) {
+  // выражение для COUNT DISTINCT
+  if (schema.useDocId) return `i.doc_id`;
+  return `i.cash_doc_id`;
+}
+
+async function loadProductsPage({
+  dateFrom,
+  dateTo,
+  pointIds,
+  weekdays,
+  limit = 30,
+  offset = 0,
+  sort = "to", // to | qty | vp
+}) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+
+  const joinSql = buildJoinSql(schema);
+
+  const orderSql =
+    sort === "qty"
+      ? `ORDER BY qty DESC NULLS LAST, to_sum DESC NULLS LAST, item_name ASC`
+      : sort === "vp"
+      ? `ORDER BY 1` // ВП пока нет, но оставляем каркас; сортируем по ТО как дефолт
+      : `ORDER BY to_sum DESC NULLS LAST, qty DESC NULLS LAST, item_name ASC`;
 
   const sql = `
     SELECT
@@ -147,22 +189,23 @@ async function loadProductsPage({ dateFrom, dateTo, pointIds, limit = 30, offset
     ${joinSql}
     ${where.length ? "WHERE " + where.join(" AND ") : ""}
     GROUP BY i.item_name
-    ORDER BY to_sum DESC NULLS LAST, qty DESC NULLS LAST, item_name ASC
+    ${orderSql}
     LIMIT $${params.length + 1}
     OFFSET $${params.length + 2}
   `;
 
-  const res = await pool.query(sql, [...params, Math.max(1, limit), Math.max(0, offset)]);
+  const res = await pool.query(sql, [
+    ...params,
+    Math.max(1, limit),
+    Math.max(0, offset),
+  ]);
   return res.rows || [];
 }
 
-async function countProducts({ dateFrom, dateTo, pointIds }) {
-  const { useDocId, docsIdCol } = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds });
-
-  const joinSql = useDocId
-    ? `JOIN pos_sales_docs d ON d.trade_point_id = i.trade_point_id AND d.${docsIdCol} = i.doc_id`
-    : `JOIN pos_sales_docs d ON d.trade_point_id = i.trade_point_id AND d.cash_doc_id = i.cash_doc_id`;
+async function countProducts({ dateFrom, dateTo, pointIds, weekdays }) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const joinSql = buildJoinSql(schema);
 
   const sql = `
     SELECT COUNT(*)::int AS cnt
@@ -177,6 +220,68 @@ async function countProducts({ dateFrom, dateTo, pointIds }) {
 
   const res = await pool.query(sql, params);
   return res.rows?.[0]?.cnt ?? 0;
+}
+
+async function hasAnyProducts({ dateFrom, dateTo, pointIds, weekdays }) {
+  const cnt = await countProducts({ dateFrom, dateTo, pointIds, weekdays });
+  return (Number(cnt) || 0) > 0;
+}
+
+async function loadCashSummary({ dateFrom, dateTo, pointIds, weekdays }) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const joinSql = buildJoinSql(schema);
+  const docKey = buildDocKeyExpr(schema);
+
+  const sql = `
+    SELECT
+      COALESCE(SUM(i.pos_sum), 0)::numeric AS sales_total,
+      COUNT(DISTINCT ${docKey})::int AS checks_count,
+      COUNT(DISTINCT d.begin_datetime::date)::int AS active_days
+    FROM pos_sales_items i
+    ${joinSql}
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+  `;
+
+  const res = await pool.query(sql, params);
+  const r = res.rows?.[0] || {};
+  return {
+    sales_total: Number(r.sales_total) || 0,
+    checks_count: Number(r.checks_count) || 0,
+    active_days: Number(r.active_days) || 0,
+  };
+}
+
+async function loadCashAnalysisRows({ dateFrom, dateTo, pointIds, weekdays }) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const joinSql = buildJoinSql(schema);
+  const docKey = buildDocKeyExpr(schema);
+
+  const sql = `
+    SELECT
+      d.begin_datetime::date AS day,
+      d.trade_point_id,
+      tp.title AS trade_point_title,
+      COALESCE(SUM(i.pos_sum), 0)::numeric AS sales_total,
+      COUNT(DISTINCT ${docKey})::int AS checks_count
+    FROM pos_sales_items i
+    ${joinSql}
+    LEFT JOIN trade_points tp ON tp.id = d.trade_point_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    GROUP BY d.begin_datetime::date, d.trade_point_id, tp.title
+    ORDER BY d.begin_datetime::date DESC, tp.title NULLS LAST, d.trade_point_id
+  `;
+
+  const res = await pool.query(sql, params);
+  // Приводим к форме, которую ожидают renderAnalysisTable/renderAnalysisTable2
+  return (res.rows || []).map((r) => ({
+    opened_at: r.day,
+    trade_point_id: r.trade_point_id,
+    trade_point_title: r.trade_point_title,
+    sales_total: r.sales_total,
+    checks_count: r.checks_count,
+  }));
 }
 
 async function getPointsWithNoPosBinding(pointIds) {
@@ -197,6 +302,9 @@ async function getPointsWithNoPosBinding(pointIds) {
 module.exports = {
   loadProductsPage,
   countProducts,
+  hasAnyProducts,
+  loadCashSummary,
+  loadCashAnalysisRows,
   renderProductsTable,
   getPointsWithNoPosBinding,
 };
