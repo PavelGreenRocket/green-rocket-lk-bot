@@ -2,7 +2,7 @@ const { fetchAPI } = require("./api");
 
 function isUuid(s) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    String(s || "").trim()
+    String(s || "").trim(),
   );
 }
 
@@ -15,7 +15,9 @@ function parseDateMaybe(v) {
 function isShiftOpen(shift) {
   if (!shift) return false;
 
-  const statusRaw = String(shift.status || shift.shiftStatus || "").toUpperCase();
+  const statusRaw = String(
+    shift.status || shift.shiftStatus || "",
+  ).toUpperCase();
   if (statusRaw) {
     if (statusRaw.includes("CLOSE")) return false;
     if (statusRaw.includes("OPEN") || statusRaw.includes("ACTIVE")) return true;
@@ -30,6 +32,9 @@ function isShiftOpen(shift) {
   if (closedFlags.some((x) => x === true)) return false;
 
   const closeDt =
+    // по документации ModulPOS: openDate/closeDate
+    parseDateMaybe(shift.closeDate) ||
+    parseDateMaybe(shift.close_date) ||
     parseDateMaybe(shift.closeDateTime) ||
     parseDateMaybe(shift.closedAt) ||
     parseDateMaybe(shift.closeDatetime) ||
@@ -42,6 +47,9 @@ function isShiftOpen(shift) {
 
   // если есть open, а close нет — считаем открытой
   const openDt =
+    // по документации ModulPOS: openDate
+    parseDateMaybe(shift.openDate) ||
+    parseDateMaybe(shift.open_date) ||
     parseDateMaybe(shift.openDateTime) ||
     parseDateMaybe(shift.openedAt) ||
     parseDateMaybe(shift.openDatetime) ||
@@ -56,6 +64,7 @@ function pickCashierNameFromShift(shift) {
     shift?.cashier?.name,
     shift?.employee?.name,
     shift?.user?.name,
+    shift?.cashierNameSafe,
     shift?.cashierName,
     shift?.employeeName,
     shift?.userName,
@@ -70,17 +79,21 @@ function pickCashierNameFromShift(shift) {
 async function getRecentShifts(retailPointUuid, days) {
   return fetchAPI(
     `/retail-point/${retailPointUuid}/get-recent-shifts?days=${encodeURIComponent(
-      String(days)
-    )}`
+      String(days),
+    )}`,
   );
 }
 
 /**
  * Возвращает Map(trade_point_id => { isOpen: boolean, cashierName: string|null })
  *
- * Для статуса берём последнюю смену (по openDateTime/createdAt), и определяем открыта ли.
+ * Для статуса берём последнюю смену (по openDate/openDateTime/createdAt), и определяем открыта ли.
  */
-async function loadModulposShiftStatusByPoints({ pool, tradePointIds = null, days = 2 }) {
+async function loadModulposShiftStatusByPoints({
+  pool,
+  tradePointIds = null,
+  days = 2,
+}) {
   const res = await pool.query(
     `
       SELECT id, title, pos_retail_point_uuid
@@ -89,7 +102,7 @@ async function loadModulposShiftStatusByPoints({ pool, tradePointIds = null, day
         ${Array.isArray(tradePointIds) && tradePointIds.length ? "AND id = ANY($1::int[])" : ""}
       ORDER BY title NULLS LAST, id
     `,
-    Array.isArray(tradePointIds) && tradePointIds.length ? [tradePointIds] : []
+    Array.isArray(tradePointIds) && tradePointIds.length ? [tradePointIds] : [],
   );
 
   const out = new Map();
@@ -109,9 +122,12 @@ async function loadModulposShiftStatusByPoints({ pool, tradePointIds = null, day
         .slice()
         .map((s) => {
           const openDt =
+            parseDateMaybe(s.openDate) ||
+            parseDateMaybe(s.open_date) ||
             parseDateMaybe(s.openDateTime) ||
             parseDateMaybe(s.openedAt) ||
             parseDateMaybe(s.beginDateTime) ||
+            parseDateMaybe(s.dateCreated) ||
             parseDateMaybe(s.createdAt);
           return { s, t: openDt ? openDt.getTime() : 0 };
         })

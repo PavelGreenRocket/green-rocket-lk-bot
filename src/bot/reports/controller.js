@@ -64,25 +64,37 @@ async function maybeToastImportJobNotification(ctx) {
         ORDER BY finished_at ASC NULLS LAST, id ASC
         LIMIT 1
       `,
-      [tgId]
+      [tgId],
     );
     const job = r.rows?.[0];
     if (!job) return;
 
-    await pool.query(`UPDATE pos_import_jobs SET notified_at = now() WHERE id=$1`, [job.id]);
+    await pool.query(
+      `UPDATE pos_import_jobs SET notified_at = now() WHERE id=$1`,
+      [job.id],
+    );
 
-    const from = job.effective_period_from ? fmtDateShort(job.effective_period_from) : "";
-    const to = job.effective_period_to ? fmtDateShort(job.effective_period_to) : "";
+    const from = job.effective_period_from
+      ? fmtDateShort(job.effective_period_from)
+      : "";
+    const to = job.effective_period_to
+      ? fmtDateShort(job.effective_period_to)
+      : "";
     const period = from && to ? `${from}—${to}` : "выбранный период";
 
     if (job.status === "error") {
-      await toast(ctx, `Ошибка загрузки: ${String(job.last_error || "")}`.slice(0, 180));
+      await toast(
+        ctx,
+        `Ошибка загрузки: ${String(job.last_error || "")}`.slice(0, 180),
+      );
       return;
     }
 
     const res = (() => {
       try {
-        return typeof job.result === "string" ? JSON.parse(job.result) : job.result;
+        return typeof job.result === "string"
+          ? JSON.parse(job.result)
+          : job.result;
       } catch (_) {
         return job.result;
       }
@@ -213,8 +225,8 @@ function renderCashCard(row, { admin, detailed, thresholds, workers }) {
       const who = row.edited_by_username
         ? `@${row.edited_by_username}`
         : row.edited_by_work_phone
-        ? row.edited_by_work_phone
-        : "";
+          ? row.edited_by_work_phone
+          : "";
 
       // формат: "изменено: 28.12.25 Павел (@user)" — курсивом
       const tail = [when, name, who].filter(Boolean).join(" ");
@@ -318,7 +330,7 @@ function renderCashCard(row, { admin, detailed, thresholds, workers }) {
   if (detailed) {
     lines.push(`▶️ <u><b>Начало смены:</b></u>`);
     lines.push(
-      `В кассе: ${fmtMoneyRub(row.opening_cash_amount)} ${startDelta}`
+      `В кассе: ${fmtMoneyRub(row.opening_cash_amount)} ${startDelta}`,
     );
     lines.push("");
   }
@@ -347,7 +359,7 @@ function renderCashCard(row, { admin, detailed, thresholds, workers }) {
     lines.push(
       `<b>Инкассация:</b> ${fmtMoneyRub(row.cash_collection_amount)}${
         ccTail ? ` ${ccTail}` : ""
-      }`
+      }`,
     );
   } else if (row.was_cash_collection === false) {
     lines.push(`<b>Инкассация:</b> НЕТ${ccTail ? ` ${ccTail}` : ""}`);
@@ -369,7 +381,7 @@ async function loadOpeningsMapBestEffort(shiftIds) {
       `SELECT shift_id, cash_in_drawer AS cash_in_drawer_open
        FROM shift_openings
        WHERE shift_id = ANY($1::int[])`,
-      [ids]
+      [ids],
     );
     const m = new Map();
     for (const x of r.rows) m.set(Number(x.shift_id), x);
@@ -382,7 +394,7 @@ async function loadOpeningsMapBestEffort(shiftIds) {
       `SELECT shift_id, cash_in_drawer AS cash_in_drawer_open
        FROM shift_opening_surveys
        WHERE shift_id = ANY($1::int[])`,
-      [ids]
+      [ids],
     );
     const m = new Map();
     for (const x of r.rows) m.set(Number(x.shift_id), x);
@@ -416,7 +428,7 @@ async function loadPrevEndCashMapBestEffort(shiftIds) {
       FROM x
       WHERE shift_id = ANY($1::bigint[])
       `,
-      [ids]
+      [ids],
     );
 
     const m = new Map();
@@ -467,7 +479,7 @@ function renderAnalysisTable(rows, { elements, filters }) {
   cols.push(
     { key: "sales_total", title: "Продажи", w: 8 },
     { key: "checks_count", title: "Чек", w: 3 },
-    { key: "gp", title: "ВП", w: 3 }
+    { key: "gp", title: "ВП", w: 3 },
   );
 
   // Если позже захочешь включать доп. колонки через elements — вот тут добавлять.
@@ -509,9 +521,8 @@ function renderAnalysisTable2(
     openerMap,
     showOpener = false,
     onlyOpened = false,
-  }
+  },
 ) {
-  // Группируем по точке (short name уже в trade_points.title)
   const byTp = new Map();
 
   for (const r of rows) {
@@ -525,12 +536,14 @@ function renderAnalysisTable2(
 
   let list = [...byTp.values()];
 
-  // enrich status
   list = list.map((x) => {
     const st = statusMap instanceof Map ? statusMap.get(x.tpId) : null;
     const isOpen = Boolean(st?.isOpen);
     const cashierName = st?.cashierName ? String(st.cashierName) : null;
-    const openerName = openerMap instanceof Map ? openerMap.get(x.tpId) || null : null;
+
+    const openerName =
+      openerMap instanceof Map ? openerMap.get(x.tpId) || null : null;
+
     return { ...x, isOpen, cashierName, openerName };
   });
 
@@ -540,16 +553,24 @@ function renderAnalysisTable2(
 
   const avgVal = (x) => (x.checks ? x.sales / x.checks : 0);
 
-  // sort desc
   const sortNum = (a, b) => (b || 0) - (a || 0);
-  if (sortKey === "to") list.sort((a, b) => sortNum(a.sales, b.sales));
-  else if (sortKey === "checks") list.sort((a, b) => sortNum(a.checks, b.checks));
-  else if (sortKey === "avg") list.sort((a, b) => sortNum(avgVal(a), avgVal(b)));
-  else if (sortKey === "vp" || sortKey === "np") {
-    // заглушки — оставляем сортировку по ТО как наиболее полезную
+
+  // ✅ В режиме 👤 сортируем только по ТО (чтобы было предсказуемо и компактно)
+  const compactOnlyOpenedMode = Boolean(onlyOpened);
+
+  if (compactOnlyOpenedMode) {
     list.sort((a, b) => sortNum(a.sales, b.sales));
   } else {
-    list.sort((a, b) => a.tpTitle.localeCompare(b.tpTitle, "ru"));
+    if (sortKey === "to") list.sort((a, b) => sortNum(a.sales, b.sales));
+    else if (sortKey === "checks")
+      list.sort((a, b) => sortNum(a.checks, b.checks));
+    else if (sortKey === "avg")
+      list.sort((a, b) => sortNum(avgVal(a), avgVal(b)));
+    else if (sortKey === "vp" || sortKey === "np") {
+      list.sort((a, b) => sortNum(a.sales, b.sales));
+    } else {
+      list.sort((a, b) => a.tpTitle.localeCompare(b.tpTitle, "ru"));
+    }
   }
 
   const fmtAvg = (n) => {
@@ -558,56 +579,89 @@ function renderAnalysisTable2(
     return x.toFixed(1).replace(".", ",");
   };
 
-  const tpLabel = (x) => {
-    const status = x.isOpen ? "🟢" : "⚪";
-    const base = `${status}${x.tpTitle}`;
-    if (!showOpener) return base;
-
-    const who = String(x.openerName || x.cashierName || "").trim();
-    return who ? `${base} 👤${who}` : base;
-  };
-
-  const cols =
-    Number(page) === 1
+  const cols = compactOnlyOpenedMode
+    ? [
+        { key: "st", title: "Ст" },
+        { key: "tp", title: "Точ" },
+        { key: "to", title: "ТО" },
+        { key: "cashier", title: "Кассир" },
+      ]
+    : Number(page) === 1
       ? [
+          { key: "st", title: "Ст" },
           { key: "tp", title: "Точ" },
           { key: "avg", title: "ср.чек" },
           { key: "checks", title: "кол-во чек" },
         ]
       : [
+          { key: "st", title: "Ст" },
           { key: "tp", title: "Точ" },
           { key: "to", title: "ТО" },
           { key: "gp", title: "ВП" },
           { key: "np", title: "ЧП" },
         ];
 
-  const makeRow = (x) => {
+  // 👇 ВАЖНО: “видимая” длина (эмодзи -> 1)
+  const visLen = (s) => Array.from(String(s ?? "")).length;
+
+  const makeParts = (x) => {
     const avg = avgVal(x);
+
     const map = {
-      tp: tpLabel(x),
+      st: x.isOpen ? "🟢" : "⚪",
+      tp: String(x.tpTitle || ""),
       to: fmtMoney(x.sales),
       gp: "-",
       np: "-",
       avg: fmtAvg(avg),
       checks: x.checks ?? "-",
+      cashier: (x.cashierName || "").trim() || "-",
     };
-    return cols.map((c) => String(map[c.key] ?? "")).join(" | ");
+
+    return cols.map((c) => String(map[c.key] ?? ""));
   };
 
-  const tableRaw = [cols.map((c) => c.title).join(" | "), ...list.map(makeRow)];
+  const headerParts = cols.map((c) => String(c.title ?? ""));
+  const rawParts = [headerParts, ...list.map(makeParts)];
 
-  // выравнивание по ширинам
-  const split = tableRaw.map((line) => line.split(" | "));
+  // ширины считаем по всем колонкам КРОМЕ st (у st фикс 1)
   const widths = [];
-  for (const parts of split) {
+  for (const parts of rawParts) {
     parts.forEach((p, i) => {
-      widths[i] = Math.max(widths[i] || 0, (p || "").length);
+      if (cols[i].key === "st") {
+        widths[i] = 1; // 🟢 / ⚪
+        return;
+      }
+      widths[i] = Math.max(widths[i] || 0, visLen(p));
     });
   }
-  const pad = (s, w) => s + " ".repeat(Math.max(0, w - s.length));
-  const aligned = split
-    .map((parts) => parts.map((p, i) => pad(p || "", widths[i])).join(" | "))
-    .join("\n");
+
+  const pad = (s, w) => {
+    const str = String(s ?? "");
+    const need = Math.max(0, w - visLen(str));
+    return str + " ".repeat(need);
+  };
+
+  const SEP = " | ";
+
+  const joinLine = (parts) => {
+    const out = [];
+
+    for (let i = 0; i < parts.length; i++) {
+      const key = cols[i].key;
+
+      if (key === "st") {
+        out.push(String(parts[i] ?? ""));
+        continue;
+      }
+
+      out.push(pad(parts[i], widths[i] || 0));
+    }
+
+    return out.join(SEP).trimEnd();
+  };
+
+  const aligned = rawParts.map(joinLine).join("\n");
 
   return `<pre>${aligned}</pre>`;
 }
@@ -646,8 +700,8 @@ function renderDowAnalysisTable(listRows, opts = {}) {
       opts.sortKey === "to"
         ? "sales"
         : opts.sortKey === "checks"
-        ? "checks"
-        : null; // vp пока нет
+          ? "checks"
+          : null; // vp пока нет
 
     if (key) rows.sort((a, b) => (a[key] || 0) - (b[key] || 0));
     // если vp — пока нечего сортировать, оставляем стандарт
@@ -698,7 +752,7 @@ function renderDowAnalysisTable(listRows, opts = {}) {
     String(s ?? "") + " ".repeat(Math.max(0, w - String(s ?? "").length));
 
   const lines = tableRaw.map((parts) =>
-    parts.map((p, i) => pad(p, widths[i])).join(" | ")
+    parts.map((p, i) => pad(p, widths[i])).join(" | "),
   );
 
   const sep = widths.map((w) => "─".repeat(w)).join("──");
@@ -725,7 +779,7 @@ function renderFormatKeyboard(st) {
   const firstRow = [
     Markup.button.callback(
       `${mark("cash")}Кассовый`,
-      "lk_reports_format_set_cash"
+      "lk_reports_format_set_cash",
     ),
   ];
 
@@ -734,8 +788,8 @@ function renderFormatKeyboard(st) {
     firstRow.push(
       Markup.button.callback(
         `${detMark}Подробно`,
-        "lk_reports_cash_detail_toggle"
-      )
+        "lk_reports_cash_detail_toggle",
+      ),
     );
   }
 
@@ -744,19 +798,19 @@ function renderFormatKeyboard(st) {
     [
       Markup.button.callback(
         `${mark("products")}По товарам`,
-        "lk_reports_format_set_products"
+        "lk_reports_format_set_products",
       ),
     ],
     [
       Markup.button.callback(
         `${mark("analysis1")}Для анализа (по дням)`,
-        "lk_reports_format_set_analysis1"
+        "lk_reports_format_set_analysis1",
       ),
     ],
     [
       Markup.button.callback(
         `${mark("analysis2")}Для анализа (по точкам)`,
-        "lk_reports_format_set_analysis2"
+        "lk_reports_format_set_analysis2",
       ),
     ],
     [Markup.button.callback("🔙", "lk_reports_format_close")],
@@ -879,7 +933,7 @@ async function purgeOldDeletedReports() {
     await pool.query(
       `DELETE FROM shift_closings
        WHERE deleted_at IS NOT NULL
-         AND deleted_at < (NOW() - INTERVAL '30 days')`
+         AND deleted_at < (NOW() - INTERVAL '30 days')`,
     );
   } catch (_) {
     // если миграцию ещё не применили (нет deleted_at) — молча пропускаем
@@ -953,7 +1007,7 @@ async function loadWorkersForShiftIds(shiftIds) {
       AND (str.from_shift_id = ANY($1::int[]) OR str.to_shift_id = ANY($1::int[]))
     ORDER BY str.id DESC
     `,
-    [ids]
+    [ids],
   );
 
   const map = new Map();
@@ -1196,7 +1250,7 @@ async function loadTradePointsPage({ page }) {
     ORDER BY title NULLS LAST, id
     LIMIT $1 OFFSET $2
     `,
-    [limit + 1, offset]
+    [limit + 1, offset],
   );
   const rows = r.rows.slice(0, limit);
   const hasMore = r.rows.length > limit;
@@ -1237,7 +1291,7 @@ async function loadReportByShiftId(shiftId) {
 
     WHERE s.id = $1
     `,
-    [shiftId]
+    [shiftId],
   );
   return r.rows[0] || null;
 }
@@ -1282,7 +1336,7 @@ function formatReportCard(row, idx, { admin, elements, selectedMark = "" }) {
       const who = cashByLabel(row);
       const amount = fmtMoney(row.cash_collection_amount);
       lines.push(
-        who ? `Инкассация: ${amount} (${who})` : `Инкассация: ${amount}`
+        who ? `Инкассация: ${amount} (${who})` : `Инкассация: ${amount}`,
       );
     } else if (row.was_cash_collection === false) {
       lines.push("Инкассация: Нет");
@@ -1408,11 +1462,14 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
         dateTo: filters.dateTo,
         pointIds: pointIds.length ? pointIds : null,
       });
-      productsTotalPages = Math.max(1, Math.ceil((Number(totalCnt) || 0) / perPage));
+      productsTotalPages = Math.max(
+        1,
+        Math.ceil((Number(totalCnt) || 0) / perPage),
+      );
 
       safePage = Math.min(
         Math.max(0, Number.isInteger(page) ? page : 0),
-        productsTotalPages - 1
+        productsTotalPages - 1,
       );
       if (safePage !== page) setSt(ctx.from.id, { page: safePage });
       offset = safePage * perPage;
@@ -1438,8 +1495,14 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       rows = await loadCashAnalysisRows({
         dateFrom: filters.dateFrom,
         dateTo: filters.dateTo,
-        pointIds: Array.isArray(filters.pointIds) && filters.pointIds.length ? filters.pointIds : null,
-        weekdays: Array.isArray(filters.weekdays) && filters.weekdays.length ? filters.weekdays : null,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
       });
       hasMore = false;
       setSt(ctx.from.id, { hasMore: false });
@@ -1469,7 +1532,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     if (Array.isArray(f.pointIds) && f.pointIds.length) {
       const r = await pool.query(
         `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
-        [f.pointIds]
+        [f.pointIds],
       );
       const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
       if (titles.length) pointsLabel = titles.join(", ");
@@ -1505,7 +1568,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       try {
         const r = await pool.query(
           `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
-          [f.pointIds]
+          [f.pointIds],
         );
         const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
         if (titles.length) lines.push(titles.join(", "));
@@ -1542,20 +1605,37 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
   try {
     if (format === "analysis2") {
       const todayStr = fmtPgDate(todayLocalDate());
-      const isToday = String(filters.dateFrom) === todayStr && String(filters.dateTo) === todayStr;
+      const isToday =
+        String(filters.dateFrom) === todayStr &&
+        String(filters.dateTo) === todayStr;
       analysis2OnlyOpened = Boolean(st.analysis2OnlyOpened) && isToday;
       analysis2ShowOpener = analysis2OnlyOpened;
-      analysis2SortKey = analysis2Page === 1 ? st.analysis2SortKey1 || "to" : st.analysis2SortKey0 || "to";
+      analysis2SortKey =
+        analysis2Page === 1
+          ? st.analysis2SortKey1 || "to"
+          : st.analysis2SortKey0 || "to";
 
-      const pointIds = Array.isArray(filters.pointIds) && filters.pointIds.length ? filters.pointIds : null;
-      analysis2StatusMap = await loadModulposShiftStatusByPoints({ pool, tradePointIds: pointIds, days: 2 });
-      analysis2OpenerMap = analysis2ShowOpener ? await loadBotShiftOpenersToday({ pointIds }) : new Map();
+      const pointIds =
+        Array.isArray(filters.pointIds) && filters.pointIds.length
+          ? filters.pointIds
+          : null;
+      analysis2StatusMap = await loadModulposShiftStatusByPoints({
+        pool,
+        tradePointIds: pointIds,
+        days: 2,
+      });
+      analysis2OpenerMap = analysis2ShowOpener
+        ? await loadBotShiftOpenersToday({ pointIds })
+        : new Map();
     }
   } catch (_) {
     // не ломаем экран из-за API
   }
 
-  let body = format === "products" ? "Пока нет продаж по кассе за период." : "Пока нет закрытых смен.";
+  let body =
+    format === "products"
+      ? "Пока нет продаж по кассе за период."
+      : "Пока нет закрытых смен.";
 
   if (format === "products") {
     if (rows.length) {
@@ -1569,7 +1649,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     const detailed = admin && Boolean(st.cashDetailed);
     const thresholds = await loadCashDiffThresholdsBestEffort();
     const workersMap = await loadWorkersForShiftIds(
-      rows.map((r) => r.shift_id)
+      rows.map((r) => r.shift_id),
     );
 
     // ✅ скрытие таблицы работает и для analysis1 и для analysis2
@@ -1595,7 +1675,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
                 detailed,
                 thresholds,
                 workers: workersMap.get(Number(r.shift_id)) || null,
-              })
+              }),
             )
             .join("\n\n");
     }
@@ -1638,7 +1718,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       const elapsedEnd = toD > today ? today : toD;
       const elapsedDays = Math.max(
         1,
-        Math.round((elapsedEnd - fromD) / msPerDay) + 1
+        Math.round((elapsedEnd - fromD) / msPerDay) + 1,
       );
 
       const active = await loadCashSummary({
@@ -1658,7 +1738,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
       const fmtRub0 = (n) =>
         `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
-          Math.round(Number(n) || 0)
+          Math.round(Number(n) || 0),
         )} ₽`;
 
       const fmtRub1 = (n) =>
@@ -1673,7 +1753,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
       summaryBlock = [
         `📊 ${fmtDateShort(fromD)} — ${fmtDateShort(toD)} (${totalDays} дн.)`,
-        `<b>Пропущенных дней:</b> ${missed}`,
+        `<b>Пропущенных дней:</b> ${missed}\n`,
         "",
         `<u><b>Финансы</b></u>`,
         `• <b>Продажи (ТО):</b> ${fmtRub0(sumSales)}`,
@@ -1712,12 +1792,14 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       totalPages = productsTotalPages || 1;
     } else if (format === "cash") {
       const totalCnt = await countReportsTotal(filters);
-      totalPages = Math.max(1, Math.ceil((Number(totalCnt) || 0) / LIST_LIMIT_CASH));
+      totalPages = Math.max(
+        1,
+        Math.ceil((Number(totalCnt) || 0) / LIST_LIMIT_CASH),
+      );
     }
     if (totalPages > 1) {
       const curPage = Number.isInteger(st.page) ? st.page : 0;
       pageHint = `страница ${curPage + 1}/${totalPages} ( листать: &lt; / &gt;)`;
-
     }
   }
 
@@ -1748,17 +1830,17 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       [
         Markup.button.callback(
           "👥 По сотрудникам",
-          "lk_reports_filter_workers"
+          "lk_reports_filter_workers",
         ),
         Markup.button.callback(
           onlyMy ? "👤 Все смены" : "👤 Мои смены",
-          "lk_reports_only_my_toggle"
+          "lk_reports_only_my_toggle",
         ),
       ],
       [
         Markup.button.callback(
           "📆 По дням недели",
-          "lk_reports_filter_weekdays"
+          "lk_reports_filter_weekdays",
         ),
         Markup.button.callback("🧩 По элементам", "lk_reports_filter_elements"),
       ],
@@ -1773,7 +1855,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     kb = renderMonthGridKeyboard(st2);
   } else if (st2.dateUi?.mode === "points") {
     const r = await pool.query(
-      `SELECT id, title FROM trade_points ORDER BY title NULLS LAST, id`
+      `SELECT id, title FROM trade_points ORDER BY title NULLS LAST, id`,
     );
     kb = renderDatePointsKeyboard(r.rows || [], st2);
   } else if (st2.dateUi?.mode === "pick") {
@@ -1793,7 +1875,7 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(kb || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -1802,7 +1884,7 @@ async function loadPeriodSettings(userId) {
     `SELECT preset, date_from, date_to
      FROM report_period_settings
      WHERE user_id = $1`,
-    [userId]
+    [userId],
   );
   return r.rows[0] || null;
 }
@@ -1811,7 +1893,7 @@ async function loadFormatSetting(userId) {
   try {
     const r = await pool.query(
       `SELECT report_format FROM report_period_settings WHERE user_id = $1`,
-      [userId]
+      [userId],
     );
     return r.rows[0]?.report_format || null;
   } catch (_) {
@@ -1828,7 +1910,7 @@ async function saveFormatSetting(userId, format) {
        ON CONFLICT (user_id) DO UPDATE
        SET report_format = EXCLUDED.report_format,
            updated_at = now()`,
-      [userId, format]
+      [userId, format],
     );
   } catch (_) {
     // если колонки нет — миграция не применена
@@ -1844,7 +1926,7 @@ async function savePeriodSettings(userId, preset, dateFrom, dateTo) {
          date_from = EXCLUDED.date_from,
          date_to = EXCLUDED.date_to,
          updated_at = now()`,
-    [userId, preset, dateFrom, dateTo]
+    [userId, preset, dateFrom, dateTo],
   );
 }
 
@@ -1890,7 +1972,7 @@ async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
   const search = st.pickerSearch || "";
   const filters = st.filters || {};
   const selected = new Set(
-    Array.isArray(filters.workerIds) ? filters.workerIds : []
+    Array.isArray(filters.workerIds) ? filters.workerIds : [],
   );
 
   const { rows, hasMore } = await loadUsersPage({ page, search });
@@ -1928,7 +2010,7 @@ async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
     buttons.push([
       Markup.button.callback(
         `${mark} ${labelBase}`,
-        `lk_reports_fw_toggle_${u.id}`
+        `lk_reports_fw_toggle_${u.id}`,
       ),
     ]);
   }
@@ -1937,11 +2019,11 @@ async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
   buttons.push([
     Markup.button.callback(
       "←",
-      page > 0 ? "lk_reports_fw_prev" : "lk_reports_nav_no_prev"
+      page > 0 ? "lk_reports_fw_prev" : "lk_reports_nav_no_prev",
     ),
     Markup.button.callback(
       "→",
-      hasMore ? "lk_reports_fw_next" : "lk_reports_nav_no_next"
+      hasMore ? "lk_reports_fw_next" : "lk_reports_nav_no_next",
     ),
   ]);
 
@@ -1954,7 +2036,7 @@ async function showFiltersWorkers(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -1964,7 +2046,7 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
   const page = Number.isInteger(st.pickerPage) ? st.pickerPage : 0;
   const filters = st.filters || {};
   const selected = new Set(
-    Array.isArray(filters.pointIds) ? filters.pointIds : []
+    Array.isArray(filters.pointIds) ? filters.pointIds : [],
   );
 
   const { rows, hasMore } = await loadTradePointsPage({ page });
@@ -2004,16 +2086,16 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
 
     const sumSales = listRows.reduce(
       (acc, r) => acc + (Number(r.sales_total) || 0),
-      0
+      0,
     );
     const sumChecks = listRows.reduce(
       (acc, r) => acc + (Number(r.checks_count) || 0),
-      0
+      0,
     );
 
     const fmtRub0 = (n) =>
       `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
-        Math.round(Number(n) || 0)
+        Math.round(Number(n) || 0),
       )} ₽`;
 
     const fmtRub1 = (n) =>
@@ -2068,7 +2150,7 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
   buttons.push([
     Markup.button.callback(
       "✅ Выбрать всё (на странице)",
-      "lk_reports_tp_toggle_page"
+      "lk_reports_tp_toggle_page",
     ),
   ]);
 
@@ -2077,18 +2159,18 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
     buttons.push([
       Markup.button.callback(
         `${mark} ${tp.title || `Точка #${tp.id}`}`,
-        `lk_reports_tp_toggle_${tp.id}`
+        `lk_reports_tp_toggle_${tp.id}`,
       ),
     ]);
   }
   buttons.push([
     Markup.button.callback(
       "←",
-      page > 0 ? "lk_reports_tp_prev" : "lk_reports_nav_no_prev"
+      page > 0 ? "lk_reports_tp_prev" : "lk_reports_nav_no_prev",
     ),
     Markup.button.callback(
       "→",
-      hasMore ? "lk_reports_tp_next" : "lk_reports_nav_no_next"
+      hasMore ? "lk_reports_tp_next" : "lk_reports_nav_no_next",
     ),
   ]);
 
@@ -2100,7 +2182,7 @@ async function showFiltersPoints(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2109,7 +2191,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   const st = getSt(ctx.from.id) || {};
   const filters = st.filters || {};
   const selected = new Set(
-    Array.isArray(filters.weekdays) ? filters.weekdays : []
+    Array.isArray(filters.weekdays) ? filters.weekdays : [],
   );
 
   const dowAnalysisMode = Boolean(st.dowAnalysisMode);
@@ -2157,7 +2239,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
     if (Array.isArray(f.pointIds) && f.pointIds.length) {
       const r = await pool.query(
         `SELECT id, title FROM trade_points WHERE id = ANY($1::int[]) ORDER BY title NULLS LAST, id`,
-        [f.pointIds]
+        [f.pointIds],
       );
       const titles = r.rows.map((x) => x.title || `Точка #${x.id}`);
       if (titles.length) pointsLabel = titles.join(", ");
@@ -2187,7 +2269,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
         Markup.button.callback(`${m("vp")} ВП`, "lk_reports_dow_sort_vp"),
         Markup.button.callback(
           `${m("checks")} Чек`,
-          "lk_reports_dow_sort_checks"
+          "lk_reports_dow_sort_checks",
         ),
       ],
       [
@@ -2205,7 +2287,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
           parse_mode: "HTML",
         },
       },
-      { edit }
+      { edit },
     );
   }
 
@@ -2220,16 +2302,16 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
   if (isAnalysis2 && listRows.length) {
     const sumSales = listRows.reduce(
       (acc, r) => acc + (Number(r.sales_total) || 0),
-      0
+      0,
     );
     const sumChecks = listRows.reduce(
       (acc, r) => acc + (Number(r.checks_count) || 0),
-      0
+      0,
     );
 
     const fmtRub0 = (n) =>
       `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
-        Math.round(Number(n) || 0)
+        Math.round(Number(n) || 0),
       )} ₽`;
 
     const fmtRub1 = (n) =>
@@ -2279,7 +2361,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
     const mark = selected.has(isoDow) ? "✅" : "☑️";
     return Markup.button.callback(
       `${mark} ${label}`,
-      `lk_reports_dow_${isoDow}`
+      `lk_reports_dow_${isoDow}`,
     );
   };
 
@@ -2303,7 +2385,7 @@ async function showFiltersWeekdays(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2373,7 +2455,7 @@ async function showFiltersElements(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2411,7 +2493,7 @@ async function showSettings(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2451,8 +2533,8 @@ async function showDeleteMode(ctx, user, { edit = true } = {}) {
     rowBtns.push(
       Markup.button.callback(
         isSel ? `❌${n}` : `${n}`,
-        `lk_reports_del_${r.shift_id}`
-      )
+        `lk_reports_del_${r.shift_id}`,
+      ),
     );
     if (rowBtns.length === 5) {
       buttons.push([...rowBtns]);
@@ -2476,7 +2558,7 @@ async function showDeleteMode(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2504,7 +2586,7 @@ async function showDeleteConfirm(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2524,7 +2606,7 @@ async function showEditPick(ctx, user, { edit = true } = {}) {
           formatReportCard(r, i + 1 + page * LIST_LIMIT_CASH, {
             admin: true,
             elements: defaultElementsFor(user),
-          })
+          }),
         )
         .join("\n\n")
     : "Нет закрытых смен по фильтру.";
@@ -2538,7 +2620,7 @@ async function showEditPick(ctx, user, { edit = true } = {}) {
   for (const r of rows) {
     const n = rowBtns.length + 1;
     rowBtns.push(
-      Markup.button.callback(`${n}`, `lk_reports_edit_open_${r.shift_id}`)
+      Markup.button.callback(`${n}`, `lk_reports_edit_open_${r.shift_id}`),
     );
     if (rowBtns.length === 5) {
       buttons.push([...rowBtns]);
@@ -2557,7 +2639,7 @@ async function showEditPick(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2578,7 +2660,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
           parse_mode: "HTML",
         },
       },
-      { edit }
+      { edit },
     );
   }
 
@@ -2594,7 +2676,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
 
       LIMIT 1
       `,
-      [user.id]
+      [user.id],
     );
     const last = r.rows[0]?.id;
     if (!last || Number(last) !== Number(shiftId)) {
@@ -2621,7 +2703,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
     [
       Markup.button.callback(
         "Сумма продаж",
-        "lk_reports_edit_field_sales_total"
+        "lk_reports_edit_field_sales_total",
       ),
     ],
     [Markup.button.callback("Наличными", "lk_reports_edit_field_sales_cash")],
@@ -2629,7 +2711,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
     [
       Markup.button.callback(
         "Инкассация",
-        "lk_reports_edit_field_cash_collection_amount"
+        "lk_reports_edit_field_cash_collection_amount",
       ),
     ],
     [Markup.button.callback("Чеков", "lk_reports_edit_field_checks_count")],
@@ -2647,7 +2729,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
   buttons.push([
     Markup.button.callback(
       "⬅️ Назад",
-      admin ? "lk_reports_edit_pick" : "lk_reports_back_to_list"
+      admin ? "lk_reports_edit_pick" : "lk_reports_back_to_list",
     ),
   ]);
 
@@ -2657,7 +2739,7 @@ async function showEditMenu(ctx, user, shiftId, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2694,7 +2776,7 @@ async function askEditValue(ctx, user, fieldKey, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2720,7 +2802,7 @@ async function askEditCashBy(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2746,7 +2828,7 @@ async function askEditTime(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(Markup.inlineKeyboard(buttons) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -2819,25 +2901,37 @@ function renderDateMainKeyboard(st) {
 
   const rowMonth = heavy
     ? [
-        btn(page > 0 ? "<" : "<", page > 0 ? "lk_reports_less" : "lk_reports_nav_no_prev"),
+        btn(
+          page > 0 ? "<" : "<",
+          page > 0 ? "lk_reports_less" : "lk_reports_nav_no_prev",
+        ),
         btn("←", "date_month:prev"),
         btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
         btn("→", "date_month:next"),
-        btn(hasMore ? ">" : ">", hasMore ? "lk_reports_more" : "lk_reports_nav_no_next"),
+        btn(
+          hasMore ? ">" : ">",
+          hasMore ? "lk_reports_more" : "lk_reports_nav_no_next",
+        ),
       ]
     : isPointsAnalysis
-    ? [
-        btn(a2Page > 0 ? "<" : "<", a2Page > 0 ? "analysis2:page_prev" : "analysis2:page_prev"),
-        btn("←", "date_month:prev"),
-        btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
-        btn("→", "date_month:next"),
-        btn(a2Page < 1 ? ">" : ">", a2Page < 1 ? "analysis2:page_next" : "analysis2:page_next"),
-      ]
-    : [
-        btn("←", "date_month:prev"),
-        btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
-        btn("→", "date_month:next"),
-      ];
+      ? [
+          btn(
+            a2Page > 0 ? "<" : "<",
+            a2Page > 0 ? "analysis2:page_prev" : "analysis2:page_prev",
+          ),
+          btn("←", "date_month:prev"),
+          btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
+          btn("→", "date_month:next"),
+          btn(
+            a2Page < 1 ? ">" : ">",
+            a2Page < 1 ? "analysis2:page_next" : "analysis2:page_next",
+          ),
+        ]
+      : [
+          btn("←", "date_month:prev"),
+          btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
+          btn("→", "date_month:next"),
+        ];
 
   // 2) Конструктор дат (точки на дд. и мм.)
   const rowDates = [
@@ -2897,7 +2991,8 @@ function renderDateMainKeyboard(st) {
   const a2SortKey1 = st?.analysis2SortKey1 || "to";
   const a2SortKey = a2Page === 1 ? a2SortKey1 : a2SortKey0;
   const a2UserOn = Boolean(st?.analysis2OnlyOpened);
-  const markA2 = (key, label) => (a2SortKey === key ? `✅↕️ ${label}` : `↕️ ${label}`);
+  const markA2 = (key, label) =>
+    a2SortKey === key ? `✅↕️ ${label}` : `↕️ ${label}`;
   const rowA2Sort = isPointsAnalysis
     ? a2Page === 0
       ? [
@@ -2948,7 +3043,7 @@ function renderDatePointsKeyboard(tradePoints, st) {
   for (const tp of tradePoints) {
     const mark = Number(tp.id) === curId ? "✅ " : "☑️ ";
     cur.push(
-      btn(`${mark}${tp.title || `#${tp.id}`}`, `date_points:set:${tp.id}`)
+      btn(`${mark}${tp.title || `#${tp.id}`}`, `date_points:set:${tp.id}`),
     );
     if (cur.length === 3) {
       rows.push(cur);
@@ -2973,7 +3068,7 @@ async function showDateMenu(ctx, user, { edit = true } = {}) {
       text,
       extra: { ...(renderDateMainKeyboard(st) || {}), parse_mode: "HTML" },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -3016,7 +3111,7 @@ function renderMonthGridKeyboard(st) {
     btn(String(year), "noop"),
     btn(
       year >= currentYear ? "→" : "→",
-      year >= currentYear ? "noop" : "date_month_year:next"
+      year >= currentYear ? "noop" : "date_month_year:next",
     ),
   ]);
 
@@ -3030,7 +3125,7 @@ function renderMonthGridKeyboard(st) {
     const label = isSelected ? `✅ ${MONTHS_GRID_RU[m]}` : MONTHS_GRID_RU[m];
 
     cur.push(
-      btn(label, isFuture ? "noop" : `date_month_pick:${year}:${m + 1}`)
+      btn(label, isFuture ? "noop" : `date_month_pick:${year}:${m + 1}`),
     );
 
     if (cur.length === 4) {
@@ -3083,7 +3178,7 @@ function renderPickKeyboard({ side, part, page = 0 }) {
     const y = todayLocalDate().getFullYear();
     const years = [y - 1, y, y + 1];
     rows.push(
-      years.map((yy) => btn(String(yy).slice(-2), `date_pick:${side}:y:${yy}`))
+      years.map((yy) => btn(String(yy).slice(-2), `date_pick:${side}:y:${yy}`)),
     );
   }
 
@@ -3103,7 +3198,7 @@ async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
         parse_mode: "HTML",
       },
     },
-    { edit }
+    { edit },
   );
 }
 
@@ -3789,7 +3884,7 @@ function registerReports(bot, ensureUser, logError) {
           text: "📊 Аналитика и отчёты\n\nВыберите раздел:",
           extra: { ...Markup.inlineKeyboard(rows), parse_mode: "HTML" },
         },
-        { edit: true }
+        { edit: true },
       );
     } catch (e) {
       logError("lk_reports_back", e);
@@ -3882,7 +3977,11 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-      setSt(ctx.from.id, { productsTopMode: "to", productsTopActive: true, page: 0 });
+      setSt(ctx.from.id, {
+        productsTopMode: "to",
+        productsTopActive: true,
+        page: 0,
+      });
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_products_top_to", e);
@@ -3894,7 +3993,11 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-      setSt(ctx.from.id, { productsTopMode: "vp", productsTopActive: true, page: 0 });
+      setSt(ctx.from.id, {
+        productsTopMode: "vp",
+        productsTopActive: true,
+        page: 0,
+      });
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_products_top_vp", e);
@@ -3906,7 +4009,11 @@ function registerReports(bot, ensureUser, logError) {
       await ctx.answerCbQuery().catch(() => {});
       const user = await ensureUser(ctx);
       if (!user) return;
-      setSt(ctx.from.id, { productsTopMode: "qty", productsTopActive: true, page: 0 });
+      setSt(ctx.from.id, {
+        productsTopMode: "qty",
+        productsTopActive: true,
+        page: 0,
+      });
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_products_top_qty", e);
@@ -4045,14 +4152,16 @@ function registerReports(bot, ensureUser, logError) {
       if ((st.format || defaultFormatFor(user)) !== "analysis2") return;
 
       const todayStr = fmtPgDate(todayLocalDate());
-      const filters = st.filters || {};
-      const isToday = String(filters.dateFrom) === todayStr && String(filters.dateTo) === todayStr;
+      const isToday =
+        String(st.periodFrom) === todayStr && String(st.periodTo) === todayStr;
       if (!isToday) {
         await toast(ctx, "👤 доступно только на 'сегодня'");
         return;
       }
 
-      setSt(ctx.from.id, { analysis2OnlyOpened: !Boolean(st.analysis2OnlyOpened) });
+      setSt(ctx.from.id, {
+        analysis2OnlyOpened: !Boolean(st.analysis2OnlyOpened),
+      });
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("analysis2_toggle_user", e);
@@ -4241,7 +4350,7 @@ function registerReports(bot, ensureUser, logError) {
             parse_mode: "HTML",
           },
         },
-        { edit: true }
+        { edit: true },
       );
     } catch (e) {
       logError("lk_reports_fw_search", e);
@@ -4298,7 +4407,7 @@ function registerReports(bot, ensureUser, logError) {
 
       const filters = st.filters || {};
       const cur = new Set(
-        Array.isArray(filters.pointIds) ? filters.pointIds : []
+        Array.isArray(filters.pointIds) ? filters.pointIds : [],
       );
 
       const allSelected = pageIds.every((id) => cur.has(id));
@@ -4575,13 +4684,13 @@ function registerReports(bot, ensureUser, logError) {
            SET deleted_at = NOW(),
                deleted_by_user_id = $1
            WHERE shift_id = ANY($2::int[])`,
-          [user.id, selected]
+          [user.id, selected],
         );
       } catch (e) {
         // если миграции нет — не ломаемся, но сообщаем
         await toast(
           ctx,
-          "Нет полей deleted_at/deleted_by_user_id (нужна миграция)."
+          "Нет полей deleted_at/deleted_by_user_id (нужна миграция).",
         );
         return showDeleteMode(ctx, user, { edit: true });
       }
