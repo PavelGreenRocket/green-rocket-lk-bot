@@ -19,6 +19,12 @@ const {
 } = require("./products");
 
 const { importModulposSales } = require("../integrations/modulpos/importer");
+const {
+  startModulposImportJobsWorker,
+} = require("../integrations/modulpos/importJobs");
+const {
+  loadModulposShiftStatusByPoints,
+} = require("../integrations/modulpos/shifts");
 
 // Picker pages (users/points) — по 10, как и было
 const PAGE_SIZE_PICKER = 10;
@@ -41,6 +47,89 @@ function setSt(tgId, patch) {
 }
 function clrSt(tgId) {
   REPORTS_STATE.delete(tgId);
+}
+
+async function maybeToastImportJobNotification(ctx) {
+  // тостим результаты фонового импорта при первом удобном взаимодействии
+  try {
+    const tgId = ctx?.from?.id;
+    if (!tgId) return;
+    const r = await pool.query(
+      `
+        SELECT id, status, effective_period_from, effective_period_to, last_error, result
+        FROM pos_import_jobs
+        WHERE requested_by_tg_id = $1
+          AND notified_at IS NULL
+          AND status IN ('done','error')
+        ORDER BY finished_at ASC NULLS LAST, id ASC
+        LIMIT 1
+      `,
+      [tgId]
+    );
+    const job = r.rows?.[0];
+    if (!job) return;
+
+    await pool.query(`UPDATE pos_import_jobs SET notified_at = now() WHERE id=$1`, [job.id]);
+
+    const from = job.effective_period_from ? fmtDateShort(job.effective_period_from) : "";
+    const to = job.effective_period_to ? fmtDateShort(job.effective_period_to) : "";
+    const period = from && to ? `${from}—${to}` : "выбранный период";
+
+    if (job.status === "error") {
+      await toast(ctx, `Ошибка загрузки: ${String(job.last_error || "")}`.slice(0, 180));
+      return;
+    }
+
+    const res = (() => {
+      try {
+        return typeof job.result === "string" ? JSON.parse(job.result) : job.result;
+      } catch (_) {
+        return job.result;
+      }
+    })();
+    const errs = Array.isArray(res?.pointsErrors) ? res.pointsErrors.length : 0;
+    const suffix = errs ? ` (ошибки: ${errs})` : "";
+    await toast(ctx, `Данные за ${period} загружены${suffix}`);
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function loadBotShiftOpenersToday({ pointIds = null } = {}) {
+  // Кто открыл смену в боте (на сегодня) по точкам
+  try {
+    const params = [];
+    let wherePoint = "";
+    if (Array.isArray(pointIds) && pointIds.length) {
+      params.push(pointIds);
+      wherePoint = "AND s.trade_point_id = ANY($1::int[])";
+    }
+
+    const q = `
+      SELECT
+        s.trade_point_id,
+        u.full_name,
+        s.opened_at
+      FROM shifts s
+      LEFT JOIN app_user u ON u.id = s.user_id
+      WHERE s.opened_at::date = CURRENT_DATE
+        AND s.status IN ('opening_in_progress', 'opened', 'closing_in_progress')
+        ${wherePoint}
+      ORDER BY s.trade_point_id, s.opened_at DESC
+    `;
+
+    const r = await pool.query(q, params);
+    const out = new Map();
+    for (const row of r.rows || []) {
+      const tpId = Number(row.trade_point_id);
+      if (out.has(tpId)) continue;
+      const name = String(row.full_name || "").trim();
+      if (name) out.set(tpId, name);
+    }
+    return out;
+  } catch (_) {
+    return new Map();
+  }
 }
 
 function isAdmin(user) {
@@ -410,53 +499,104 @@ function renderAnalysisTable(rows, { elements, filters }) {
   return `<pre>${header}\n${body}</pre>`;
 }
 
-function renderAnalysisTable2(rows, { filters }) {
+function renderAnalysisTable2(
+  rows,
+  {
+    filters,
+    page = 0,
+    sortKey = "to",
+    statusMap,
+    openerMap,
+    showOpener = false,
+    onlyOpened = false,
+  }
+) {
   // Группируем по точке (short name уже в trade_points.title)
   const byTp = new Map();
 
   for (const r of rows) {
-    const tp = r.trade_point_title || `#${r.trade_point_id}`;
-    const cur = byTp.get(tp) || { tp, sales: 0, checks: 0 };
+    const tpId = Number(r.trade_point_id);
+    const tpTitle = r.trade_point_title || `#${tpId}`;
+    const cur = byTp.get(tpId) || { tpId, tpTitle, sales: 0, checks: 0 };
     cur.sales += Number(r.sales_total) || 0;
     cur.checks += Number(r.checks_count) || 0;
-    byTp.set(tp, cur);
+    byTp.set(tpId, cur);
   }
 
-  const list = [...byTp.values()].sort((a, b) =>
-    a.tp.localeCompare(b.tp, "ru")
-  );
+  let list = [...byTp.values()];
 
-  const cols = [
-    { key: "tp", title: "Точ" },
-    { key: "to", title: "ТО" },
-    { key: "gp", title: "ВП" },
-    { key: "np", title: "ЧП" },
-    { key: "avg", title: "ср. чек" },
-  ];
+  // enrich status
+  list = list.map((x) => {
+    const st = statusMap instanceof Map ? statusMap.get(x.tpId) : null;
+    const isOpen = Boolean(st?.isOpen);
+    const cashierName = st?.cashierName ? String(st.cashierName) : null;
+    const openerName = openerMap instanceof Map ? openerMap.get(x.tpId) || null : null;
+    return { ...x, isOpen, cashierName, openerName };
+  });
+
+  if (onlyOpened) {
+    list = list.filter((x) => x.isOpen);
+  }
+
+  const avgVal = (x) => (x.checks ? x.sales / x.checks : 0);
+
+  // sort desc
+  const sortNum = (a, b) => (b || 0) - (a || 0);
+  if (sortKey === "to") list.sort((a, b) => sortNum(a.sales, b.sales));
+  else if (sortKey === "checks") list.sort((a, b) => sortNum(a.checks, b.checks));
+  else if (sortKey === "avg") list.sort((a, b) => sortNum(avgVal(a), avgVal(b)));
+  else if (sortKey === "vp" || sortKey === "np") {
+    // заглушки — оставляем сортировку по ТО как наиболее полезную
+    list.sort((a, b) => sortNum(a.sales, b.sales));
+  } else {
+    list.sort((a, b) => a.tpTitle.localeCompare(b.tpTitle, "ru"));
+  }
 
   const fmtAvg = (n) => {
     const x = Number(n);
     if (!x || Number.isNaN(x)) return "-";
-    // 1 знак после запятой, как в скрине "31,7"
     return x.toFixed(1).replace(".", ",");
   };
 
+  const tpLabel = (x) => {
+    const status = x.isOpen ? "🟢" : "⚪";
+    const base = `${status}${x.tpTitle}`;
+    if (!showOpener) return base;
+
+    const who = String(x.openerName || x.cashierName || "").trim();
+    return who ? `${base} 👤${who}` : base;
+  };
+
+  const cols =
+    Number(page) === 1
+      ? [
+          { key: "tp", title: "Точ" },
+          { key: "avg", title: "ср.чек" },
+          { key: "checks", title: "кол-во чек" },
+        ]
+      : [
+          { key: "tp", title: "Точ" },
+          { key: "to", title: "ТО" },
+          { key: "gp", title: "ВП" },
+          { key: "np", title: "ЧП" },
+        ];
+
   const makeRow = (x) => {
-    const avg = x.checks ? x.sales / x.checks : 0;
+    const avg = avgVal(x);
     const map = {
-      tp: x.tp,
+      tp: tpLabel(x),
       to: fmtMoney(x.sales),
       gp: "-",
       np: "-",
       avg: fmtAvg(avg),
+      checks: x.checks ?? "-",
     };
     return cols.map((c) => String(map[c.key] ?? "")).join(" | ");
   };
 
-  // если хочешь ровные колонки — используем padding как в renderAnalysisTable
   const tableRaw = [cols.map((c) => c.title).join(" | "), ...list.map(makeRow)];
 
-  // простая выравнивалка по ширинам
+  // выравнивание по ширинам
   const split = tableRaw.map((line) => line.split(" | "));
   const widths = [];
   for (const parts of split) {
@@ -1180,6 +1320,8 @@ function buildFiltersSummary(filters) {
 // Screens
 // ───────────────────────────────────────────────────────────────
 async function showReportsList(ctx, user, { edit = true } = {}) {
+  await maybeToastImportJobNotification(ctx);
+
   const admin = isAdmin(user);
   setSt(ctx.from.id, { view: "list" });
 
@@ -1244,7 +1386,11 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
       }
 
       if (needImport) {
-        const res = await importModulposSales({ pool, days: importDays });
+        const res = await importModulposSales({
+          pool,
+          days: importDays,
+          tradePointIds: pointIds.length ? pointIds : null,
+        });
         // тост только если реально что-то подтянули
         if ((res?.docsInserted || 0) > 0 || (res?.itemsInserted || 0) > 0) {
           await toast(ctx, "Прогрузилось");
@@ -1386,6 +1532,29 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   const hideTable = Boolean(st.hideTable);
 
+  // Для "для анализа (по точкам)" нужны статусы смен по кассе + (опц.) кто открыл смену
+  let analysis2StatusMap = null;
+  let analysis2OpenerMap = null;
+  let analysis2ShowOpener = false;
+  let analysis2OnlyOpened = false;
+  let analysis2Page = Number.isInteger(st.analysis2Page) ? st.analysis2Page : 0;
+  let analysis2SortKey = null;
+  try {
+    if (format === "analysis2") {
+      const todayStr = fmtPgDate(todayLocalDate());
+      const isToday = String(filters.dateFrom) === todayStr && String(filters.dateTo) === todayStr;
+      analysis2OnlyOpened = Boolean(st.analysis2OnlyOpened) && isToday;
+      analysis2ShowOpener = analysis2OnlyOpened;
+      analysis2SortKey = analysis2Page === 1 ? st.analysis2SortKey1 || "to" : st.analysis2SortKey0 || "to";
+
+      const pointIds = Array.isArray(filters.pointIds) && filters.pointIds.length ? filters.pointIds : null;
+      analysis2StatusMap = await loadModulposShiftStatusByPoints({ pool, tradePointIds: pointIds, days: 2 });
+      analysis2OpenerMap = analysis2ShowOpener ? await loadBotShiftOpenersToday({ pointIds }) : new Map();
+    }
+  } catch (_) {
+    // не ломаем экран из-за API
+  }
+
   let body = format === "products" ? "Пока нет продаж по кассе за период." : "Пока нет закрытых смен.";
 
   if (format === "products") {
@@ -1409,7 +1578,15 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     } else {
       body = isAnalysisFmt
         ? format === "analysis2"
-          ? renderAnalysisTable2(rowsForUi, { filters })
+          ? renderAnalysisTable2(rowsForUi, {
+              filters,
+              page: analysis2Page,
+              sortKey: analysis2SortKey || "to",
+              statusMap: analysis2StatusMap,
+              openerMap: analysis2OpenerMap,
+              showOpener: analysis2ShowOpener,
+              onlyOpened: analysis2OnlyOpened,
+            })
           : renderAnalysisTable(rowsForUi, { elements, filters })
         : rowsForUi
             .map((r) =>
@@ -2635,8 +2812,10 @@ function renderDateMainKeyboard(st) {
 
   // 1) Месяц: (опционально) <  ←  янв. 26  →  >
   const heavy = isHeavyFormat(st);
+  const isPointsAnalysis = st?.format === "analysis2";
   const page = Number.isInteger(st.page) ? st.page : 0;
   const hasMore = Boolean(st.hasMore);
+  const a2Page = Number.isInteger(st.analysis2Page) ? st.analysis2Page : 0;
 
   const rowMonth = heavy
     ? [
@@ -2645,6 +2824,14 @@ function renderDateMainKeyboard(st) {
         btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
         btn("→", "date_month:next"),
         btn(hasMore ? ">" : ">", hasMore ? "lk_reports_more" : "lk_reports_nav_no_next"),
+      ]
+    : isPointsAnalysis
+    ? [
+        btn(a2Page > 0 ? "<" : "<", a2Page > 0 ? "analysis2:page_prev" : "analysis2:page_prev"),
+        btn("←", "date_month:prev"),
+        btn(`${monthTitle} ${yearShort}`, "date_month:menu"),
+        btn("→", "date_month:next"),
+        btn(a2Page < 1 ? ">" : ">", a2Page < 1 ? "analysis2:page_next" : "analysis2:page_next"),
       ]
     : [
         btn("←", "date_month:prev"),
@@ -2703,12 +2890,41 @@ function renderDateMainKeyboard(st) {
     admin ? btn("⚙", "lk_reports_settings") : btn(" ", "noop"),
   ];
 
+  // 4.8) Сортировки для "для анализа (по точкам)" + фильтр 👤
+  const todayStr = fmtPgDate(todayLocalDate());
+  const isToday = String(from) === todayStr && String(to) === todayStr;
+  const a2SortKey0 = st?.analysis2SortKey0 || "to";
+  const a2SortKey1 = st?.analysis2SortKey1 || "to";
+  const a2SortKey = a2Page === 1 ? a2SortKey1 : a2SortKey0;
+  const a2UserOn = Boolean(st?.analysis2OnlyOpened);
+  const markA2 = (key, label) => (a2SortKey === key ? `✅↕️ ${label}` : `↕️ ${label}`);
+  const rowA2Sort = isPointsAnalysis
+    ? a2Page === 0
+      ? [
+          btn(markA2("to", "ТО"), "analysis2:sort:to"),
+          btn(markA2("vp", "ВП"), "analysis2:sort:vp"),
+          btn(markA2("np", "ЧП"), "analysis2:sort:np"),
+          ...(isToday
+            ? [btn(a2UserOn ? "✅👤" : "👤", "analysis2:toggle_user")]
+            : [btn(" ", "noop")]),
+        ]
+      : [
+          btn(markA2("to", "ТО"), "analysis2:sort:to"),
+          btn(markA2("avg", "ср.чек"), "analysis2:sort:avg"),
+          btn(markA2("checks", "чек"), "analysis2:sort:checks"),
+          ...(isToday
+            ? [btn(a2UserOn ? "✅👤" : "👤", "analysis2:toggle_user")]
+            : [btn(" ", "noop")]),
+        ]
+    : null;
+
   return Markup.inlineKeyboard([
     rowMonth,
     rowDates,
     rowWeekMonth,
     rowYesterdayToday,
     ...(rowTopBy ? [rowTopBy] : []),
+    ...(rowA2Sort ? [rowA2Sort] : []),
     rowBottom,
   ]);
 }
@@ -2895,6 +3111,10 @@ async function showPickMenu(ctx, side, part, page = 0, { edit = true } = {}) {
 // Register
 // ───────────────────────────────────────────────────────────────
 function registerReports(bot, ensureUser, logError) {
+  // воркер очереди импорта ModulPOS (фоновые jobs)
+  // запуск 1 раз на процесс
+  startModulposImportJobsWorker({ intervalMs: 2500 });
+
   bot.action("lk_reports_cash_detail_toggle", async (ctx) => {
     const st = getSt(ctx.from.id) || {};
     if ((st.format || "cash") !== "cash") {
@@ -3756,6 +3976,86 @@ function registerReports(bot, ensureUser, logError) {
       return showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_more", e);
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────
+  // Analysis2: 2 страницы таблицы + сортировки + фильтр 👤
+  // ───────────────────────────────────────────────────────────
+  bot.action("analysis2:page_prev", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      if ((st.format || defaultFormatFor(user)) !== "analysis2") return;
+
+      const cur = Number.isInteger(st.analysis2Page) ? st.analysis2Page : 0;
+      setSt(ctx.from.id, { analysis2Page: Math.max(0, cur - 1) });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("analysis2_page_prev", e);
+    }
+  });
+
+  bot.action("analysis2:page_next", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      if ((st.format || defaultFormatFor(user)) !== "analysis2") return;
+
+      const cur = Number.isInteger(st.analysis2Page) ? st.analysis2Page : 0;
+      setSt(ctx.from.id, { analysis2Page: Math.min(1, cur + 1) });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("analysis2_page_next", e);
+    }
+  });
+
+  bot.action(/^analysis2:sort:(to|vp|np|avg|checks)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const key = String(ctx.match[1]);
+      const st = getSt(ctx.from.id) || {};
+      if ((st.format || defaultFormatFor(user)) !== "analysis2") return;
+
+      const page = Number.isInteger(st.analysis2Page) ? st.analysis2Page : 0;
+      if (page === 1) setSt(ctx.from.id, { analysis2SortKey1: key });
+      else setSt(ctx.from.id, { analysis2SortKey0: key });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("analysis2_sort", e);
+    }
+  });
+
+  bot.action("analysis2:toggle_user", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user) return;
+
+      const st = getSt(ctx.from.id) || {};
+      if ((st.format || defaultFormatFor(user)) !== "analysis2") return;
+
+      const todayStr = fmtPgDate(todayLocalDate());
+      const filters = st.filters || {};
+      const isToday = String(filters.dateFrom) === todayStr && String(filters.dateTo) === todayStr;
+      if (!isToday) {
+        await toast(ctx, "👤 доступно только на 'сегодня'");
+        return;
+      }
+
+      setSt(ctx.from.id, { analysis2OnlyOpened: !Boolean(st.analysis2OnlyOpened) });
+      return showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("analysis2_toggle_user", e);
     }
   });
 

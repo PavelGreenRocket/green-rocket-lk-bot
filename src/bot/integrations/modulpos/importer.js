@@ -98,13 +98,17 @@ async function detectPosSchema(pool) {
   };
 }
 
-async function loadBoundPoints(pool) {
+async function loadBoundPoints(pool, tradePointIds) {
   const res = await pool.query(
     `
       SELECT id, title, pos_retail_point_uuid
       FROM trade_points
+      WHERE 1=1
+        ${Array.isArray(tradePointIds) && tradePointIds.length ? "AND id = ANY($1::int[])" : ""}
       ORDER BY title NULLS LAST, id
     `
+    ,
+    Array.isArray(tradePointIds) && tradePointIds.length ? [tradePointIds] : []
   );
   const all = res.rows || [];
   const bound = all.filter((x) => x.pos_retail_point_uuid);
@@ -289,7 +293,7 @@ async function upsertItems(pool, items, schema) {
   return count;
 }
 
-async function importModulposSales({ pool, days = 1 }) {
+async function importModulposSales({ pool, days = 1, tradePointIds = null }) {
   const schemaOk = await ensurePosSchema(pool);
   if (!schemaOk) {
     return {
@@ -309,7 +313,7 @@ async function importModulposSales({ pool, days = 1 }) {
 
   const schema = await detectPosSchema(pool);
 
-  const { bound, noBinding } = await loadBoundPoints(pool);
+  const { bound, noBinding } = await loadBoundPoints(pool, tradePointIds);
 
   let docsInserted = 0;
   let itemsInserted = 0;
