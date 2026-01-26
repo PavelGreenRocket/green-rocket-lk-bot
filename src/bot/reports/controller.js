@@ -14,6 +14,9 @@ const {
   hasAnyProducts,
   loadCashSummary,
   loadCashAnalysisRows,
+  loadCashTimeByHour,
+  loadCashTimeByHourByPoint,
+  loadCashWeekdayAgg,
   renderProductsTable,
   getPointsWithNoPosBinding,
 } = require("./products");
@@ -769,51 +772,559 @@ function renderDowAnalysisTable(listRows, opts = {}) {
   return `<pre>${out}</pre>`;
 }
 
-function renderFormatKeyboard(st) {
-  const cur = st.format || "cash";
-  const mark = (v) => (cur === v ? "✅ " : "");
+// ───────────────────────────────────────────────────────────────
+// Анализ "по времени" — 3 режима
+// 0) Время | ТО | Чеков | Ср. чек (heat)
+// 1) Время | ТО по точкам (топ-4)
+// 2) Время | ███ (бар)
+// ───────────────────────────────────────────────────────────────
 
-  const detailed = Boolean(st.cashDetailed);
-  const detMark = detailed ? "✅ " : "";
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
-  const firstRow = [
-    Markup.button.callback(
-      `${mark("cash")}Кассовый`,
-      "lk_reports_format_set_cash",
-    ),
-  ];
+function escapePipes(s) {
+  return String(s ?? "").replace(/\|/g, "/");
+}
 
-  // "Подробно" показываем ТОЛЬКО в кассовом формате
-  if ((st.format || "cash") === "cash") {
-    firstRow.push(
-      Markup.button.callback(
-        `${detMark}Подробно`,
-        "lk_reports_cash_detail_toggle",
-      ),
+function hourRangeLabel(h) {
+  const hh = Number(h);
+  if (!Number.isFinite(hh)) return "--";
+  const a = String(hh).padStart(2, "0");
+  const b = String((hh + 1) % 24).padStart(2, "0");
+  return `${a}–${b}`;
+}
+
+function formatCompactMoney(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "-";
+  return new Intl.NumberFormat("ru-RU").format(Math.round(n));
+}
+
+function computePeak2h(hoursSorted) {
+  // hoursSorted: [{hour, toAvg}...] отсортированы по hour ASC
+  if (!Array.isArray(hoursSorted) || !hoursSorted.length) return null;
+  let best = null;
+  for (let i = 0; i < hoursSorted.length - 1; i++) {
+    const a = hoursSorted[i];
+    const b = hoursSorted[i + 1];
+    if (Number(a.hour) + 1 !== Number(b.hour)) continue; // только соседние
+    const sum = (Number(a.toAvg) || 0) + (Number(b.toAvg) || 0);
+    if (!best || sum > best.sum) best = { start: Number(a.hour), sum };
+  }
+  return best;
+}
+
+function heatMarker(v, max) {
+  const n = Number(v) || 0;
+  const m = Number(max) || 0;
+  if (m <= 0) return "⬜ ";
+  const r = n / m;
+  if (r >= 0.75) return "🟩 ";
+  if (r >= 0.4) return "🟨 ";
+  return "⬜ ";
+}
+
+function renderTimeMode0(rows, { totalDays }) {
+  const days = Math.max(1, Number(totalDays) || 1);
+
+  // 1) собираем данные по часу
+  const byHour = new Map();
+  for (const r of rows || []) {
+    const h = Number(r.hour);
+    if (!Number.isFinite(h)) continue;
+    byHour.set(h, {
+      hour: h,
+      sales: Number(r.sales_total) || 0,
+      checks: Number(r.checks_count) || 0,
+    });
+  }
+
+  // 2) строим 24 часа (среднее за день)
+  const hours = Array.from({ length: 24 }, (_, h) => {
+    const x = byHour.get(h) || { sales: 0, checks: 0 };
+    const toAvg = x.sales / days;
+    const checksAvg = x.checks / days;
+    const avgCheck = checksAvg > 0 ? toAvg / checksAvg : 0;
+    return { hour: h, toAvg, checksAvg, avgCheck };
+  });
+
+  const maxTo = Math.max(0, ...hours.map((x) => x.toAvg || 0));
+
+  const peak = computePeak2h(hours);
+  const peakLine = peak
+    ? `🔥 Пик: ${hourRangeLabel(peak.start)}–${String((peak.start + 2) % 24).padStart(2, "0")}`
+    : null;
+
+  // ─────────────────────────
+  // 3) Рендер таблицы
+  // ─────────────────────────
+  const TIME_COL_WIDTH = 8;
+  const visLen = (s) => Array.from(String(s ?? "")).length;
+
+  const HEAT_PREFIX = heatMarker(0, 1); // например "⬜ "
+  const CLOCK_PREFIX = "🕒 ";
+
+  // заменяем только эмодзи, пробел оставляем
+  const headTime = HEAT_PREFIX.replace(/[^\s]/u, "🕒") + "Время";
+  const head = [headTime, "ТО", "Чеков", "Ср. чек"];
+  const table = [head];
+
+  for (const x of hours) {
+    const mark = heatMarker(x.toAvg, maxTo);
+    const rawTime = `${mark}${hourRangeLabel(x.hour)}`;
+    const time =
+      rawTime + " ".repeat(Math.max(0, TIME_COL_WIDTH - visLen(rawTime)));
+
+    table.push([
+      time,
+      formatCompactMoney(x.toAvg),
+      formatCompactMoney(x.checksAvg),
+      x.checksAvg > 0 ? formatCompactMoney(x.avgCheck) : "-",
+    ]);
+  }
+
+  // widths
+  const widths = [];
+  for (const row of table) {
+    row.forEach((c, i) => {
+      if (i === 0) {
+        widths[0] = TIME_COL_WIDTH;
+        return;
+      }
+      widths[i] = Math.max(widths[i] || 0, visLen(c));
+    });
+  }
+
+  const pad = (s, w) => {
+    const str = String(s ?? "");
+    const need = Math.max(0, w - visLen(str));
+    return str + " ".repeat(need);
+  };
+
+  const lines = table.map((r) =>
+    r.map((c, i) => pad(c, widths[i])).join(" | "),
+  );
+  const sep = widths.map((w) => "─".repeat(w)).join("──");
+
+  const out = [
+    ...(peakLine ? [peakLine] : []),
+    ...(days > 1 ? [`(среднее за день; дней: ${days})`] : []),
+    "",
+    lines[0],
+    sep,
+    ...lines.slice(1),
+  ].join("\n");
+
+  return `<pre>${escapeHtml(out)}</pre>`;
+}
+
+function renderTimeMode2(rows, { totalDays }) {
+  const days = Math.max(1, Number(totalDays) || 1);
+  const byHour = new Map();
+  for (const r of rows || []) {
+    const h = Number(r.hour);
+    if (!Number.isFinite(h)) continue;
+    byHour.set(h, Number(r.sales_total) || 0);
+  }
+  const hours = Array.from({ length: 24 }, (_, h) => {
+    const toAvg = (byHour.get(h) || 0) / days;
+    return { hour: h, toAvg };
+  });
+  const maxTo = Math.max(0, ...hours.map((x) => x.toAvg || 0));
+  const peak = computePeak2h(hours);
+  const peakLine = peak
+    ? `🔥 Пик: ${hourRangeLabel(peak.start)}–${String((peak.start + 2) % 24).padStart(2, "0")}`
+    : null;
+
+  const barW = 12;
+  const lines = [];
+  if (peakLine) lines.push(peakLine);
+  if (days > 1) lines.push(`(среднее за день; дней: ${days})`);
+  lines.push("");
+  lines.push("Время | ТО | ");
+  for (const x of hours) {
+    const ratio = maxTo > 0 ? (x.toAvg || 0) / maxTo : 0;
+    const n = Math.round(ratio * barW);
+    const bar = "█".repeat(n) + " ".repeat(Math.max(0, barW - n));
+    lines.push(
+      `${hourRangeLabel(x.hour)} | ${formatCompactMoney(x.toAvg)} | ${bar}`,
+    );
+  }
+  return `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+}
+
+// универсально: обновить текущее сообщение на фото (если возможно),
+// иначе удалить и отправить новое фото с теми же кнопками
+async function deliverPhoto(ctx, { url, caption, kb }, { edit = true } = {}) {
+  const safeCaption = String(caption || "").slice(0, 1000); // запас под лимит caption
+  const replyMarkup = kb?.reply_markup
+    ? { reply_markup: kb.reply_markup }
+    : undefined;
+
+  // 1) если не edit — просто отправляем фото
+  if (!edit) {
+    return ctx.replyWithPhoto(
+      { url },
+      { caption: safeCaption, parse_mode: "HTML", ...(replyMarkup || {}) },
     );
   }
 
+  // 2) edit=true: сначала пробуем превратить текущее сообщение в фото (если оно уже было медиа)
+  try {
+    await ctx.editMessageMedia(
+      {
+        type: "photo",
+        media: url,
+        caption: safeCaption,
+        parse_mode: "HTML",
+      },
+      replyMarkup || undefined,
+    );
+    return;
+  } catch (_) {
+    // Telegram часто ругается, если текущее сообщение было текстом
+  }
+
+  // 3) fallback: удаляем старое и отправляем новое фото (кнопки сохраняем)
+  try {
+    await ctx.deleteMessage().catch(() => {});
+  } catch (_) {}
+
+  return ctx.replyWithPhoto(
+    { url },
+    { caption: safeCaption, parse_mode: "HTML", ...(replyMarkup || {}) },
+  );
+}
+
+function summaryLinesForChart(summaryBlock) {
+  if (!summaryBlock) return [];
+
+  const plainLines = String(summaryBlock)
+    .split("\n")
+    .map((l) => l.replace(/<[^>]+>/g, "").trim()) // убрать HTML-теги <b>, <u> и т.п.
+    .filter(Boolean);
+
+  const pick = (startsWith) => plainLines.find((l) => l.startsWith(startsWith));
+
+  // 9 строк — влезает (1-я строка заголовка графика + 9 = 10 макс)
+  return [
+    pick("📊 "), // период
+    pick("Пропущенных дней:"),
+
+    pick("• Продажи (ТО):"),
+    pick("• Валовая прибыль (ВП):"),
+    pick("• Чистая прибыль (ЧП):"),
+    pick("• Средние продажи в день:"),
+
+    pick("• Кол-во чеков за период:"),
+    pick("• Средний чек:"),
+    pick("• Среднее кол-во чеков в день:"),
+  ].filter(Boolean);
+}
+function summaryLinesForCaption(summaryBlock) {
+  if (!summaryBlock) return [];
+
+  const plainLines = String(summaryBlock)
+    .split("\n")
+    .map((l) => l.replace(/<[^>]+>/g, "").trim())
+    .filter(Boolean);
+
+  const pick = (startsWith) => plainLines.find((l) => l.startsWith(startsWith));
+
+  return [pick("📊 "), pick("Пропущенных дней:")].filter(Boolean);
+}
+
+function buildTimeBarChartUrl(rows, { totalDays, summaryLines = [] }) {
+  const days = Math.max(1, Number(totalDays) || 1);
+
+  const byHour = new Map();
+  for (const r of rows || []) {
+    const h = Number(r.hour);
+    if (!Number.isFinite(h)) continue;
+    byHour.set(h, Number(r.sales_total) || 0);
+  }
+
+  const labels = Array.from({ length: 24 }, (_, h) => String(h));
+  const data = labels.map(
+    (_, h) => Math.round(((byHour.get(h) || 0) / days) * 100) / 100,
+  );
+
+  const titleLines = ["🕒 По часам", ...(summaryLines || [])].slice(0, 10);
+
+  const chartCfg = {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{ data }],
+    },
+    options: {
+      legend: { display: false },
+      title: {
+        display: true,
+        text: titleLines, // многострочно
+        fontSize: 12,
+        padding: 10,
+      },
+      scales: {
+        yAxes: [{ ticks: { beginAtZero: true } }],
+      },
+    },
+  };
+
+  return (
+    "https://quickchart.io/chart?c=" +
+    encodeURIComponent(JSON.stringify(chartCfg)) +
+    "&w=900&h=380&devicePixelRatio=2"
+  );
+}
+
+function buildWeekdayBarChartUrl(
+  rows,
+  { totalDays, metric = "to", summaryLines = [] },
+) {
+  const days = Math.max(1, Number(totalDays) || 1);
+
+  // ISO DOW: 1..7 (пн..вс)
+  const labels = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+  const byDow = new Map();
+  for (const r of rows || []) {
+    const dow = Number(r.iso_dow);
+    if (!Number.isFinite(dow)) continue;
+    const v =
+      metric === "checks"
+        ? Number(r.checks_count) || 0
+        : Number(r.sales_total) || 0;
+    byDow.set(dow, v);
+  }
+
+  // На графике — среднее в день по выбранному периоду (как в "по часам")
+  const data = labels.map((_, i) => {
+    const iso = i + 1;
+    const v = byDow.get(iso) || 0;
+    return Math.round((v / days) * 100) / 100;
+  });
+
+  const title =
+    metric === "checks" ? "📅 По дням недели — чеки" : "📅 По дням недели — ТО";
+
+  const titleLines = [title, ...(summaryLines || [])].slice(0, 10);
+
+  const chartCfg = {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{ data }],
+    },
+    options: {
+      legend: { display: false },
+      title: {
+        display: true,
+        text: titleLines,
+        fontSize: 12,
+        padding: 10,
+      },
+      scales: {
+        yAxes: [{ ticks: { beginAtZero: true } }],
+      },
+    },
+  };
+
+  return (
+    "https://quickchart.io/chart?c=" +
+    encodeURIComponent(JSON.stringify(chartCfg)) +
+    "&w=900&h=380&devicePixelRatio=2"
+  );
+}
+
+function buildWeekdayTableImageUrl(
+  rows,
+  { sortKey = "to", sortActive = true } = {},
+) {
+  // Таблица как renderDowAnalysisTable, но картинкой (PNG) через quickchart table.
+  // ISO DOW: 1..7 (пн..вс)
+  const order = [1, 2, 3, 4, 5, 6, 7];
+  const names = {
+    1: "пн",
+    2: "вт",
+    3: "ср",
+    4: "чт",
+    5: "пт",
+    6: "сб",
+    7: "вс",
+  };
+
+  const byDow = new Map();
+  for (const r of rows || []) {
+    const d = Number(r.iso_dow);
+    if (!Number.isFinite(d)) continue;
+    byDow.set(d, {
+      to: Number(r.sales_total) || 0,
+      checks: Number(r.checks_count) || 0,
+      vp: 0,
+    });
+  }
+
+  const totalTo = order.reduce((a, d) => a + (byDow.get(d)?.to || 0), 0);
+  const totalChecks = order.reduce(
+    (a, d) => a + (byDow.get(d)?.checks || 0),
+    0,
+  );
+
+  let dataRows = order.map((d) => {
+    const v = byDow.get(d) || { to: 0, checks: 0, vp: 0 };
+    const pTo = totalTo ? Math.round((v.to / totalTo) * 100) : 0;
+    const pChecks = totalChecks
+      ? Math.round((v.checks / totalChecks) * 100)
+      : 0;
+    return {
+      d,
+      dn: names[d] || String(d),
+      to: v.to,
+      pTo,
+      vp: v.vp,
+      pVp: 0,
+      checks: v.checks,
+      pChecks,
+    };
+  });
+
+  if (sortActive) {
+    const key =
+      sortKey === "checks" ? "checks" : sortKey === "vp" ? "vp" : "to";
+    dataRows = dataRows.slice().sort((a, b) => (b[key] || 0) - (a[key] || 0));
+  }
+
+  const fmtNum = (n) =>
+    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(
+      Math.round(Number(n) || 0),
+    );
+
+  const tableRows = dataRows.map((r) => [
+    r.dn,
+    fmtNum(r.to),
+    `${r.pTo}%`,
+    "-",
+    "-",
+    fmtNum(r.checks),
+    `${r.pChecks}%`,
+  ]);
+
+  // Итоговая строка "="
+  tableRows.push([
+    "=",
+    fmtNum(totalTo),
+    "100%",
+    "-",
+    "-",
+    fmtNum(totalChecks),
+    "100%",
+  ]);
+
+  const payload = {
+    title: "",
+    columns: ["ДН", "ТО", "%ТО", "ВП", "%ВП", "чек", "%чек"],
+    rows: tableRows,
+  };
+
+  return (
+    "https://quickchart.io/table?data=" +
+    encodeURIComponent(JSON.stringify(payload)) +
+    "&format=png&width=900&height=520&padding=10"
+  );
+}
+
+function renderTimeMode1(pivotRows, { totalDays, topPoints }) {
+  const days = Math.max(1, Number(totalDays) || 1);
+  const points = Array.isArray(topPoints) ? topPoints : [];
+  const pointTitles = points.map((p) => escapePipes(p.title));
+
+  const byKey = new Map();
+  for (const r of pivotRows || []) {
+    const h = Number(r.hour);
+    const tp = Number(r.trade_point_id);
+    if (!Number.isFinite(h) || !Number.isFinite(tp)) continue;
+    byKey.set(`${h}:${tp}`, Number(r.sales_total) || 0);
+  }
+
+  const head = ["Время", ...pointTitles];
+  const table = [head];
+
+  for (let h = 0; h < 24; h++) {
+    const row = [hourRangeLabel(h)];
+    for (const p of points) {
+      const v = (byKey.get(`${h}:${p.id}`) || 0) / days;
+      row.push(formatCompactMoney(v));
+    }
+    table.push(row);
+  }
+
+  const widths = [];
+  for (const row of table) {
+    row.forEach((c, i) => {
+      widths[i] = Math.max(widths[i] || 0, String(c ?? "").length);
+    });
+  }
+  const pad = (s, w) =>
+    String(s ?? "") + " ".repeat(Math.max(0, w - String(s ?? "").length));
+
+  const lines = table.map((r) =>
+    r.map((c, i) => pad(c, widths[i])).join(" | "),
+  );
+  const sep = widths.map((w) => "─".repeat(w)).join("──");
+
+  const out = [
+    days > 1 ? `(среднее за день; дней: ${days})` : null,
+    "",
+    lines[0],
+    sep,
+    ...lines.slice(1),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return `<pre>${escapeHtml(out)}</pre>`;
+}
+
+function renderFormatKeyboard(st) {
+  const cur = st.format || "cash";
+  const detailed = Boolean(st.cashDetailed);
+
+  const isCash = cur === "cash";
+  const markStd = isCash && !detailed ? "✅ " : "";
+  const markDet = isCash && detailed ? "✅ " : "";
+
+  const mark = (v) => (cur === v ? "✅ " : "");
+
+  const btn = (text, data) => Markup.button.callback(text, data);
+
   const buttons = [
-    firstRow,
     [
-      Markup.button.callback(
-        `${mark("products")}По товарам`,
-        "lk_reports_format_set_products",
-      ),
+      btn("кассовый →", "lk_reports_noop"),
+      btn(`${markStd}стандарт`, "lk_reports_cash_set_standard"),
+      btn(`${markDet}подробно`, "lk_reports_cash_set_detailed"),
     ],
     [
-      Markup.button.callback(
-        `${mark("analysis1")}Для анализа (по дням)`,
-        "lk_reports_format_set_analysis1",
-      ),
+      btn(`${mark("analysis1")}по дням`, "lk_reports_format_set_analysis1"),
+      btn(`${mark("analysis2")}по точкам`, "lk_reports_format_set_analysis2"),
     ],
     [
-      Markup.button.callback(
-        `${mark("analysis2")}Для анализа (по точкам)`,
-        "lk_reports_format_set_analysis2",
-      ),
+      btn(`${mark("time")}по часам`, "lk_reports_format_set_time"),
+      btn(`${mark("weekday")}по дням недели`, "lk_reports_format_set_weekday"),
     ],
-    [Markup.button.callback("🔙", "lk_reports_format_close")],
+    [
+      btn("по месяцам", "lk_reports_format_stub_months"),
+      btn("по годам", "lk_reports_format_stub_years"),
+    ],
+    [
+      btn(`${mark("products")}по товарам`, "lk_reports_format_set_products"),
+      btn("по сотрудникам", "lk_reports_format_stub_staff"),
+    ],
+    [btn("🔙", "lk_reports_format_close")],
   ];
 
   return Markup.inlineKeyboard(buttons);
@@ -1394,7 +1905,9 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
 
   const elements = st.elements || defaultElementsFor(user);
   const format = st.format || defaultFormatFor(user);
-  const isAnalysis = ["analysis", "analysis1", "analysis2"].includes(format);
+  const isAnalysis = ["analysis", "analysis1", "analysis2", "time"].includes(
+    format,
+  );
 
   // Данные экрана зависят от формата:
   // - cash/analysis*: shift_closings
@@ -1493,6 +2006,38 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     if (format === "analysis1" || format === "analysis2") {
       // аналитика теперь берётся с кассы (POS)
       rows = await loadCashAnalysisRows({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
+      hasMore = false;
+      setSt(ctx.from.id, { hasMore: false });
+    } else if (format === "time") {
+      // анализ по времени (по часам) — POS
+      rows = await loadCashTimeByHour({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
+      hasMore = false;
+      setSt(ctx.from.id, { hasMore: false });
+    } else if (format === "weekday") {
+      // анализ по дням недели — POS
+      rows = await loadCashWeekdayAgg({
         dateFrom: filters.dateFrom,
         dateTo: filters.dateTo,
         pointIds:
@@ -1632,12 +2177,76 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     // не ломаем экран из-за API
   }
 
+  // Для "по времени" нужна длительность периода (в днях)
+  let timeTotalDays = 1;
+  try {
+    const fromIso = String(st.periodFrom || filters.dateFrom || "");
+    const toIso = String(st.periodTo || filters.dateTo || "");
+    const fromD = parsePgDateToDate(fromIso);
+    const toD = parsePgDateToDate(toIso);
+    if (fromD && toD) {
+      const msPerDay = 24 * 60 * 60 * 1000;
+      timeTotalDays = Math.max(1, Math.round((toD - fromD) / msPerDay) + 1);
+    }
+  } catch (_) {
+    timeTotalDays = 1;
+  }
+
   let body =
     format === "products"
       ? "Пока нет продаж по кассе за период."
       : "Пока нет закрытых смен.";
 
-  if (format === "products") {
+  const weekdayMode = Number.isInteger(st.weekdayMode) ? st.weekdayMode : 0;
+  const wantsWeekdayPhoto = format === "weekday";
+
+  if (format === "time") {
+    const mode = Number.isInteger(st.timeMode) ? st.timeMode : 0;
+
+    if (mode === 1) {
+      // Пивот по точкам (топ-4 по ТО)
+      const pivotRows = await loadCashTimeByHourByPoint({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
+
+      // топ-4 точек по ТО
+      const totals = new Map();
+      const titles = new Map();
+      for (const r of pivotRows || []) {
+        const tp = Number(r.trade_point_id);
+        if (!Number.isFinite(tp)) continue;
+        totals.set(tp, (totals.get(tp) || 0) + (Number(r.sales_total) || 0));
+        if (!titles.has(tp)) {
+          titles.set(tp, String(r.trade_point_title || `Точка #${tp}`));
+        }
+      }
+
+      const topPoints = Array.from(totals.entries())
+        .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+        .slice(0, 4)
+        .map(([id]) => ({ id, title: titles.get(id) || `Точка #${id}` }));
+
+      body = topPoints.length
+        ? renderTimeMode1(pivotRows, { totalDays: timeTotalDays, topPoints })
+        : renderTimeMode0(rows, { totalDays: timeTotalDays });
+    } else if (mode === 2) {
+      body = renderTimeMode2(rows, { totalDays: timeTotalDays });
+    } else {
+      body = renderTimeMode0(rows, { totalDays: timeTotalDays });
+    }
+  } else if (format === "weekday") {
+    // формат "по дням недели" всегда рендерим картинкой ниже
+    body = "";
+  } else if (format === "products") {
     if (rows.length) {
       body = renderProductsTable(rows, { limit: 25 });
     }
@@ -1781,6 +2390,8 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     }
     if (format === "analysis1") return "для анализа (по дням)";
     if (format === "analysis2") return "для анализа (по точкам)";
+    if (format === "time") return "по времени";
+    if (format === "weekday") return "по дням недели";
     if (format === "products") return "по товарам";
     return format;
   })();
@@ -1867,6 +2478,174 @@ async function showReportsList(ctx, user, { edit = true } = {}) {
     kb = filterOpened
       ? renderAdminFilterKeyboard()
       : renderDateMainKeyboard({ ...st2, __admin: admin });
+  }
+
+  const mode = Number.isInteger(st.timeMode) ? st.timeMode : 0;
+  const wantsTimeChart = format === "time" && mode === 2;
+
+  if (wantsWeekdayPhoto) {
+    const topSummary = summaryLinesForCaption(summaryBlock);
+
+    let chartUrl = null;
+    if (weekdayMode === 2) {
+      chartUrl = buildWeekdayTableImageUrl(rows, {
+        sortKey: st.weekdaySortKey || "to",
+        sortActive: st.weekdaySortActive !== false,
+      });
+    } else {
+      chartUrl = buildWeekdayBarChartUrl(rows, {
+        totalDays: timeTotalDays,
+        metric: weekdayMode === 1 ? "checks" : "to",
+        summaryLines: [],
+      });
+    }
+
+    const caption = [
+      header,
+      ...topSummary,
+      filterBlock,
+      "",
+      `формат: ${formatTitle}`,
+      pageHint,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    // В режиме 3/3 (таблица-картинка) QuickChart/table иногда отдаёт ошибку/не-изображение,
+    // и Telegram отвечает IMAGE_PROCESS_FAILED. В этом случае деградируем до текстовой таблицы,
+    // чтобы экран не исчезал.
+    if (weekdayMode === 2) {
+      try {
+        return await deliverPhoto(
+          ctx,
+          {
+            url: chartUrl,
+            caption,
+            kb: kb || null,
+          },
+          { edit },
+        );
+      } catch (e) {
+        const desc = String(e?.description || e?.response?.description || "");
+        if (desc.includes("IMAGE_PROCESS_FAILED")) {
+          const tableHtml = renderDowAnalysisTable(rows, {
+            sortKey: st.weekdaySortKey || "to",
+            sortActive: st.weekdaySortActive !== false,
+          });
+          const html = [
+            header,
+            ...topSummary,
+            filterBlock,
+            "",
+            `формат: ${formatTitle}`,
+            pageHint,
+            "",
+            tableHtml,
+          ]
+            .filter(Boolean)
+            .join("\n");
+
+          return deliver(
+            ctx,
+            {
+              text: html,
+              extra: { ...(kb || {}), parse_mode: "HTML" },
+            },
+            { edit },
+          );
+        }
+        throw e;
+      }
+    }
+
+    return deliverPhoto(
+      ctx,
+      {
+        url: chartUrl,
+        caption,
+        kb: kb || null,
+      },
+      { edit },
+    );
+  }
+
+  if (wantsTimeChart) {
+    // 1) Картинка: только график (без показателей)
+    const chartUrl = buildTimeBarChartUrl(rows, {
+      totalDays: timeTotalDays,
+      summaryLines: [], // ❌ ничего не печатаем на картинке
+    });
+
+    // 2) Текст под картинкой: только верхушка (без "Финансы" и "Поведение гостей")
+    const topSummary = summaryLinesForCaption(summaryBlock);
+
+    const caption = [
+      header, // "(Все) Аналитика за Январь" и т.п.
+      ...topSummary, // "📊 ..." + "Пропущенных дней: ..."
+      filterBlock, // если у тебя тут фильтры — оставляем
+      "",
+      `формат: ${formatTitle}`,
+      pageHint,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    // В режиме 3/3 (таблица-картинка) QuickChart/table иногда отдаёт ошибку/не-изображение,
+    // и Telegram отвечает IMAGE_PROCESS_FAILED. В этом случае деградируем до текстовой таблицы,
+    // чтобы экран не исчезал.
+    if (weekdayMode === 2) {
+      try {
+        return await deliverPhoto(
+          ctx,
+          {
+            url: chartUrl,
+            caption,
+            kb: kb || null,
+          },
+          { edit },
+        );
+      } catch (e) {
+        const desc = String(e?.description || e?.response?.description || "");
+        if (desc.includes("IMAGE_PROCESS_FAILED")) {
+          const tableHtml = renderDowAnalysisTable(rows, {
+            sortKey: st.weekdaySortKey || "to",
+            sortActive: st.weekdaySortActive !== false,
+          });
+          const html = [
+            header,
+            ...topSummary,
+            filterBlock,
+            "",
+            `формат: ${formatTitle}`,
+            pageHint,
+            "",
+            tableHtml,
+          ]
+            .filter(Boolean)
+            .join("\n");
+
+          return deliver(
+            ctx,
+            {
+              text: html,
+              extra: { ...(kb || {}), parse_mode: "HTML" },
+            },
+            { edit },
+          );
+        }
+        throw e;
+      }
+    }
+
+    return deliverPhoto(
+      ctx,
+      {
+        url: chartUrl,
+        caption,
+        kb: kb || null,
+      },
+      { edit },
+    );
   }
 
   return deliver(
@@ -3013,6 +3792,45 @@ function renderDateMainKeyboard(st) {
         ]
     : null;
 
+  // 4.9) Переключатель режима для "По времени" + график
+  const isTime = st?.format === "time";
+  const timeMode = Number.isInteger(st?.timeMode) ? st.timeMode : 0;
+  const timeModeLabel =
+    timeMode === 1 ? "по точкам" : timeMode === 2 ? "бар" : "ТО/чеки";
+
+  const rowTimeMode = isTime
+    ? [btn(`🔁 ${timeModeLabel} (${(timeMode % 3) + 1}/3)`, "time:mode_toggle")]
+    : null;
+
+  // 4.10) Переключатель режима для "По дням недели" + (в режиме таблицы) сортировки
+  const isWeekday = st?.format === "weekday";
+  const weekdayMode = Number.isInteger(st?.weekdayMode) ? st.weekdayMode : 0;
+  const weekdayModeLabel =
+    weekdayMode === 1 ? "бар чек" : weekdayMode === 2 ? "таблица" : "бар ТО";
+
+  const rowWeekdayMode = isWeekday
+    ? [
+        btn(
+          `🔁 ${weekdayModeLabel} (${(weekdayMode % 3) + 1}/3)`,
+          "weekday:mode_toggle",
+        ),
+      ]
+    : null;
+
+  const wSortKey = st?.weekdaySortKey || "to";
+  const wSortActive = st?.weekdaySortActive !== false; // по умолчанию ВКЛ
+  const markW = (k, label) =>
+    wSortActive && wSortKey === k ? `✅⬆️ ${label}` : `⬆️ ${label}`;
+
+  const rowWeekdaySort =
+    isWeekday && weekdayMode === 2
+      ? [
+          btn(markW("to", "ТО"), "weekday:sort:to"),
+          btn(markW("vp", "ВП"), "weekday:sort:vp"),
+          btn(markW("checks", "Чек"), "weekday:sort:checks"),
+        ]
+      : null;
+
   return Markup.inlineKeyboard([
     rowMonth,
     rowDates,
@@ -3020,6 +3838,10 @@ function renderDateMainKeyboard(st) {
     rowYesterdayToday,
     ...(rowTopBy ? [rowTopBy] : []),
     ...(rowA2Sort ? [rowA2Sort] : []),
+    ...(rowTimeMode ? [rowTimeMode] : []),
+    ...(rowWeekdayMode ? [rowWeekdayMode] : []),
+    ...(rowWeekdaySort ? [rowWeekdaySort] : []),
+
     rowBottom,
   ]);
 }
@@ -3915,6 +4737,61 @@ function registerReports(bot, ensureUser, logError) {
     }
   });
 
+  // noop-кнопки (для "кассовый →" и т.п.)
+  bot.action("lk_reports_noop", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+    } catch (_) {}
+  });
+
+  // Быстрый выбор "кассовый: стандарт/подробно"
+  bot.action("lk_reports_cash_set_standard", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+      setSt(ctx.from.id, {
+        format: "cash",
+        cashDetailed: false,
+        page: 0,
+        formatUi: null,
+      });
+      await saveFormatSetting(user.id, "cash");
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_cash_set_standard", e);
+    }
+  });
+
+  bot.action("lk_reports_cash_set_detailed", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+      setSt(ctx.from.id, {
+        format: "cash",
+        cashDetailed: true,
+        page: 0,
+        formatUi: null,
+      });
+      await saveFormatSetting(user.id, "cash");
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_cash_set_detailed", e);
+    }
+  });
+
+  // Заглушки форматов
+  bot.action("lk_reports_format_stub_months", async (ctx) => {
+    await toast(ctx, "Скоро: по месяцам").catch(() => {});
+  });
+  bot.action("lk_reports_format_stub_years", async (ctx) => {
+    await toast(ctx, "Скоро: по годам").catch(() => {});
+  });
+  bot.action("lk_reports_format_stub_staff", async (ctx) => {
+    await toast(ctx, "Скоро: по сотрудникам").catch(() => {});
+  });
+
   bot.action("lk_reports_format_set_cash", async (ctx) => {
     try {
       await ctx.answerCbQuery().catch(() => {});
@@ -4043,6 +4920,182 @@ function registerReports(bot, ensureUser, logError) {
       await showReportsList(ctx, user, { edit: true });
     } catch (e) {
       logError("lk_reports_format_set_analysis2", e);
+    }
+  });
+
+  bot.action("lk_reports_format_set_time", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      // по умолчанию: режим 1/3 (ТО/чеки)
+      setSt(ctx.from.id, {
+        format: "time",
+        timeMode: 0,
+        page: 0,
+        formatUi: null,
+      });
+      await saveFormatSetting(user.id, "time");
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_set_time", e);
+    }
+  });
+
+  bot.action("lk_reports_format_set_weekday", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      // по умолчанию: режим 1/3 (бар ТО)
+      setSt(ctx.from.id, {
+        format: "weekday",
+        weekdayMode: 0,
+        page: 0,
+        formatUi: null,
+      });
+      await saveFormatSetting(user.id, "weekday");
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("lk_reports_format_set_weekday", e);
+    }
+  });
+
+  bot.action("weekday:mode_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const cur = Number.isInteger(st.weekdayMode) ? st.weekdayMode : 0;
+      const next = (cur + 1) % 3;
+      setSt(ctx.from.id, { weekdayMode: next });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("weekday:mode_toggle", e);
+    }
+  });
+
+  bot.action(/^weekday:sort:(to|vp|checks)$/, async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      const [, key] = ctx.match;
+      setSt(ctx.from.id, { weekdaySortKey: key, weekdaySortActive: true });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("weekday:sort", e);
+    }
+  });
+
+  bot.action("time:mode_toggle", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id) || {};
+      const cur = Number.isInteger(st.timeMode) ? st.timeMode : 0;
+      const next = (cur + 1) % 3;
+      setSt(ctx.from.id, { timeMode: next });
+      await showReportsList(ctx, user, { edit: true });
+    } catch (e) {
+      logError("time:mode_toggle", e);
+    }
+  });
+
+  bot.action("time:chart", async (ctx) => {
+    try {
+      await ctx.answerCbQuery().catch(() => {});
+      const user = await ensureUser(ctx);
+      if (!user || !isAdmin(user)) return;
+
+      const st = getSt(ctx.from.id) || {};
+
+      // собираем filters так же, как в showReportsList
+      const filters = { ...(st.filters || {}) };
+      if (st.onlyMyShifts) filters.workerIds = [user.id];
+      if (st.periodFrom) filters.dateFrom = st.periodFrom;
+      if (st.periodTo) filters.dateTo = st.periodTo;
+
+      // длительность периода (в днях) — как у тебя для timeTotalDays
+      let days = 1;
+      try {
+        const fromIso = String(st.periodFrom || filters.dateFrom || "");
+        const toIso = String(st.periodTo || filters.dateTo || "");
+        const fromD = parsePgDateToDate(fromIso);
+        const toD = parsePgDateToDate(toIso);
+        if (fromD && toD) {
+          const ms = toD.getTime() - fromD.getTime();
+          days = Math.max(1, Math.round(ms / (24 * 60 * 60 * 1000)) + 1);
+        }
+      } catch (_) {}
+
+      // грузим данные по часам (как в формате "time")
+      const rows = await loadCashTimeByHour({
+        dateFrom: filters.dateFrom,
+        dateTo: filters.dateTo,
+        pointIds:
+          Array.isArray(filters.pointIds) && filters.pointIds.length
+            ? filters.pointIds
+            : null,
+        weekdays:
+          Array.isArray(filters.weekdays) && filters.weekdays.length
+            ? filters.weekdays
+            : null,
+      });
+
+      // строим массив 0..23 -> средний ТО за день
+      const byHour = new Map();
+      for (const r of rows || []) {
+        const h = Number(r.hour);
+        if (!Number.isFinite(h)) continue;
+        byHour.set(h, Number(r.sales_total) || 0);
+      }
+      const labels = Array.from({ length: 24 }, (_, h) => String(h));
+      const data = Array.from(
+        { length: 24 },
+        (_, h) => Math.round(((byHour.get(h) || 0) / days) * 100) / 100,
+      );
+
+      // QuickChart (картинка)
+      const chartCfg = {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "ТО (ср./день)",
+              data,
+            },
+          ],
+        },
+        options: {
+          legend: { display: false },
+          title: { display: true, text: "По часам и дням недели" },
+          scales: {
+            yAxes: [{ ticks: { beginAtZero: true } }],
+          },
+        },
+      };
+
+      const chartUrl =
+        "https://quickchart.io/chart" +
+        "?c=" +
+        encodeURIComponent(JSON.stringify(chartCfg)) +
+        "&w=900&h=320&devicePixelRatio=2";
+
+      await ctx.replyWithPhoto(
+        { url: chartUrl },
+        { caption: "📊 ТО по часам (среднее за день)" },
+      );
+    } catch (e) {
+      logError("time:chart", e);
     }
   });
 

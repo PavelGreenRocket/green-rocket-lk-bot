@@ -50,23 +50,26 @@ function renderProductsTable(rows, { limit = 50 } = {}) {
 
   const nameW = Math.min(
     28,
-    Math.max(5, ...top.map((r) => escapePipes(truncateName(r.item_name)).length))
+    Math.max(
+      5,
+      ...top.map((r) => escapePipes(truncateName(r.item_name)).length),
+    ),
   );
   const qtyW = Math.min(
     8,
-    Math.max(4, ...top.map((r) => String(toIntQty(r.qty)).length))
+    Math.max(4, ...top.map((r) => String(toIntQty(r.qty)).length)),
   );
   const toW = Math.min(
     10,
-    Math.max(2, ...top.map((r) => fmtMoney(r.to_sum).length))
+    Math.max(2, ...top.map((r) => fmtMoney(r.to_sum).length)),
   );
 
   const lines = [];
   lines.push(
     `${padRight("товар", nameW)} | ${padLeft("кол-во", qtyW)} | ${padLeft(
       "ТО",
-      toW
-    )} | ВП`
+      toW,
+    )} | ВП`,
   );
 
   for (const r of top) {
@@ -76,8 +79,8 @@ function renderProductsTable(rows, { limit = 50 } = {}) {
     lines.push(
       `${padRight(name, nameW)} | ${padLeft(qty, qtyW)} | ${padLeft(
         to,
-        toW
-      )} | —`
+        toW,
+      )} | —`,
     );
   }
 
@@ -112,12 +115,13 @@ async function detectPosSchema() {
           SELECT 1 FROM information_schema.columns
           WHERE table_schema='public' AND table_name='pos_sales_docs' AND column_name='doc_id'
         ) AS docs_has_doc_id
-    `
+    `,
   );
   const s = schemaRes.rows?.[0] || {};
   const useCash = Boolean(s.items_has_cash_doc_id);
   const docsIdCol = s.docs_has_id ? "id" : s.docs_has_doc_id ? "doc_id" : null;
-  const useDocId = !useCash && Boolean(s.items_has_doc_id) && Boolean(docsIdCol);
+  const useDocId =
+    !useCash && Boolean(s.items_has_doc_id) && Boolean(docsIdCol);
 
   return { useCash, useDocId, docsIdCol };
 }
@@ -141,7 +145,38 @@ function buildWhere({ dateFrom, dateTo, pointIds, weekdays }) {
   if (Array.isArray(weekdays) && weekdays.length) {
     // weekdays: 1..7 (пн..вс)
     params.push(weekdays);
-    where.push(`EXTRACT(ISODOW FROM d.begin_datetime)::int = ANY($${params.length}::int[])`);
+    where.push(
+      `EXTRACT(ISODOW FROM d.begin_datetime)::int = ANY($${params.length}::int[])`,
+    );
+  }
+
+  return { params, where };
+}
+
+function buildWhereLocalNsk({ dateFrom, dateTo, pointIds, weekdays }) {
+  const params = [];
+  const where = [];
+
+  const ts = `(d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk')`;
+
+  if (dateFrom) {
+    params.push(dateFrom);
+    where.push(`${ts}::date >= $${params.length}::date`);
+  }
+  if (dateTo) {
+    params.push(dateTo);
+    where.push(`${ts}::date <= $${params.length}::date`);
+  }
+  if (Array.isArray(pointIds) && pointIds.length) {
+    params.push(pointIds);
+    where.push(`d.trade_point_id = ANY($${params.length}::int[])`);
+  }
+  if (Array.isArray(weekdays) && weekdays.length) {
+    // weekdays: 1..7 (пн..вс)
+    params.push(weekdays);
+    where.push(
+      `EXTRACT(ISODOW FROM ${ts})::int = ANY($${params.length}::int[])`,
+    );
   }
 
   return { params, where };
@@ -169,7 +204,12 @@ async function loadProductsPage({
   sort = "to", // to | qty | vp
 }) {
   const schema = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const { params, where } = buildWhere({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
 
   const joinSql = buildJoinSql(schema);
 
@@ -177,8 +217,8 @@ async function loadProductsPage({
     sort === "qty"
       ? `ORDER BY qty DESC NULLS LAST, to_sum DESC NULLS LAST, item_name ASC`
       : sort === "vp"
-      ? `ORDER BY 1` // ВП пока нет, но оставляем каркас; сортируем по ТО как дефолт
-      : `ORDER BY to_sum DESC NULLS LAST, qty DESC NULLS LAST, item_name ASC`;
+        ? `ORDER BY 1` // ВП пока нет, но оставляем каркас; сортируем по ТО как дефолт
+        : `ORDER BY to_sum DESC NULLS LAST, qty DESC NULLS LAST, item_name ASC`;
 
   const sql = `
     SELECT
@@ -204,7 +244,12 @@ async function loadProductsPage({
 
 async function countProducts({ dateFrom, dateTo, pointIds, weekdays }) {
   const schema = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const { params, where } = buildWhere({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
   const joinSql = buildJoinSql(schema);
 
   const sql = `
@@ -229,7 +274,12 @@ async function hasAnyProducts({ dateFrom, dateTo, pointIds, weekdays }) {
 
 async function loadCashSummary({ dateFrom, dateTo, pointIds, weekdays }) {
   const schema = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const { params, where } = buildWhere({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
   const joinSql = buildJoinSql(schema);
   const docKey = buildDocKeyExpr(schema);
 
@@ -254,7 +304,12 @@ async function loadCashSummary({ dateFrom, dateTo, pointIds, weekdays }) {
 
 async function loadCashAnalysisRows({ dateFrom, dateTo, pointIds, weekdays }) {
   const schema = await detectPosSchema();
-  const { params, where } = buildWhere({ dateFrom, dateTo, pointIds, weekdays });
+  const { params, where } = buildWhere({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
   const joinSql = buildJoinSql(schema);
   const docKey = buildDocKeyExpr(schema);
 
@@ -284,6 +339,108 @@ async function loadCashAnalysisRows({ dateFrom, dateTo, pointIds, weekdays }) {
   }));
 }
 
+// ───────────────────────────────────────────────────────────────
+// Анализ "по времени" (по часам) — источник истины: POS
+// Возвращаем суммы/счётчики за период. На UI при необходимости
+// делим на totalDays выбранного периода.
+// ───────────────────────────────────────────────────────────────
+
+async function loadCashTimeByHour({ dateFrom, dateTo, pointIds, weekdays }) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhere({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
+  const joinSql = buildJoinSql(schema);
+  const docKey = buildDocKeyExpr(schema);
+
+  const sql = `
+    SELECT
+      EXTRACT(HOUR FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int AS hour,
+      COALESCE(SUM(i.pos_sum), 0)::numeric AS sales_total,
+      COUNT(DISTINCT ${docKey})::int AS checks_count
+    FROM pos_sales_items i
+    ${joinSql}
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    GROUP BY EXTRACT(HOUR FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int
+
+    ORDER BY hour ASC
+  `;
+
+  const res = await pool.query(sql, params);
+  return res.rows || [];
+}
+
+async function loadCashTimeByHourByPoint({
+  dateFrom,
+  dateTo,
+  pointIds,
+  weekdays,
+}) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhereLocalNsk({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
+  const joinSql = buildJoinSql(schema);
+  const docKey = buildDocKeyExpr(schema);
+
+  const sql = `
+    SELECT
+      EXTRACT(HOUR FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int AS hour,
+      d.trade_point_id,
+      tp.title AS trade_point_title,
+      COALESCE(SUM(i.pos_sum), 0)::numeric AS sales_total,
+      COUNT(DISTINCT ${docKey})::int AS checks_count
+    FROM pos_sales_items i
+    ${joinSql}
+    LEFT JOIN trade_points tp ON tp.id = d.trade_point_id
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    GROUP BY EXTRACT(HOUR FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int, d.trade_point_id, tp.title
+    ORDER BY hour ASC, tp.title NULLS LAST, d.trade_point_id
+  `;
+
+  const res = await pool.query(sql, params);
+  return res.rows || [];
+}
+
+
+// ───────────────────────────────────────────────────────────────
+// Анализ "по дням недели" — источник истины: POS (Novosibirsk TZ)
+// Возвращаем суммы/счётчики за период. На UI при необходимости
+// делим на totalDays выбранного периода.
+// ───────────────────────────────────────────────────────────────
+async function loadCashWeekdayAgg({ dateFrom, dateTo, pointIds, weekdays }) {
+  const schema = await detectPosSchema();
+  const { params, where } = buildWhereLocalNsk({
+    dateFrom,
+    dateTo,
+    pointIds,
+    weekdays,
+  });
+  const joinSql = buildJoinSql(schema);
+  const docKey = buildDocKeyExpr(schema);
+
+  const sql = `
+    SELECT
+      EXTRACT(ISODOW FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int AS iso_dow,
+      COALESCE(SUM(i.pos_sum), 0)::numeric AS sales_total,
+      COUNT(DISTINCT ${docKey})::int AS checks_count
+    FROM pos_sales_items i
+    ${joinSql}
+    ${where.length ? "WHERE " + where.join(" AND ") : ""}
+    GROUP BY EXTRACT(ISODOW FROM (d.begin_datetime AT TIME ZONE 'Asia/Novosibirsk'))::int
+    ORDER BY iso_dow ASC
+  `;
+
+  const res = await pool.query(sql, params);
+  return res.rows || [];
+}
+
 async function getPointsWithNoPosBinding(pointIds) {
   if (!Array.isArray(pointIds) || !pointIds.length) return [];
   const res = await pool.query(
@@ -294,7 +451,7 @@ async function getPointsWithNoPosBinding(pointIds) {
         AND (pos_retail_point_uuid IS NULL)
       ORDER BY title NULLS LAST, id
     `,
-    [pointIds]
+    [pointIds],
   );
   return res.rows || [];
 }
@@ -305,6 +462,9 @@ module.exports = {
   hasAnyProducts,
   loadCashSummary,
   loadCashAnalysisRows,
+  loadCashTimeByHour,
+  loadCashTimeByHourByPoint,
+  loadCashWeekdayAgg,
   renderProductsTable,
   getPointsWithNoPosBinding,
 };

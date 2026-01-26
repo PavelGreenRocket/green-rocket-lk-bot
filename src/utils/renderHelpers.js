@@ -30,8 +30,23 @@ async function deliver(ctx, payload, options = {}) {
         return; // ничего не делаем и НЕ шлём новое сообщение
       }
 
-      // Частые ошибки: "message can't be edited"
-      console.error("deliver: edit failed, fallback to reply", err);
+      // Частые ошибки, когда текущее сообщение НЕ текст (например фото):
+      // "Bad Request: there is no text in the message to edit"
+      // также иногда: "message can't be edited", "message to edit not found"
+      console.error("deliver: edit failed, fallback", err);
+
+      const needDeleteAndReply =
+        desc.includes("there is no text in the message to edit") ||
+        desc.includes("message can't be edited") ||
+        desc.includes("message to edit not found") ||
+        desc.includes("MESSAGE_ID_INVALID");
+
+      if (needDeleteAndReply) {
+        try {
+          await ctx.deleteMessage().catch(() => {});
+        } catch (_) {}
+      }
+
       try {
         return await ctx.reply(text, { parse_mode: "HTML", ...extra });
       } catch (err2) {
